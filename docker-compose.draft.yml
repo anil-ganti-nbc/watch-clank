@@ -1,0 +1,92 @@
+# DRAFT — architecture planning artifact only. NOT run, NOT tested.
+# See ai/handoff/CLOUD_READINESS_BLOCKERS.md and Dockerfile.draft.
+#
+# Do not `docker compose up` this file. Do not point it at the live soak
+# database (data/watch_clank.db) or live snapshot store (data/snapshots/).
+# Watch Clank stays in "continue soak, don't start Stage 2" per its own
+# HANDOFF.md (2026-08-08) — this file exists to sketch the two-service split
+# for a *future* deploy decision, not to enact one now.
+#
+# Recommended future direction (not decided here): split the one FastAPI
+# codebase into two independently-schedulable services that share state via
+# one persistent volume:
+#   1. pipeline  — one-shot job, run by an external scheduler, exits when done.
+#                  This is the app's natural fit: `scripts/run_pipeline.py
+#                  --scheduled` already behaves like a one-shot batch job
+#                  (see wrapper exit-code contract in README.md), unlike
+#                  Smartphone Clank's long-running in-process scheduler model.
+#   2. dashboard — long-running, read-only web UI (`uvicorn app.main:app`).
+#                  Entirely optional to run at all; only useful if someone
+#                  wants a browsable view of the DB. No public ports.
+
+version: "3.9"
+
+services:
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.draft
+    image: watch-clank:draft
+    command: ["python", "-m", "scripts.run_pipeline", "--scheduled"]
+    environment:
+      DATABASE_URL: "sqlite:////data/watch_clank.db"
+      SNAPSHOT_STORAGE_ROOT: "/data/snapshots"
+      LOG_DIR: "/data/logs"
+      LOG_LEVEL: "INFO"
+      LOG_FORMAT: "json"
+      COLLECTOR_USER_AGENT: "WatchClank/0.1.0 (+https://github.com/example/watch-clank; editorial-research)"
+      # SCHEDULE_INTERVAL_MINUTES is informational only for a one-shot
+      # container — actual cadence is owned by whatever external scheduler
+      # invokes `docker run`/`docker compose run` for this service. Do not
+      # add a sleep-loop or in-container scheduler; that would recreate the
+      # long-running-process pattern this split is meant to avoid.
+    volumes:
+      - watch_clank_data:/data
+    # No ports: this service does no networking beyond outbound HTTP to
+    # Casio sources, and exits after one run. Intentionally not `restart:`
+    # anything — restarts/retries are the external scheduler's job.
+    restart: "no"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.draft
+    image: watch-clank:draft
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8765"]
+    environment:
+      DATABASE_URL: "sqlite:////data/watch_clank.db"
+      SNAPSHOT_STORAGE_ROOT: "/data/snapshots"
+      LOG_DIR: "/data/logs"
+      LOG_LEVEL: "INFO"
+      LOG_FORMAT: "json"
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8765"
+      DEBUG: "false"
+    volumes:
+      - watch_clank_data:/data
+    # Read-only relative to pipeline state: this service never writes
+    # collector/parser/DB-schema data, only serves it (per app/main.py, all
+    # dashboard routes are SELECT-only). It still needs read-write mount
+    # access for SQLite's WAL/SHM sidecar files, so the volume itself is not
+    # marked read-only.
+    ports:
+      # Bind to loopback / a private interface ONLY if this is ever actually
+      # run — never expose 8765 on a public interface. "127.0.0.1:8765:8765"
+      # is safe on a single host; on a multi-host/cloud deployment this
+      # should instead be a private-network-only bind with no host port
+      # published at all (reached via an internal load balancer / VPN /
+      # SSH tunnel), never a public :8765.
+      - "127.0.0.1:8765:8765"
+    restart: "unless-stopped"
+    profiles: ["dashboard"]  # not started by a plain `docker compose up`
+
+volumes:
+  watch_clank_data:
+    # Must persist across container recreation. Covers BOTH:
+    #   - watch_clank.db (+ -wal/-shm sidecars, Alembic-versioned)
+    #   - snapshots/ (content-addressed gzip blobs, sha256-sharded) — this is
+    #     evidence/persistent state, not a cache; losing it is a data-loss
+    #     event, not just a performance hit.
+    # A bind mount to a durable host path (or cloud block/file volume) is
+    # required in any real deployment; a Docker-managed anonymous volume is
+    # not sufficient. Left unspecified in this draft.
