@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ watch.reference_canonical }} – Watch Clank{% endblock %}
+{% block content %}
+<h1>{{ watch.reference_raw }}</h1>
+<p class="muted">{{ watch.manufacturer }} · {{ watch.brand }}{% if watch.collection %} · {{ watch.collection }}{% endif %}</p>
+
+<div class="grid">
+  <div class="card"><h3>Canonical</h3><div class="value" style="font-size:1.1rem">{{ watch.reference_canonical }}</div></div>
+  <div class="card"><h3>Family Candidate</h3><div class="value" style="font-size:1rem">{{ watch.family_candidate_key or '—' }}</div></div>
+  <div class="card"><h3>Model</h3><div class="value" style="font-size:1rem">{{ watch.model_name or '—' }}</div></div>
+</div>
+
+<h2>Specs</h2>
+<table>
+  <tr><th>Solar</th><td>{{ watch.solar if watch.solar is not none else '—' }}</td></tr>
+  <tr><th>Bluetooth</th><td>{{ watch.bluetooth if watch.bluetooth is not none else '—' }}</td></tr>
+  <tr><th>Radio Sync</th><td>{{ watch.radio_sync if watch.radio_sync is not none else '—' }}</td></tr>
+  <tr><th>GPS</th><td>{{ watch.gps if watch.gps is not none else '—' }}</td></tr>
+  <tr><th>Case</th><td>{{ watch.case_material or '—' }}</td></tr>
+  <tr><th>Crystal</th><td>{{ watch.crystal or '—' }}</td></tr>
+  <tr><th>Water Resistance</th><td>{% if watch.water_resistance_m %}{{ watch.water_resistance_m }} m{% else %}—{% endif %}</td></tr>
+  <tr><th>Limited</th><td>{{ watch.limited_edition if watch.limited_edition is not none else '—' }}</td></tr>
+</table>
+
+<h2>Source Observations ({{ observations|length }})</h2>
+{% if observations %}
+<table>
+  <thead><tr><th>ID</th><th>Source</th><th>Confidence</th><th>Price</th><th>Warnings</th><th>Observed</th></tr></thead>
+  <tbody>
+  {% for o in observations %}
+    <tr>
+      <td>{{ o.id }}</td>
+      <td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">{{ o.source_url }}</td>
+      <td>{{ o.overall_confidence }} (trust {{ o.source_trust_score }})</td>
+      <td>{% if o.price %}{{ o.currency }} {{ o.price }}{% else %}—{% endif %}</td>
+      <td>{% if o.parser_warnings %}{{ o.parser_warnings|length }}{% else %}0{% endif %}</td>
+      <td class="muted">{{ o.observed_at }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No observations for this watch.</div>
+{% endif %}
+
+<h2>Ledger Timeline</h2>
+{% if ledger %}
+<ul class="timeline">
+  {% for e in ledger %}
+  <li>
+    <strong>{{ e.stage }}</strong> · {{ e.action }}
+    <div class="muted">{{ e.created_at }} · correlation {{ e.correlation_id[:8] }}…</div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<div class="empty">No ledger entries linked to this watch id.</div>
+{% endif %}
+{% endblock %}

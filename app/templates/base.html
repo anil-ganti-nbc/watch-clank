@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Watch Clank{% endblock %}</title>
+  <style>
+    :root { --bg: #0f1419; --card: #1a2332; --text: #e7ecf3; --muted: #8b9bb4; --accent: #3b82f6; --ok: #22c55e; --warn: #f59e0b; --err: #ef4444; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header { background: var(--card); padding: 1rem 1.5rem; border-bottom: 1px solid #2a3548; display: flex; gap: 1.5rem; align-items: center; }
+    header .logo { font-weight: 700; font-size: 1.25rem; }
+    nav a { margin-right: 1rem; color: var(--muted); }
+    nav a:hover { color: var(--text); }
+    main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .card { background: var(--card); border-radius: 8px; padding: 1rem 1.25rem; border: 1px solid #2a3548; }
+    .card h3 { margin: 0 0 0.25rem; font-size: 0.85rem; color: var(--muted); font-weight: 500; }
+    .card .value { font-size: 1.75rem; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid #2a3548; }
+    th { color: var(--muted); font-weight: 500; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+    .badge-ok { background: #14532d; color: #86efac; }
+    .badge-warn { background: #78350f; color: #fcd34d; }
+    .badge-err { background: #7f1d1d; color: #fca5a5; }
+    .badge-run { background: #1e3a5f; color: #93c5fd; }
+    .empty { color: var(--muted); padding: 2rem; text-align: center; }
+    .timeline { list-style: none; padding: 0; }
+    .timeline li { position: relative; padding-left: 1.5rem; margin-bottom: 1rem; }
+    .timeline li::before { content: ""; position: absolute; left: 0; top: 0.4rem; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--accent); }
+    .timeline li::after { content: ""; position: absolute; left: 0.25rem; top: 1rem; bottom: -1rem; width: 2px; background: #2a3548; }
+    .timeline li:last-child::after { display: none; }
+    h1, h2 { margin-top: 0; }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">⌚ Watch Clank</div>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/runs">Run History</a>
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

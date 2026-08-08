@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – Watch Clank{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<div class="grid">
+  <div class="card">
+    <h3>Canonical Watches</h3>
+    <div class="value">{{ total_watches }}</div>
+  </div>
+  <div class="card">
+    <h3>Source Observations</h3>
+    <div class="value">{{ total_observations }}</div>
+  </div>
+  <div class="card">
+    <h3>Release Leads</h3>
+    <div class="value">{{ total_leads }}</div>
+  </div>
+  <div class="card">
+    <h3>Latest Run</h3>
+    <div class="value" style="font-size:1.1rem">
+      {% if latest_run %}
+        <span class="badge badge-{{ 'ok' if latest_run.status == 'SUCCESS' else 'warn' if latest_run.status in ['PARTIAL','ZERO_ITEMS'] else 'err' if latest_run.status == 'FAILED' else 'run' }}">{{ latest_run.status }}</span>
+        <div class="muted" style="font-size:0.8rem;margin-top:0.25rem">{{ latest_run.collector_id }} · {{ latest_run.started_at }}</div>
+      {% else %}
+        <span class="muted">No runs yet</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+
+<h2>Operations</h2>
+{% if ops %}
+<div class="grid">
+  <div class="card">
+    <h3>Schedule interval</h3>
+    <div class="value" style="font-size:1.1rem">{{ ops.schedule_interval_minutes }} min</div>
+  </div>
+  <div class="card">
+    <h3>Active / locked</h3>
+    <div class="value" style="font-size:1.1rem">
+      {% if ops.active_run %}<span class="badge badge-run">RUNNING #{{ ops.active_run.id }}</span>
+      {% elif ops.is_locked %}<span class="badge badge-warn">LOCKED</span>
+      {% else %}<span class="badge badge-ok">idle</span>{% endif %}
+    </div>
+  </div>
+  <div class="card">
+    <h3>Next expected (derived)</h3>
+    <div class="value" style="font-size:0.9rem">{{ ops.next_expected_run or '—' }}</div>
+    <div class="muted" style="font-size:0.75rem">{{ ops.next_expected_label }}</div>
+  </div>
+  <div class="card">
+    <h3>Last 24h</h3>
+    <div class="value" style="font-size:0.95rem">
+      {{ ops.runs_24h_total }} runs
+      {% for st, n in ops.counts_24h.items() %}<br><span class="muted">{{ st }}: {{ n }}</span>{% endfor %}
+    </div>
+  </div>
+</div>
+<p class="muted">
+  Latest success: {% if ops.latest_success %}#{{ ops.latest_success.id }} {{ ops.latest_success.started_at }}{% else %}—{% endif %}
+  · Latest blocked: {% if ops.latest_blocked %}#{{ ops.latest_blocked.id }}{% else %}—{% endif %}
+  · Latest failure: {% if ops.latest_failure %}#{{ ops.latest_failure.id }} {{ ops.latest_failure.status }}{% else %}—{% endif %}
+  · <a href="/runs">Run history</a>
+</p>
+{% endif %}
+
+
+<h2>Source components</h2>
+{% if source_states %}
+<table>
+  <thead><tr><th>Source</th><th>Last status</th><th>Items</th><th>Blocks</th><th>Backoff until</th><th>Last success</th></tr></thead>
+  <tbody>
+  {% for s in source_states %}
+    <tr>
+      <td>{{ s.source_id }}</td>
+      <td>{{ s.last_status or '—' }}</td>
+      <td>{{ s.last_item_count }}</td>
+      <td>{{ s.consecutive_blocks }}</td>
+      <td class="muted">{{ s.backoff_until or '—' }}</td>
+      <td class="muted">{{ s.last_success_at or '—' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No source component state yet.</div>
+{% endif %}
+
+<h2>Release leads</h2>
+{% if recent_leads %}
+<table>
+  <thead><tr><th>ID</th><th>Title</th><th>Collection</th><th>Enrichment</th><th>Refs</th><th>Source</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for L in recent_leads %}
+    <tr>
+      <td>{{ L.id }}</td>
+      <td><a href="{{ L.announcement_url }}" target="_blank" rel="noopener">{{ L.announcement_title[:80] }}</a></td>
+      <td>{{ L.collection or '—' }}</td>
+      <td>{{ L.enrichment_status }}</td>
+      <td class="muted">{% if L.model_references %}{{ L.model_references|length }}{% else %}0{% endif %}</td>
+      <td class="muted">{{ L.source_id }}</td>
+      <td class="muted">{{ L.created_at }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No release leads yet. Accessible Casio news collectors will populate this.</div>
+{% endif %}
+
+<h2>Recent Watches</h2>
+{% if recent_watches %}
+<table>
+  <thead><tr><th>ID</th><th>Brand</th><th>Reference</th><th>Canonical</th><th>Family</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for w in recent_watches %}
+    <tr>
+      <td><a href="/watches/{{ w.id }}">{{ w.id }}</a></td>
+      <td>{{ w.brand }}</td>
+      <td>{{ w.reference_raw }}</td>
+      <td>{{ w.reference_canonical }}</td>
+      <td class="muted">{{ w.family_candidate_key or '—' }}</td>
+      <td class="muted">{{ w.created_at }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No watches in the database yet. Run the pipeline against fixtures or live sources.</div>
+{% endif %}
+
+<h2>Recent Observations</h2>
+{% if recent_observations %}
+<table>
+  <thead><tr><th>ID</th><th>Watch</th><th>Parser</th><th>Confidence</th><th>Observed</th></tr></thead>
+  <tbody>
+  {% for o in recent_observations %}
+    <tr>
+      <td>{{ o.id }}</td>
+      <td>{% if o.watch %}<a href="/watches/{{ o.watch_id }}">{{ o.watch.reference_canonical }}</a>{% else %}{{ o.watch_id }}{% endif %}</td>
+      <td>{{ o.parser_id }}@{{ o.parser_version }}</td>
+      <td>{{ o.overall_confidence }}</td>
+      <td class="muted">{{ o.observed_at }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No observations yet.</div>
+{% endif %}
+
+<h2>Recent Pipeline Ledger</h2>
+{% if recent_ledger %}
+<table>
+  <thead><tr><th>Correlation</th><th>Stage</th><th>Action</th><th>Entity</th><th>Time</th></tr></thead>
+  <tbody>
+  {% for e in recent_ledger %}
+    <tr>
+      <td><a href="/correlation/{{ e.correlation_id }}">{{ e.correlation_id[:8] }}…</a></td>
+      <td>{{ e.stage }}</td>
+      <td>{{ e.action }}</td>
+      <td>{{ e.entity_type }}{% if e.entity_id %} #{{ e.entity_id }}{% endif %}</td>
+      <td class="muted">{{ e.created_at }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Ledger is empty.</div>
+{% endif %}
+{% endblock %}

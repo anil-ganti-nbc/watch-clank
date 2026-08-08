@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Correlation {{ correlation_id[:8] }} – Watch Clank{% endblock %}
+{% block content %}
+<h1>Correlation Timeline</h1>
+<p class="muted">{{ correlation_id }}</p>
+
+<ul class="timeline">
+{% for e in entries %}
+  <li>
+    <strong>{{ e.stage }}</strong> → {{ e.action }}
+    <div class="muted">
+      {{ e.entity_type }}{% if e.entity_id %} #{{ e.entity_id }}{% endif %}
+      · {{ e.created_at }}
+      {% if e.input_ref %}<br>in: {{ e.input_ref[:80] }}{% endif %}
+      {% if e.output_ref %}<br>out: {{ e.output_ref[:80] }}{% endif %}
+    </div>
+  </li>
+{% endfor %}
+</ul>
+{% endblock %}
