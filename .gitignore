@@ -68,3 +68,6 @@ alembic/versions/*.pyc
 tmp/
 temp/
 *.tmp
+
+# Local AI-tool config, not project content
+.claude/
