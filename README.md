@@ -1,5 +1,7 @@
 # Watch Clank
 
+> Status: Experimental / under construction
+
 Editorial intelligence system for discovering new analog-watch releases.
 
 **Stage 1** focuses exclusively on the official Casio Japan source and proves the ingestion foundation.
