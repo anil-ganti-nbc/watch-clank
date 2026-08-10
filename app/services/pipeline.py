@@ -17,6 +17,7 @@ from app.collectors.base import FetchResult
 from app.collectors.casio_japan import COLLECTOR_ID, COLLECTOR_VERSION, CasioJapanCollector
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.time import ensure_utc
 from app.models import (
     CollectorRun,
     FamilyMembership,
@@ -636,7 +637,8 @@ class PipelineService:
         state = self.session.query(SourceComponentState).filter_by(source_id=source_id).one_or_none()
         if not state or not state.backoff_until:
             return False
-        return state.backoff_until > datetime.now(UTC)
+        backoff_until = ensure_utc(state.backoff_until)
+        return backoff_until > datetime.now(UTC)
 
     def process_news_announcement(
         self,

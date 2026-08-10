@@ -538,3 +538,312 @@ def test_multi_source_news_success_catalog_blocked(db_session: Session, tmp_sett
     assert run.summary_metadata["components"]["casio_japan"]["status"] == "BLOCKED"
     from app.models import ReleaseLead
     assert db_session.scalars(select(ReleaseLead)).first() is not None
+
+
+# --- Timezone / backoff regression tests -----------------------------------
+# Soak defect: SourceComponentState.backoff_until is declared DateTime(timezone=True)
+# but SQLite does not actually preserve tz offsets, so values reloaded from the
+# database come back naive. Comparing a naive persisted value directly against an
+# aware datetime.now(UTC) raised "can't compare offset-naive and offset-aware
+# datetimes" in _should_skip_backed_off, which crashed every scheduled run after
+# the first successful post-migration run (24) with a hard FAILED terminal status.
+
+
+def test_ensure_utc_normalizes_naive_and_aware():
+    from datetime import UTC, datetime, timedelta, timezone
+
+    from app.core.time import ensure_utc
+
+    assert ensure_utc(None) is None
+
+    naive = datetime(2026, 8, 8, 12, 0, 0)
+    normalized = ensure_utc(naive)
+    assert normalized.tzinfo is not None
+    assert normalized == naive.replace(tzinfo=UTC)
+
+    aware_other_tz = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone(timedelta(hours=5)))
+    normalized2 = ensure_utc(aware_other_tz)
+    assert normalized2.tzinfo is not None
+    assert normalized2 == aware_other_tz.astimezone(UTC)
+
+
+def _reload_component_state(db_session: Session, source_id: str):
+    """Force a fresh load from SQLite, mimicking a new process/session reading
+    a value written by an earlier run (which is what actually happens between
+    scheduled invocations)."""
+    from app.models import SourceComponentState
+
+    db_session.expire_all()
+    return db_session.scalars(
+        select(SourceComponentState).filter_by(source_id=source_id)
+    ).one()
+
+
+def test_should_skip_backed_off_naive_stored_value(db_session: Session, tmp_settings: Settings):
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import SourceComponentState
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    state = SourceComponentState(
+        source_id="casio_japan",
+        last_status="BLOCKED",
+        consecutive_blocks=1,
+        backoff_until=datetime.now(UTC) + timedelta(hours=3),
+    )
+    db_session.add(state)
+    db_session.commit()
+
+    reloaded = _reload_component_state(db_session, "casio_japan")
+    # SQLite round-trip strips tzinfo even for DateTime(timezone=True) columns.
+    assert reloaded.backoff_until.tzinfo is None
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    # Must not raise "can't compare offset-naive and offset-aware datetimes"
+    assert pipeline._should_skip_backed_off("casio_japan") is True
+
+
+def test_should_skip_backed_off_aware_stored_value(db_session: Session, tmp_settings: Settings):
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import SourceComponentState
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    state = SourceComponentState(
+        source_id="casio_japan",
+        last_status="BLOCKED",
+        consecutive_blocks=1,
+        backoff_until=datetime.now(UTC) + timedelta(hours=3),
+    )
+    db_session.add(state)
+    db_session.commit()
+    db_session.refresh(state)
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    assert pipeline._should_skip_backed_off("casio_japan") is True
+
+
+def test_should_skip_backed_off_expired_backoff_allows_run(db_session: Session, tmp_settings: Settings):
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import SourceComponentState
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    state = SourceComponentState(
+        source_id="casio_japan",
+        last_status="BLOCKED",
+        consecutive_blocks=3,
+        backoff_until=datetime.now(UTC) - timedelta(hours=1),
+    )
+    db_session.add(state)
+    db_session.commit()
+    _reload_component_state(db_session, "casio_japan")
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    assert pipeline._should_skip_backed_off("casio_japan") is False
+
+
+def test_should_skip_backed_off_no_state_allows_run(db_session: Session, tmp_settings: Settings):
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    assert pipeline._should_skip_backed_off("casio_japan") is False
+
+
+def test_repeated_403_increases_backoff(db_session: Session, tmp_settings: Settings):
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    pipeline._update_component_state("casio_japan", "BLOCKED", 0)
+    state = _reload_component_state(db_session, "casio_japan")
+    first_backoff = state.backoff_until
+    assert first_backoff is not None
+    assert state.consecutive_blocks == 1
+
+    pipeline._update_component_state("casio_japan", "BLOCKED", 0)
+    state = _reload_component_state(db_session, "casio_japan")
+    assert state.consecutive_blocks == 2
+    # naive-vs-aware safe comparison of the widened backoff window
+    from app.core.time import ensure_utc
+
+    assert ensure_utc(state.backoff_until) > ensure_utc(first_backoff)
+
+
+def test_success_resets_backoff(db_session: Session, tmp_settings: Settings):
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    pipeline._update_component_state("casio_japan", "BLOCKED", 0)
+    pipeline._update_component_state("casio_japan", "SUCCESS", 5)
+    state = _reload_component_state(db_session, "casio_japan")
+    assert state.backoff_until is None
+    assert state.consecutive_blocks == 0
+    assert state.last_status == "SUCCESS"
+
+
+def test_multi_source_active_backoff_skips_catalog_cleanly(db_session: Session, tmp_settings: Settings):
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from app.collectors.base import CollectorRunResult
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+    from app.collectors.casio_japan import CasioJapanCollector
+    from app.models import SourceComponentState
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    # Pre-seed an active backoff window, then force a fresh (naive) reload so
+    # the pipeline sees exactly what a real second process would see.
+    db_session.add(
+        SourceComponentState(
+            source_id="casio_japan",
+            last_status="BLOCKED",
+            consecutive_blocks=1,
+            backoff_until=datetime.now(UTC) + timedelta(hours=3),
+        )
+    )
+    db_session.commit()
+    db_session.expire_all()
+
+    def news_run(self, *, max_items=None, index_html=None):
+        r = CollectorRunResult(
+            collector_id="casio_intl_news", collector_version="0.1.0", region="INTL", trust_score=95.0
+        )
+        r.metadata["component_status"] = "SUCCESS"
+        return r
+
+    def cat_run_should_not_be_called(self, **kwargs):
+        raise AssertionError("catalog collector must not run while backed off")
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with patch.object(CasioIntlNewsCollector, "run", news_run), patch.object(
+        CasioJapanCollector, "run", cat_run_should_not_be_called
+    ):
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+
+    assert run.summary_metadata["components"]["casio_japan"]["status"] == "BACKED_OFF"
+    assert run.status != "FAILED"
+    assert run.status != "RUNNING"
+    assert run.completed_at is not None
+
+
+def test_multi_source_expired_backoff_allows_catalog_run(db_session: Session, tmp_settings: Settings):
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from app.collectors.base import CollectorRunResult
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+    from app.collectors.casio_japan import CasioJapanCollector
+    from app.models import SourceComponentState
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(
+        SourceComponentState(
+            source_id="casio_japan",
+            last_status="BLOCKED",
+            consecutive_blocks=3,
+            backoff_until=datetime.now(UTC) - timedelta(hours=1),
+        )
+    )
+    db_session.commit()
+    db_session.expire_all()
+
+    called = {"n": 0}
+
+    def news_run(self, *, max_items=None, index_html=None):
+        r = CollectorRunResult(
+            collector_id="casio_intl_news", collector_version="0.1.0", region="INTL", trust_score=95.0
+        )
+        r.metadata["component_status"] = "SUCCESS"
+        return r
+
+    def cat_run(self, *, max_items=None, known_product_urls=None, discovery_urls=None):
+        called["n"] += 1
+        r = CollectorRunResult(
+            collector_id="casio_japan", collector_version="0.2.0", region="JP", trust_score=100.0
+        )
+        r.metadata["component_status"] = "BLOCKED"
+        r.metadata["discovery_fetches"] = [{"url": "x", "status": 403, "success": False, "blocked": True}]
+        return r
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with patch.object(CasioIntlNewsCollector, "run", news_run), patch.object(CasioJapanCollector, "run", cat_run):
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+
+    assert called["n"] == 1
+    assert run.summary_metadata["components"]["casio_japan"]["status"] == "BLOCKED"
+    assert run.status == "PARTIAL"
+    assert run.completed_at is not None
+
+
+def test_news_success_catalog_backed_off_is_not_failure(db_session: Session, tmp_settings: Settings):
+    """News SUCCESS + catalog BACKED_OFF must not fail the overall run."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from app.collectors.base import CollectorRunResult
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+    from app.models import SourceComponentState
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(
+        SourceComponentState(
+            source_id="casio_japan",
+            last_status="BLOCKED",
+            consecutive_blocks=1,
+            backoff_until=datetime.now(UTC) + timedelta(hours=3),
+        )
+    )
+    db_session.commit()
+    db_session.expire_all()
+
+    def news_run(self, *, max_items=None, index_html=None):
+        r = CollectorRunResult(
+            collector_id="casio_intl_news", collector_version="0.1.0", region="INTL", trust_score=95.0
+        )
+        r.metadata["component_status"] = "SUCCESS"
+        return r
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with patch.object(CasioIntlNewsCollector, "run", news_run):
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+
+    assert run.summary_metadata["components"]["casio_intl_news"]["status"] == "SUCCESS"
+    assert run.summary_metadata["components"]["casio_japan"]["status"] == "BACKED_OFF"
+    assert run.status in ("SUCCESS", "PARTIAL")
+
+
+def test_news_deduplication_repeated_announcement_no_duplicate_lead(
+    db_session: Session, tmp_settings: Settings
+):
+    from app.collectors.base import FetchResult
+    from app.models import ReleaseLead
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    html = b"""
+    <html><body><h1>Casio Announces GA-2100 Follow-Up</h1>
+    <p>Reference GA-2100-1A1JF now available.</p></body></html>
+    """
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="test", collector_version="0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    url = "https://www.casio.com/intl/news/2026/test-dedup/"
+    fr = FetchResult(url=url, success=True, status_code=200, content_type="text/html", payload=html)
+    first = pipeline.process_news_announcement(fr, run_id=run.id)
+    second = pipeline.process_news_announcement(fr, run_id=run.id)
+
+    assert first["success"] and first["new_lead"]
+    assert second["success"] and second["new_lead"] is False
+    leads = db_session.scalars(select(ReleaseLead).where(ReleaseLead.announcement_url == url)).all()
+    assert len(leads) == 1

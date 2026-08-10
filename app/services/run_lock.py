@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
+from app.core.time import ensure_utc
 from app.models import CollectorRun
 
 logger = get_logger(__name__)
@@ -54,9 +55,7 @@ class RunLockService:
             .all()
         )
         for run in runs:
-            started = run.started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
+            started = ensure_utc(run.started_at)
             if started >= cutoff:
                 return run
         return None
@@ -74,9 +73,7 @@ class RunLockService:
             .all()
         )
         for run in runs:
-            started = run.started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
+            started = ensure_utc(run.started_at)
             if started < cutoff:
                 run.status = "FAILED"
                 run.completed_at = datetime.now(UTC)
@@ -107,9 +104,7 @@ class RunLockService:
         if not ts:
             return True
         try:
-            acquired = datetime.fromisoformat(ts)
-            if acquired.tzinfo is None:
-                acquired = acquired.replace(tzinfo=UTC)
+            acquired = ensure_utc(datetime.fromisoformat(ts))
             age = datetime.now(UTC) - acquired
             return age > timedelta(minutes=self.settings.stale_run_threshold_minutes)
         except (TypeError, ValueError):
