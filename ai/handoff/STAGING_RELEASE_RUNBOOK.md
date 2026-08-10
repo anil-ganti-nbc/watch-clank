@@ -34,8 +34,19 @@ coordination model).
    volume should not fabricate new watches/events on unchanged upstream
    content.
 7. **Locking**: this app has its own internal run-lock
-   (`app/services/run_lock.py`, already tested under real overlap in an
-   earlier phase of this migration) — no external `flock` needed.
+   (`app/services/run_lock.py`), but its stale-lock detection is
+   PID-liveness-based, which is **not reliable across separate Docker
+   containers** -- every container is PID 1 in its own namespace, so one
+   container's fresh lock looks "dead" to another and gets removed. Proven
+   with a real deliberate overlap test on Hetzner (two separate `docker
+   compose run` invocations, fired truly simultaneously, both completed as
+   full writers before this was caught). The internal lock still provides
+   value for single-process crash recovery; it is not sufficient by itself
+   for this deployment model. **An external `flock` wrapper around the
+   cron invocation is required** (same proven pattern as Chinese Tech
+   Wire) -- see `deploy_run.sh` on the host. Verified after adding it: a
+   second invocation is refused immediately (no output, container never
+   starts) while the first completes normally.
 8. **No production promotion** in the current maturity policy — this stays
    under construction / staging-soak until the user explicitly reclassifies it.
 
