@@ -62,6 +62,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     from datetime import UTC, datetime, timedelta
 
     from app.core.config import get_settings
+    from app.core.time import ensure_utc
     from app.services.run_lock import RunLockService
 
     settings = get_settings()
@@ -131,9 +132,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     # Next expected run (derived from last start + interval)
     next_expected = None
     if latest_run and latest_run.started_at:
-        started = latest_run.started_at
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=UTC)
+        started = ensure_utc(latest_run.started_at)
         next_expected = started + timedelta(minutes=settings.schedule_interval_minutes)
 
     return templates.TemplateResponse(
