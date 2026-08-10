@@ -1,12 +1,19 @@
 # Watch Clank — Cloud Readiness Blockers (Tier D: architecture prep only)
 
-**Date:** 2026-08-08
-**Branch:** `cloud/watch-prep`
+**Date:** 2026-08-08 (original); **updated 2026-08-10** — the three
+architectural blockers below (items 1, 3, 5) have now been resolved and
+implemented. See "2026-08-10 update" at the bottom of this file for the
+decisions, rationale, and evidence. Items 2 and 4 were also addressed as
+part of the same pass (identity now exists; dashboard is deliberately not
+deployed at all in this phase rather than exposed).
 
-This document lists the reasons Watch Clank stays in architecture-prep-only
-status right now, and the concrete technical items that would need to change
-before any real deploy, in addition to the reasons. It is a companion to
-`CLOUD_READINESS_CHECKLIST.md`, which covers what's already portable.
+**Branch:** `cloud/watch-prep` (original) / `feature/cloud-migration-hetzner`
+(2026-08-10 implementation)
+
+This document lists the reasons Watch Clank stayed in architecture-prep-only
+status as of 2026-08-08, and the concrete technical items that needed to
+change before any real deploy. It is a companion to
+`CLOUD_READINESS_CHECKLIST.md`, which covers what was already portable.
 
 ## Why this stays prep-only (process blockers, not technical ones)
 
@@ -98,3 +105,60 @@ scope for this pass.
   or its logs
 - `app/main.py`'s `/health` route (assessed only, not modified)
 - `.env.example` (reviewed only — already clean, no changes needed)
+
+## 2026-08-10 update — the three architectural blockers, resolved
+
+### 1. Migration-application strategy: Option B (startup check + refuse)
+
+Chosen deliberately, matching the app's own existing design intent: the
+`run_pipeline.py` exit-code contract already reserved `3` for "migration /
+database failure," just never implemented. New `app/db/schema_check.py`
+compares the database's actual Alembic version against the code's expected
+head at the start of every pipeline run and refuses (`exit 3`) on any
+mismatch — including a completely fresh, uninitialized database. It never
+applies a migration itself, never lazily creates tables, and never
+partially migrates. A separate, explicit `scripts/migrate.py` (`python -m
+scripts.migrate`) applies `alembic upgrade head` on deliberate operator/
+deploy-script invocation only — this is Option A's mechanism, paired with
+Option B's safety net, matching `Dockerfile`'s original two sketched
+options rather than choosing only one. Rejected Option C (automatic
+startup migration) — convenience only, and the exact failure mode
+("migration silently ran, or didn't, and nobody was sure which") is what
+caused the real prior outage in the first place.
+
+Tests: `tests/test_schema_check.py` — a fresh/uninitialized DB, a DB at
+head, and a direct reproduction of the real outage (DB pinned at
+`002_ops_statuses`, code expects `003_release_leads`) all assert the
+correct match/mismatch classification; a fourth test drives the actual
+`run_pipeline.py` CLI entrypoint end-to-end and asserts it exits `3`.
+
+### 2. SQLite coordination: Model C (dashboard not deployed this phase)
+
+Investigated the dashboard's actual read/write pattern rather than
+assuming: `app/main.py` has **zero write routes** — every route is a plain
+`GET`, no `session.add`/`session.commit` anywhere. Combined with WAL mode
+already being unconditionally enabled in `app/db/session.py`
+(`PRAGMA journal_mode=WAL`) and every session (pipeline and dashboard
+alike) being short-lived and request-scoped, Model A (pipeline container +
+read-only dashboard) is directly evidence-supported as safe for a future
+addition. For this initial soak deployment, the smallest safe increment is
+Model C: only the pipeline is deployed. The dashboard adds a second
+service to reason about for zero unattended-soak-correctness benefit today
+— it can be added later against the same volume without further
+coordination work, per this same evidence.
+
+### 3. Docker drafts validated through a real Linux build
+
+`Dockerfile` (promoted from `.draft`) fixes the layer-ordering issue the
+draft itself flagged (`app/` now copied before `pip install .`), adds
+Git-revision provenance (`GIT_REVISION` build arg →
+`org.opencontainers.image.revision` OCI label +
+`WATCH_CLANK_SOURCE_REVISION` env var, surfaced via new
+`app/core/identity.py`/`scripts/identity.py` — no identity/version
+contract existed before this addition), and was verified with a real
+`docker build`/`docker run` on the Hetzner host (see
+`STAGING_RELEASE_RUNBOOK.md` — created alongside this update — for the
+actual build/run/validation record). `docker-compose.staging.yml`
+(promoted from `.draft`) has two services: `watch-clank` (the default,
+one-shot pipeline) and `migrate` (gated behind a compose `profile` so it's
+never started by default).

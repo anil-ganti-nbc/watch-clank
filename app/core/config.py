@@ -75,6 +75,27 @@ class Settings(BaseSettings):
 
     @property
     def resolved_lock_path(self) -> Path:
+        """Database-adjacent lock file (matches this project's own stated
+        design intent -- see README's "database-adjacent application lock").
+
+        Found during Hetzner containerization (2026-08-10): this previously
+        hard-coded `project_root / "data"` unconditionally, ignoring any
+        DATABASE_URL override -- unlike every other resolved_* property.
+        That never surfaced on Windows because project_root and the real
+        data directory happened to coincide there, but under Docker
+        (DATABASE_URL pointing at a mounted volume outside /app) it meant
+        two separate one-shot containers each got their own private,
+        ephemeral /app/data/*.lock file and never actually coordinated --
+        proven by a real deliberate overlap test where both ran as full
+        writers simultaneously. Fixed by deriving the lock directory from
+        the resolved database path when using sqlite, so the lock always
+        lives next to the actual persistent database file.
+        """
+        db_url = self.resolved_database_url
+        if db_url.startswith("sqlite:///"):
+            db_file = Path(db_url[len("sqlite:///") :])
+            db_file.parent.mkdir(parents=True, exist_ok=True)
+            return db_file.parent / self.lock_file_name
         data = self.project_root / "data"
         data.mkdir(parents=True, exist_ok=True)
         return data / self.lock_file_name
