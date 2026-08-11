@@ -34,7 +34,7 @@ from app.normalization.references import (
     normalize_seiko_reference,
     safe_overall_confidence,
 )
-from app.parsers.casio_japan import PARSER_ID, PARSER_VERSION, parse_casio_product_html
+from app.parsers.casio_japan import PARSER_VERSION, parse_casio_product_html
 from app.services.editorial import EventEvidence, score_event
 from app.services.run_lock import RunLockService
 from app.services.snapshot_storage import SnapshotStorageService
@@ -219,8 +219,27 @@ class PipelineService:
         run_id: int,
         collector_id: str = COLLECTOR_ID,
         collector_version: str = COLLECTOR_VERSION,
+        parse_fn=None,
+        default_region: str = "JP",
+        emit_events: bool = False,
+        notify: bool = False,
+        experimental: bool = False,
     ) -> dict[str, Any]:
-        """Process one fetched item under a single transaction boundary."""
+        """Process one fetched item (product/catalogue page) under a single
+        transaction boundary.
+
+        parse_fn/default_region default to the exact original Casio-only
+        behaviour (parse_casio_product_html, region="JP"), so every
+        pre-existing caller (run_casio_pipeline, run_multi_source_pipeline's
+        catalog enrichment, fixture-mode CLI) is unaffected. Other brands
+        pass their own parser via these kwargs (see
+        run_product_observation_pipeline).
+
+        emit_events/notify mirror process_news_announcement's Sprint 2
+        pattern: default False, so the Casio production path never emits
+        Event rows or Discord alerts from this method either, unless a
+        future session explicitly opts it in after evidence review.
+        """
         correlation_id = str(uuid.uuid4())
         outcome: dict[str, Any] = {
             "correlation_id": correlation_id,
@@ -304,7 +323,8 @@ class PipelineService:
             self.session.flush()
 
             # Parse offline
-            parse_result = parse_casio_product_html(fr.payload, source_url=fr.url)
+            active_parse_fn = parse_fn or parse_casio_product_html
+            parse_result = active_parse_fn(fr.payload, source_url=fr.url)
             self._ledger(
                 correlation_id=correlation_id,
                 run_id=run_id,
@@ -313,9 +333,9 @@ class PipelineService:
                 stage="parsing",
                 action="success" if parse_result.success else "failed",
                 input_ref=snap_meta["filepath"],
-                parser_version=PARSER_VERSION,
+                parser_version=parse_result.parser_version,
                 metadata={
-                    "parser_id": PARSER_ID,
+                    "parser_id": parse_result.parser_id,
                     "error": parse_result.error,
                     "watch_count": len(parse_result.watches),
                 },
@@ -342,7 +362,7 @@ class PipelineService:
             watch, is_new = self._resolve_or_create_watch(
                 reference_raw=pw.reference_raw,
                 manufacturer=pw.manufacturer,
-                brand=pw.brand or "Casio",
+                brand=pw.brand or pw.manufacturer,
                 collection=pw.collection,
                 model_name=pw.model_name,
                 extra=extra,
@@ -350,15 +370,16 @@ class PipelineService:
                 run_id=run_id,
             )
 
+            region = default_region
             overall = safe_overall_confidence(pw.field_confidence)
             obs = SourceObservation(
                 watch_id=watch.id,
                 fetch_id=fetch.id,
                 collector_id=collector_id,
                 collector_version=collector_version,
-                parser_id=PARSER_ID,
-                parser_version=PARSER_VERSION,
-                region="JP",
+                parser_id=parse_result.parser_id,
+                parser_version=parse_result.parser_version,
+                region=region,
                 source_url=fr.url,
                 availability_status=pw.availability_status,
                 price=pw.price,
@@ -380,9 +401,19 @@ class PipelineService:
                 action="created",
                 output_ref=str(obs.id),
                 collector_version=collector_version,
-                parser_version=PARSER_VERSION,
+                parser_version=parse_result.parser_version,
                 metadata={"watch_id": watch.id, "is_new_watch": is_new, "fetch_id": fetch.id},
             )
+
+            product_event = None
+            if emit_events:
+                product_event = self._record_product_transition(
+                    watch=watch,
+                    new_obs=obs,
+                    is_new_watch=is_new,
+                    notify=notify,
+                    experimental=experimental,
+                )
 
             self.session.commit()
             outcome.update(
@@ -390,6 +421,7 @@ class PipelineService:
                     "success": True,
                     "new_watch": is_new,
                     "observation_id": obs.id,
+                    "product_event": product_event,
                     "watch_id": watch.id,
                     "fetch_id": fetch.id,
                     "blob_id": blob.id,
@@ -698,6 +730,138 @@ class PipelineService:
         if m:
             material = m.group(1).lower()
         return {"is_limited_edition": is_limited or None, "is_collaboration": is_collab or None, "unusual_material": material}
+
+    def _record_product_transition(
+        self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False, experimental: bool = False
+    ) -> dict:
+        """Classify and persist a deterministic PRICE_CHANGE/AVAILABILITY_
+        CHANGE/SOLD_OUT/RESTOCK event by comparing new_obs against the most
+        recent PRIOR observation of the same watch in the same region.
+
+        Safety, by construction rather than by a health flag we could get
+        wrong: process_fetch_result only ever reaches this call after a
+        successful fetch + successful parse + a persisted SourceObservation.
+        A failed fetch, a blocked source, or a parse failure returns early
+        (see above) and never creates a SourceObservation at all — so any
+        two SourceObservation rows this method compares are both, by
+        definition, healthy. That is what makes it safe to always pass
+        source_healthy=True to the classifier here (Sprint 3 requirement:
+        a failed fetch between two runs must never fabricate a transition).
+
+        Baseline rule: if this is the first observation of this watch in
+        this region, there is nothing to compare against — no event, silent.
+        """
+        from app.models import Event, EventWatch
+        from app.services.discord_notify import DiscordNotifier
+        from app.services.editorial import (
+            EventEvidence,
+            classify_price_availability_transition,
+            format_alert,
+            score_event,
+        )
+
+        if is_new_watch:
+            return {"event_type": None, "reason": "baseline_new_watch"}
+
+        prior = (
+            self.session.query(SourceObservation)
+            .filter(
+                SourceObservation.watch_id == watch.id,
+                SourceObservation.region == new_obs.region,
+                SourceObservation.id != new_obs.id,
+            )
+            .order_by(SourceObservation.observed_at.desc(), SourceObservation.id.desc())
+            .first()
+        )
+        if prior is None:
+            return {"event_type": None, "reason": "baseline_first_observation_in_region"}
+
+        event_type, reasons = classify_price_availability_transition(
+            prior_price=prior.price,
+            prior_currency=prior.currency,
+            prior_availability=prior.availability_status,
+            prior_region=prior.region,
+            prior_source_healthy=True,  # see docstring: only healthy obs are ever persisted
+            new_price=new_obs.price,
+            new_currency=new_obs.currency,
+            new_availability=new_obs.availability_status,
+            new_region=new_obs.region,
+            new_source_healthy=True,
+        )
+        if event_type is None:
+            return {"event_type": None, "reason": "no_transition", "detail_reasons": reasons}
+
+        price_delta_pct = None
+        if event_type == "PRICE_CHANGE" and prior.price:
+            price_delta_pct = round((new_obs.price - prior.price) / prior.price * 100, 1)
+
+        evidence = EventEvidence(
+            event_type=event_type,
+            manufacturer=watch.manufacturer,
+            brand=watch.brand,
+            collection=watch.collection,
+            region=new_obs.region,
+            is_first_party=True,
+            reference_raw=watch.reference_raw,
+            price=new_obs.price,
+            currency=new_obs.currency,
+            prior_price=prior.price,
+            prior_currency=prior.currency,
+            price_delta_pct=price_delta_pct,
+        )
+        scored = score_event(evidence)
+
+        event = Event(
+            event_type=scored.event_type,
+            title=f"{watch.manufacturer} {watch.reference_raw}: {scored.event_type}",
+            status="DRAFT",
+            story_score=scored.score,
+            confidence_score={"HIGH": 90.0, "MEDIUM": 60.0, "LOW": 30.0}[scored.confidence],
+            data_completeness_score=new_obs.overall_confidence,
+            scoring_rule_version=scored.scoring_rule_version,
+            extra={
+                "reasons": scored.reasons + reasons,
+                "confidence_label": scored.confidence,
+                "prior_observation_id": prior.id,
+                "new_observation_id": new_obs.id,
+                "region": new_obs.region,
+                "experimental": experimental,
+                "alerted": False,
+            },
+        )
+        self.session.add(event)
+        self.session.flush()
+        self.session.add(EventWatch(event_id=event.id, watch_id=watch.id, role="subject"))
+
+        logger.info(
+            "product_transition_event_recorded",
+            event_id=event.id,
+            event_type=scored.event_type,
+            watch_id=watch.id,
+            score=scored.score,
+        )
+
+        if notify:
+            settings = get_settings()
+            notifier = DiscordNotifier(settings)
+            threshold = settings.discord_experimental_min_score if experimental else 100.0
+            if notifier.editorial_enabled and scored.score >= threshold:
+                text = format_alert(
+                    manufacturer=watch.manufacturer,
+                    brand=watch.brand,
+                    reference_raw=watch.reference_raw,
+                    scored=scored,
+                    region=new_obs.region,
+                    announcement_title=f"{watch.model_name or watch.reference_raw} — {scored.event_type}",
+                    announcement_url=new_obs.source_url,
+                    observed_at=datetime.now(UTC).isoformat(),
+                    experimental=experimental,
+                )
+                sent = notifier.send_editorial_alert(text)
+                event.extra = {**event.extra, "alerted": sent}
+                self.session.commit()
+
+        return {"event_type": scored.event_type, "event_id": event.id, "score": scored.score, "confidence": scored.confidence}
 
     def _record_watch_event(
         self, *, watch: Watch, is_new_watch: bool, lead, region: str | None, notify: bool = False, experimental: bool = False
@@ -1343,6 +1507,185 @@ class PipelineService:
                 brand=brand,
                 status=run.status,
                 new_leads=new_leads,
+                events=len(events),
+            )
+            return run
+        except Exception as exc:
+            self.session.rollback()
+            run.status = "FAILED"
+            run.completed_at = datetime.now(UTC)
+            run.summary_metadata = {"fatal_error": str(exc)}
+            self.session.add(run)
+            self.session.commit()
+            raise
+        finally:
+            lock.release()
+
+    # --- Experimental multi-brand product/catalogue observation (Sprint 3) -
+    # Same isolation pattern as run_brand_news_pipeline: distinct
+    # collector_id + distinct lock file per brand, own collector_runs rows,
+    # cannot interact with the Casio lock/state in either direction.
+    _PRODUCT_REGISTRY: dict[str, dict[str, Any]] = {}
+
+    def run_product_observation_pipeline(
+        self,
+        brand: str,
+        *,
+        max_items: int | None = 10,
+        offline_fixture: object = None,
+        emit_events: bool = True,
+    ) -> CollectorRun:
+        """Run an experimental single-brand product/catalogue observation
+        pipeline. brand: "citizen" or "seiko". Casio's product path stays
+        run_casio_pipeline/run_multi_source_pipeline's catalog enrichment —
+        not duplicated here.
+
+        offline_fixture is passed through to the collector's own offline
+        kwarg (collection_html for Citizen, listing_json for Seiko) — see
+        each collector's run() signature.
+        """
+        if not self._PRODUCT_REGISTRY:
+            from app.collectors.citizen_products import (
+                COLLECTOR_ID as CITIZEN_PROD_ID,
+            )
+            from app.collectors.citizen_products import (
+                COLLECTOR_VERSION as CITIZEN_PROD_VER,
+            )
+            from app.collectors.citizen_products import (
+                REGION as CITIZEN_PROD_REGION,
+            )
+            from app.collectors.citizen_products import (
+                CitizenProductsCollector,
+            )
+            from app.collectors.seiko_products import (
+                COLLECTOR_ID as SEIKO_PROD_ID,
+            )
+            from app.collectors.seiko_products import (
+                COLLECTOR_VERSION as SEIKO_PROD_VER,
+            )
+            from app.collectors.seiko_products import (
+                REGION as SEIKO_PROD_REGION,
+            )
+            from app.collectors.seiko_products import (
+                SeikoProductsCollector,
+            )
+            from app.parsers.citizen_products import parse_citizen_product_html
+            from app.parsers.seiko_products import parse_seiko_product_json
+
+            self._PRODUCT_REGISTRY.update(
+                {
+                    "citizen": {
+                        "collector_cls": CitizenProductsCollector,
+                        "collector_id": CITIZEN_PROD_ID,
+                        "collector_version": CITIZEN_PROD_VER,
+                        "parse_fn": parse_citizen_product_html,
+                        "default_region": CITIZEN_PROD_REGION,
+                        "offline_kwarg": "collection_html",
+                    },
+                    "seiko": {
+                        "collector_cls": SeikoProductsCollector,
+                        "collector_id": SEIKO_PROD_ID,
+                        "collector_version": SEIKO_PROD_VER,
+                        "parse_fn": parse_seiko_product_json,
+                        "default_region": SEIKO_PROD_REGION,
+                        "offline_kwarg": "listing_json",
+                    },
+                }
+            )
+
+        if brand not in self._PRODUCT_REGISTRY:
+            raise ValueError(f"unsupported experimental product brand: {brand!r}")
+        cfg = self._PRODUCT_REGISTRY[brand]
+
+        settings = get_settings()
+        lock_path = settings.resolved_lock_path.parent / f"{cfg['collector_id']}.run.lock"
+        lock = RunLockService(
+            self.session, settings, collector_id=cfg["collector_id"], lock_path=lock_path
+        )
+        lock_result = lock.acquire()
+        if not lock_result.acquired:
+            started = datetime.now(UTC)
+            skip_run = CollectorRun(
+                collector_id=cfg["collector_id"],
+                collector_version=cfg["collector_version"],
+                started_at=started,
+                completed_at=started,
+                status="SKIPPED_OVERLAP",
+                summary_metadata={"reason": lock_result.reason, "active_run_id": lock_result.active_run_id},
+            )
+            self.session.add(skip_run)
+            self.session.commit()
+            return skip_run
+
+        started = datetime.now(UTC)
+        run = CollectorRun(
+            collector_id=cfg["collector_id"],
+            collector_version=cfg["collector_version"],
+            started_at=started,
+            status="RUNNING",
+        )
+        self.session.add(run)
+        self.session.commit()
+        lock.update_run_id(run.id)
+
+        try:
+            collector = cfg["collector_cls"]()
+            run_kwargs = {"max_items": max_items}
+            if offline_fixture is not None:
+                run_kwargs[cfg["offline_kwarg"]] = offline_fixture
+            result = collector.run(**run_kwargs)
+            status = result.metadata.get("component_status") or "FAILED"
+            self._update_component_state(cfg["collector_id"], status, len(result.discovered))
+
+            new_watches = parsed = failures = 0
+            events: list[dict] = []
+            for fr in result.fetched:
+                if not fr.success:
+                    failures += 1
+                    continue
+                out = self.process_fetch_result(
+                    fr,
+                    run_id=run.id,
+                    collector_id=cfg["collector_id"],
+                    collector_version=cfg["collector_version"],
+                    parse_fn=cfg["parse_fn"],
+                    default_region=cfg["default_region"],
+                    emit_events=emit_events,
+                    notify=emit_events,
+                    experimental=True,
+                )
+                if out["success"]:
+                    parsed += 1
+                    if out.get("new_watch"):
+                        new_watches += 1
+                    pe = out.get("product_event")
+                    if pe and pe.get("event_type"):
+                        events.append(pe)
+                else:
+                    failures += 1
+
+            completed = datetime.now(UTC)
+            run.completed_at = completed
+            run.status = status
+            run.discovered_count = len(result.discovered)
+            run.fetched_count = sum(1 for f in result.fetched if f.success)
+            run.parsed_count = parsed
+            run.new_watch_count = new_watches
+            run.failure_count = failures
+            run.duration_ms = int((completed - started).total_seconds() * 1000)
+            run.summary_metadata = {
+                "brand": brand,
+                "component_status": status,
+                "new_watches": new_watches,
+                "events": events,
+            }
+            self.session.commit()
+            logger.info(
+                "product_observation_pipeline_completed",
+                run_id=run.id,
+                brand=brand,
+                status=run.status,
+                new_watches=new_watches,
                 events=len(events),
             )
             return run

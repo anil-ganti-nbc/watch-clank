@@ -1371,3 +1371,329 @@ def test_product_character_extraction_is_conservative():
     result2 = extract(Dummy(), "CITIZEN PROMASTER New Wave Tracker Eco-Drive Watch")
     assert result2["is_limited_edition"] is None
     assert result2["unusual_material"] is None
+
+
+# --- Sprint 3: Citizen product/catalogue observation -----------------------
+# Fixtures citizen_product_at8294.html / citizen_product_nj0150.html are
+# trimmed-but-real captures from citizenwatch.com/us/en/product/* (live,
+# 2026-08-11). citizen_product_at8294_price_drop.html / _sold_out.html are
+# synthetic variants of the same real record, built purely to exercise the
+# transition classifier offline without depending on live price changes.
+# citizen_product_cc4107.html is a synthetic fixture reusing AT8294's real
+# schema under a different reference (CC4107-80H, the same reference from
+# Sprint 1's citizen_news_detail.html fixture) — it demonstrates identity
+# correlation deterministically, not a real captured page for that reference.
+
+
+def test_citizen_product_discovery_dedups_and_extracts_references():
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    html = (FIXTURES / "citizen_collection_attesa.html").read_text(encoding="utf-8")
+    items = CitizenProductsCollector().discover_from_collection_html(html, "https://citizenwatch.com/us/en/collection/attesa")
+    urls = [i.url for i in items]
+    assert len(urls) == 3  # 4 links, one duplicate, deduped
+    assert any(u.endswith("AT8294-59E") for u in urls)
+    assert any(u.endswith("AT8384-58E") for u in urls)
+
+
+def test_citizen_product_parser_extracts_real_captured_fields():
+    from app.parsers.citizen_products import parse_citizen_product_html
+
+    html = (FIXTURES / "citizen_product_at8294.html").read_bytes()
+    result = parse_citizen_product_html(html, source_url="https://citizenwatch.com/us/en/product/AT8294-59E")
+    assert result.success
+    w = result.watches[0]
+    assert w.reference_raw == "AT8294-59E"
+    assert w.manufacturer == "Citizen" and w.brand == "Citizen"
+    assert w.price == 1225.0
+    assert w.currency == "USD"
+    assert w.availability_status == "AVAILABLE"
+    assert w.case_material == "Super Titanium with DLC Coating"
+    assert w.caliber_or_module == "H800"
+    assert w.water_resistance_m == 100
+    assert w.collection == "Attesa Standard"
+
+
+def test_citizen_product_parser_sold_out_and_price_drop_fixtures():
+    from app.parsers.citizen_products import parse_citizen_product_html
+
+    sold_out = parse_citizen_product_html((FIXTURES / "citizen_product_at8294_sold_out.html").read_bytes(), source_url="x")
+    assert sold_out.success and sold_out.watches[0].availability_status == "SOLD_OUT"
+
+    cheaper = parse_citizen_product_html((FIXTURES / "citizen_product_at8294_price_drop.html").read_bytes(), source_url="x")
+    assert cheaper.success and cheaper.watches[0].price == 980.0
+
+
+def test_citizen_product_parser_malformed_html_fails_closed():
+    from app.parsers.citizen_products import parse_citizen_product_html
+
+    result = parse_citizen_product_html("<html><body>no product data here</body></html>", source_url="x")
+    assert result.success is False
+    assert result.error
+
+
+def _process_citizen_product_fixture(pipeline, run_id, fixture_name: str, url: str = "https://citizenwatch.com/us/en/product/AT8294-59E"):
+    from app.collectors.base import FetchResult
+    from app.parsers.citizen_products import parse_citizen_product_html
+
+    payload = (FIXTURES / fixture_name).read_bytes()
+    fr = FetchResult(url=url, success=True, status_code=200, content_type="text/html", payload=payload)
+    return pipeline.process_fetch_result(
+        fr, run_id=run_id, collector_id="citizen_products", collector_version="0.1.0",
+        parse_fn=parse_citizen_product_html, default_region="US", emit_events=True,
+    )
+
+
+def test_citizen_product_baseline_observation_creates_no_event(db_session: Session, tmp_settings: Settings):
+    """Sprint 3 example Run 1: first observation of a reference is a
+    baseline, not an event."""
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    out = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
+    assert out["success"] and out["new_watch"] is True
+    assert out["product_event"]["event_type"] is None
+
+    watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Citizen")).all()
+    assert len(watches) == 1
+    assert watches[0].reference_canonical == "AT8294-59E"  # conservative pass-through identity
+
+    obs = db_session.scalars(select(SourceObservation)).all()
+    assert len(obs) == 1
+    assert obs[0].price == 1225.0 and obs[0].currency == "USD" and obs[0].availability_status == "AVAILABLE"
+    assert obs[0].region == "US"
+
+    assert db_session.scalars(select(Event)).first() is None
+
+
+def test_citizen_product_repeat_identical_fetch_creates_no_duplicate_event(db_session: Session, tmp_settings: Settings):
+    """Acceptance criterion 4: repeated fetch of an unchanged product must
+    not create a duplicate NEW_REFERENCE-equivalent baseline event, and a
+    second identical observation with no transition creates no event."""
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    out1 = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
+    out2 = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
+    assert out1["new_watch"] is True
+    assert out2["new_watch"] is False
+    assert out1["product_event"]["event_type"] is None
+    assert out2["product_event"]["event_type"] is None  # identical price+availability -> no transition
+    assert db_session.scalars(select(Event)).first() is None
+
+
+def test_citizen_product_price_transition_produces_price_change(db_session: Session, tmp_settings: Settings):
+    """Sprint 3 example Run 2: same reference, price changed -> PRICE_CHANGE."""
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
+    out2 = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294_price_drop.html")
+    assert out2["product_event"]["event_type"] == "PRICE_CHANGE"
+
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1
+    assert events[0].event_type == "PRICE_CHANGE"
+    assert any("980" in r and "1225" in r for r in events[0].extra["reasons"])
+
+
+def test_citizen_product_availability_transitions_sold_out_then_restock(db_session: Session, tmp_settings: Settings):
+    """Sprint 3 example Run 3/4: AVAILABLE -> SOLD_OUT -> AVAILABLE (RESTOCK)."""
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")  # AVAILABLE baseline
+    sold_out = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294_sold_out.html")
+    assert sold_out["product_event"]["event_type"] == "SOLD_OUT"
+    restock = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")  # back to AVAILABLE
+    assert restock["product_event"]["event_type"] == "RESTOCK"
+
+    events = db_session.scalars(select(Event)).all()
+    assert sorted(e.event_type for e in events) == ["RESTOCK", "SOLD_OUT"]
+
+
+def test_citizen_product_failed_fetch_cannot_create_sold_out(db_session: Session, tmp_settings: Settings):
+    """Acceptance criterion 9: a collector failure between two healthy runs
+    must never fabricate an availability transition. A failed FetchResult
+    never reaches process_fetch_result's observation-creation code at all
+    (it returns early on `not fr.success`), so no SourceObservation and no
+    Event get created from it — this test proves that end-to-end."""
+    from app.collectors.base import FetchResult
+    from app.models import Event, SourceObservation
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")  # baseline AVAILABLE
+
+    failed_fr = FetchResult(url="https://citizenwatch.com/us/en/product/AT8294-59E", success=False, error="HTTP 503")
+    failed_out = pipeline.process_fetch_result(
+        failed_fr, run_id=run.id, collector_id="citizen_products", collector_version="0.1.0",
+        default_region="US", emit_events=True,
+    )
+    assert failed_out["success"] is False
+
+    # only the one baseline observation exists; the failure created none
+    assert len(db_session.scalars(select(SourceObservation)).all()) == 1
+    assert db_session.scalars(select(Event)).first() is None
+
+    # a subsequent healthy AVAILABLE fetch after the failure is still just a
+    # repeat, not a fabricated RESTOCK (there was never a real SOLD_OUT)
+    after = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
+    assert after["product_event"]["event_type"] is None
+
+
+def test_citizen_news_and_product_references_correlate_to_same_watch(db_session: Session, tmp_settings: Settings):
+    """Acceptance criterion 12: a news-discovered reference and a later
+    product-page observation of the same reference resolve to one Watch."""
+    from app.collectors.base import FetchResult
+    from app.models import Watch
+    from app.parsers.citizen_news import parse_citizen_news_html
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="test", collector_version="0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    news_html = (FIXTURES / "citizen_news_detail.html").read_bytes()  # references CC4107-80H
+    news_fr = FetchResult(url="https://www.citizenwatch-global.com/news/2026/20260610/index.html", success=True, status_code=200, content_type="text/html", payload=news_html)
+    news_out = pipeline.process_news_announcement(
+        news_fr, run_id=run.id, discovered_meta={"source_region": "GLOBAL"},
+        collector_id="citizen_news", manufacturer="Citizen", brand="Citizen",
+        parse_fn=parse_citizen_news_html, merge_key_prefix="citizen", default_region="GLOBAL",
+    )
+    assert news_out["success"] and news_out["new_watch"] is True
+
+    product_out = _process_citizen_product_fixture(
+        pipeline, run.id, "citizen_product_cc4107.html",
+        url="https://citizenwatch.com/us/en/product/CC4107-80H",
+    )
+    assert product_out["success"]
+    # the product-page fetch resolved to an EXISTING watch, not a new one —
+    # this is the correlation: same reference_canonical -> same Watch row
+    assert product_out["new_watch"] is False
+
+    watches = db_session.scalars(select(Watch).where(Watch.reference_canonical == "CC4107-80H")).all()
+    assert len(watches) == 1
+    assert watches[0].manufacturer == "Citizen"
+
+
+# --- Sprint 3: Seiko product/catalogue observation --------------------------
+# seikousa.com is operated by Seiko Watch of America LLC (confirmed via its
+# own Terms of Service, 2026-08-11) — Seiko's official US importer, not a
+# third-party retailer. Fixtures here are real, trimmed captures from its
+# public Shopify /collections/all/products.json endpoint (a standard public
+# Shopify storefront feature, not an API being reverse engineered).
+
+
+def test_seiko_product_discovery_filters_to_wrist_watches_only():
+    from app.collectors.seiko_products import SeikoProductsCollector
+
+    listing = (FIXTURES / "seiko_products_listing.json").read_bytes()
+    items = SeikoProductsCollector().discover_from_listing_json(listing)
+    # fixture has 1 strap + 5 watches; only watches should be discovered
+    assert len(items) == 5
+    assert all(i.reference_hint != "BLACKSTRAP" for i in items)
+
+
+def test_seiko_product_parser_extracts_real_captured_fields():
+    from app.parsers.seiko_products import parse_seiko_product_json
+
+    payload = (FIXTURES / "seiko_product_available.json").read_bytes()
+    result = parse_seiko_product_json(payload, source_url="https://seikousa.com/products/hab001")
+    assert result.success
+    w = result.watches[0]
+    assert w.reference_raw == "HAB001"
+    assert w.manufacturer == "Seiko" and w.brand == "Seiko"
+    assert w.price == 2700.0
+    assert w.currency == "USD"
+    assert w.availability_status == "AVAILABLE"
+
+
+def test_seiko_product_parser_sold_out_fixture():
+    from app.parsers.seiko_products import parse_seiko_product_json
+
+    payload = (FIXTURES / "seiko_product_sold_out.json").read_bytes()
+    result = parse_seiko_product_json(payload, source_url="x")
+    assert result.success
+    assert result.watches[0].availability_status == "SOLD_OUT"
+
+
+def test_seiko_product_parser_rejects_non_watch_product_type():
+    from app.parsers.seiko_products import parse_seiko_product_json
+
+    strap = {"product_type": "Straps", "title": "BLACKSTRAP", "variants": [{"sku": "BLACKSTRAP", "price": "50.00", "available": True}]}
+    result = parse_seiko_product_json(strap, source_url="x")
+    assert result.success is False
+
+
+def test_seiko_product_pipeline_baseline_then_price_change(db_session: Session, tmp_settings: Settings):
+    import json
+
+    from app.collectors.base import FetchResult
+    from app.models import Event, Watch
+    from app.parsers.seiko_products import parse_seiko_product_json
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="seiko_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    base = json.loads((FIXTURES / "seiko_product_available.json").read_bytes())
+
+    def process(product_dict):
+        fr = FetchResult(
+            url="https://seikousa.com/products/hab001", success=True, status_code=200,
+            content_type="application/json", payload=json.dumps(product_dict).encode("utf-8"),
+        )
+        return pipeline.process_fetch_result(
+            fr, run_id=run.id, collector_id="seiko_products", collector_version="0.1.0",
+            parse_fn=parse_seiko_product_json, default_region="US", emit_events=True,
+        )
+
+    out1 = process(base)
+    assert out1["new_watch"] is True and out1["product_event"]["event_type"] is None
+
+    cheaper = dict(base)
+    cheaper["variants"] = [dict(base["variants"][0], price="2400.00")]
+    out2 = process(cheaper)
+    assert out2["new_watch"] is False
+    assert out2["product_event"]["event_type"] == "PRICE_CHANGE"
+
+    watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Seiko")).all()
+    assert len(watches) == 1 and watches[0].reference_canonical == "HAB001"
+
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1 and events[0].event_type == "PRICE_CHANGE"

@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** Casio Stage 1 soak (unaffected, still running) + experimental Citizen/Seiko discovery lane (now schedulable, still not on any real schedule)
+**Current phase:** Casio Stage 1 soak (unaffected, still running) + experimental Citizen/Seiko discovery AND product/catalogue observation lanes (both real, live-validated, both schedulable, neither on any real schedule yet)
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,123 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-11 (Sprint 3) — Real Citizen + Seiko product observations flowing
+
+**Starting point verified:** HEAD was `82d1e44` as expected, clean tree,
+62/62 tests passing, Ruff clean, Alembic at head. Casio soak checked
+healthy: run 66 `PARTIAL` (normal — `casio_intl_news SUCCESS`, `casio_japan
+BLOCKED`), and the Sprint 2 run-lock fix confirmed still in effect (run 65
+correctly shows `FAILED` with `stale_recovery: true`, no leftover lock
+files).
+
+**Priority 1 — Citizen product data: found and built.**
+`citizenwatch.com` (Citizen Watch America's real D2C store, Salesforce
+Commerce Cloud/Mobify PWA Kit) is server-side rendered — the full product
+record (name, brand, price, promotional price, inventory/availability,
+case material, movement, water resistance, dial color, band material,
+crystal, intro date) is embedded as JSON directly in the static HTML of
+`/us/en/product/<reference>` pages (React Query hydration state). No API
+call, no JS execution, no anti-bot circumvention needed — this is the same
+plain `httpx` GET every other collector in this project already does.
+Discovery: a small fixed set of collection pages
+(`/us/en/collection/{attesa,tsuyosa,collabs}`) link directly to product
+URLs with the reference embedded in the path. `app/collectors/
+citizen_products.py` + `app/parsers/citizen_products.py`.
+
+**Priority 2 — wired into transition events.** `process_fetch_result`
+(previously 100% Casio-hardcoded — `parse_casio_product_html`, hardcoded
+`region="JP"`) generalized with `parse_fn`/`default_region`/`emit_events`/
+`notify`/`experimental` kwargs, all defaulting to the exact prior Casio
+values, so the production Casio catalog-enrichment path is provably
+unaffected (regression tests + the full pre-existing suite pass unchanged).
+New `PipelineService._record_product_transition`: compares a new
+`SourceObservation` against the most recent prior one for the same
+watch+region and calls `classify_price_availability_transition` (built
+dormant in Sprint 2, now live). Safety is structural, not a flag that could
+be set wrong: `process_fetch_result` only ever reaches observation
+creation after a successful fetch + successful parse, so any two
+`SourceObservation` rows it compares were, by construction, both healthy —
+a failed fetch never creates one, so it can never be compared against or
+mistaken for a transition.
+
+**Priority 3 — cross-source correlation: real, not just tested.** Sprint
+1's Citizen news fixture references `CC4107-80H` (the Attesa titanium
+limited edition). Live validation on 2026-08-11 found this exact reference
+still listed on citizenwatch.com's live Attesa collection page, at
+$2,195.00, `AVAILABLE`. Processing both the Sprint-1 news announcement and
+the live product page resolves to the same `Watch` row (`reference_
+canonical == "CC4107-80H"`, `new_watch=False` on the second), proven by
+`test_citizen_news_and_product_references_correlate_to_same_watch` and
+directly observed with real data in this session — not a coincidence
+engineered for the test, an actual discovered fact about the live catalog.
+
+**Priority 4 — Seiko: found, time-boxed correctly.** Additional
+investigation of `seikowatches.com`'s `/v3/api/` confirmed it's real
+(Azure-backed, `200 application/json`) but the exact route/payload still
+wasn't recovered from a further round of reasonable guesses — time-boxed
+and abandoned per instruction, not force-fit. Pivoted to alternative
+first-party paths per Priority 4's explicit permission: found
+`seikousa.com`. **Verified first-party before use** — its own Terms of
+Service states "This website is operated by Seiko Watch of America LLC"
+(Seiko's official US importer, the same corporate relationship Citizen
+Watch America has to citizenwatch.com), not a third-party retailer despite
+marketing copy ("Shop authentic Seiko watches") that read ambiguously at
+first glance. It runs Shopify, which by default publicly exposes
+`/collections/all/products.json` — a standard, publicly-documented Shopify
+storefront feature returning full product records including
+title/handle/vendor/product_type/tags/variants (sku/price/available) in
+one request; `product_type == "Wrist Watches"` cleanly filters out straps
+and other non-watch products. Currency (`USD`) confirmed via the store's
+own `Shopify.currency = {"active":"USD"}` page state, not assumed.
+`app/collectors/seiko_products.py` + `app/parsers/seiko_products.py`.
+
+**Tests:** 62 → **77 passed**. New: Citizen product discovery/parsing
+(real captured fixtures + synthetic price-drop/sold-out variants for
+offline transition testing), the 12 Sprint-3 Citizen acceptance criteria
+(baseline-no-event, repeat-no-duplicate-event, PRICE_CHANGE, SOLD_OUT→
+RESTOCK, failed-fetch-cannot-fabricate-SOLD_OUT, news/product identity
+correlation), Seiko product discovery/parsing/watch-type-filtering, and a
+Seiko baseline→PRICE_CHANGE pipeline test. `ruff check .`: all checks
+passed. `alembic current`: unchanged — no new migration needed (reuses
+`SourceObservation`'s existing price/currency/availability_status/region
+columns).
+
+**Live validation (real network, throwaway SQLite DBs — never touched
+`data/watch_clank.db`):**
+```
+Citizen: Run 1 (baseline) -> 8 new watches, 0 events (correct: all baseline)
+         Run 2 (repeat, same live data) -> 0 new watches, 0 events (correct: no transition)
+Seiko:   Run 1 (baseline) -> 15 new watches, 0 events
+         Run 2 (repeat) -> 0 new watches, 0 events
+```
+Both runs used isolated lock files (`citizen_products.run.lock`,
+`seiko_products.run.lock`) that were created and cleanly released — no
+leftover locks in the real `data/` directory, confirmed after each run.
+
+**Promotion status:** Citizen and Seiko product observation both pass the
+sprint's stated bar for the experimental scheduled lane (fixtures, tests,
+isolated live validation, repeated-run dedup, failure-transition
+isolation) — per this sprint's explicit instruction not to require further
+days of manual testing before experimental scheduling, they are ready to
+add to `scripts/systemd/watch-clank-experimental.*` / an equivalent Windows
+task once the owner wants real observations flowing on a schedule. Not
+added automatically this session — scheduling installation is a
+system-affecting action left for explicit confirmation.
+
+**Next action / top 5 priorities:** (1) decide whether to actually schedule
+the experimental product lanes now that they're proven; (2) if Seiko's
+`/v3/api/` is ever cracked, it would add non-US-market Seiko coverage
+seikousa.com can't (that store is US-only, English-only); (3) widen
+Citizen's discovery collection-page seed list once initial alert quality
+from the current three is reviewed; (4) consider a small correlation pass
+that proactively cross-checks existing `ReleaseLead.model_references`
+against product observations for brands/regions beyond the one live
+example found this sprint; (5) Casio's own product/catalog path
+(`app/parsers/casio_japan.py`) already has price/availability support —
+once Akamai unblocks even occasionally, wire `emit_events=True` there too
+(currently default False, unchanged) after a short review, since the
+infrastructure is now identical across all three brands.
 
 ## 2026-08-11 (Sprint 2) — Recall tuning, price/availability logic, Discord, overlap-lock bug fix, portability
 
