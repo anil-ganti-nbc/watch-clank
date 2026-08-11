@@ -9,6 +9,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -32,12 +33,30 @@ class LockResult:
 
 
 class RunLockService:
-    """Prevents concurrent Casio Japan pipeline runs."""
+    """Prevents concurrent pipeline runs for a given collector_id.
 
-    def __init__(self, session: Session, settings: Settings | None = None) -> None:
+    Defaults to COLLECTOR_ID ("casio_japan") to preserve the exact behaviour
+    of every pre-existing caller that doesn't pass collector_id explicitly.
+    run_multi_source_pipeline passes collector_id="casio_multi" so its
+    RUNNING rows are actually covered by stale-run recovery and overlap
+    detection — before this fix they used this same class but it only ever
+    looked at "casio_japan" rows, so a crashed casio_multi run could get
+    stuck RUNNING forever and would never be detected as an active run
+    either (found live in data/watch_clank.db: run 65, orphaned process).
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        settings: Settings | None = None,
+        *,
+        collector_id: str = COLLECTOR_ID,
+        lock_path: Path | None = None,
+    ) -> None:
         self.session = session
         self.settings = settings or get_settings()
-        self.lock_path = self.settings.resolved_lock_path
+        self.lock_path = lock_path or self.settings.resolved_lock_path
+        self.collector_id = collector_id
 
     def _stale_cutoff(self) -> datetime:
         return datetime.now(UTC) - timedelta(minutes=self.settings.stale_run_threshold_minutes)
@@ -48,7 +67,7 @@ class RunLockService:
         runs = (
             self.session.query(CollectorRun)
             .filter(
-                CollectorRun.collector_id == COLLECTOR_ID,
+                CollectorRun.collector_id == self.collector_id,
                 CollectorRun.status == "RUNNING",
             )
             .order_by(CollectorRun.started_at.desc())
@@ -67,7 +86,7 @@ class RunLockService:
         runs = (
             self.session.query(CollectorRun)
             .filter(
-                CollectorRun.collector_id == COLLECTOR_ID,
+                CollectorRun.collector_id == self.collector_id,
                 CollectorRun.status == "RUNNING",
             )
             .all()
@@ -151,7 +170,7 @@ class RunLockService:
         payload = {
             "pid": os.getpid(),
             "acquired_at": datetime.now(UTC).isoformat(),
-            "collector_id": COLLECTOR_ID,
+            "collector_id": self.collector_id,
         }
         try:
             self.lock_path.parent.mkdir(parents=True, exist_ok=True)

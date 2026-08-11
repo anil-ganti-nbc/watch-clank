@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8765)
     debug: bool = Field(default=False)
 
+    # Discord alert delivery (Sprint 2). Secrets come from env/.env only —
+    # never commit a webhook URL. Both default to None (disabled/no-op).
+    discord_editorial_webhook_url: str | None = Field(default=None)
+    discord_health_webhook_url: str | None = Field(default=None)
+    # Deliberately low for the experimental lane per Sprint 2: we want to see
+    # plausible opportunities during tuning, not filter them out.
+    discord_experimental_min_score: float = Field(default=0.0)
+
     @property
     def project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]

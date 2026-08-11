@@ -290,6 +290,44 @@ def test_stale_run_recovery(db_session: Session, tmp_settings: Settings):
     assert (old.summary_metadata or {}).get("stale_recovery") is True
 
 
+def test_run_lock_is_scoped_to_collector_id(db_session: Session, tmp_settings: Settings):
+    """Regression test for a live-found bug: RunLockService used to hardcode
+    collector_id="casio_japan" for its DB queries regardless of what it was
+    constructed to protect, so a stale/orphaned casio_multi (or any other
+    collector_id) RUNNING row could never be recovered and was invisible to
+    find_active_run(). Found live: collector_runs id=65 (casio_multi) stuck
+    RUNNING with a dead process after a crash, because run_multi_source_
+    pipeline's lock only ever looked at casio_japan rows."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.run_lock import RunLockService
+
+    stale_multi = CollectorRun(
+        collector_id="casio_multi", collector_version="0.2.0", status="RUNNING",
+        started_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    stale_other_brand = CollectorRun(
+        collector_id="citizen_news", collector_version="0.1.0", status="RUNNING",
+        started_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    db_session.add_all([stale_multi, stale_other_brand])
+    db_session.commit()
+
+    multi_lock = RunLockService(db_session, tmp_settings, collector_id="casio_multi")
+    recovered = multi_lock.recover_stale_runs()
+    assert stale_multi.id in recovered
+    assert stale_other_brand.id not in recovered  # different collector_id, untouched
+
+    db_session.refresh(stale_multi)
+    db_session.refresh(stale_other_brand)
+    assert stale_multi.status == "FAILED"
+    assert stale_other_brand.status == "RUNNING"  # still needs its own lock instance
+
+    citizen_lock = RunLockService(db_session, tmp_settings, collector_id="citizen_news")
+    recovered2 = citizen_lock.recover_stale_runs()
+    assert stale_other_brand.id in recovered2
+
+
 def test_blocked_status_from_403(db_session: Session, tmp_settings: Settings):
     from unittest.mock import patch
 
@@ -1145,3 +1183,191 @@ def test_format_alert_only_echoes_supplied_evidence():
     assert "NEW_REFERENCE" in text
     assert "Editorial score:" in text
     assert "Confidence:" in text
+
+
+# --- Sprint 2: price/availability transitions, recall tuning --------------
+
+
+def test_price_change_detected_same_currency_same_region():
+    from app.services.editorial import classify_price_availability_transition
+
+    event_type, reasons = classify_price_availability_transition(
+        prior_price=15400, prior_currency="JPY", prior_availability="AVAILABLE", prior_region="JP",
+        prior_source_healthy=True,
+        new_price=18700, new_currency="JPY", new_availability="AVAILABLE", new_region="JP",
+        new_source_healthy=True,
+    )
+    assert event_type == "PRICE_CHANGE"
+    assert any("15400" in r and "18700" in r for r in reasons)
+
+
+def test_price_never_compared_across_currencies():
+    from app.services.editorial import classify_price_availability_transition
+
+    event_type, reasons = classify_price_availability_transition(
+        prior_price=15400, prior_currency="JPY", prior_availability="AVAILABLE", prior_region="JP",
+        prior_source_healthy=True,
+        new_price=99, new_currency="USD", new_availability="AVAILABLE", new_region="JP",
+        new_source_healthy=True,
+    )
+    assert event_type is None
+    assert any("no conversion layer" in r for r in reasons)
+
+
+def test_sold_out_requires_healthy_before_and_after():
+    from app.services.editorial import classify_price_availability_transition
+
+    # source failure on the "after" side must NEVER produce SOLD_OUT
+    event_type, reasons = classify_price_availability_transition(
+        prior_price=100, prior_currency="USD", prior_availability="AVAILABLE", prior_region="US",
+        prior_source_healthy=True,
+        new_price=None, new_currency=None, new_availability=None, new_region="US",
+        new_source_healthy=False,
+    )
+    assert event_type is None
+    assert any("UNKNOWN" in r and "unhealthy" in r for r in reasons)
+
+
+def test_sold_out_and_restock_classified_from_healthy_pair():
+    from app.services.editorial import classify_price_availability_transition
+
+    sold_out, _ = classify_price_availability_transition(
+        prior_price=100, prior_currency="USD", prior_availability="AVAILABLE", prior_region="US",
+        prior_source_healthy=True,
+        new_price=100, new_currency="USD", new_availability="SOLD_OUT", new_region="US",
+        new_source_healthy=True,
+    )
+    assert sold_out == "SOLD_OUT"
+
+    restock, _ = classify_price_availability_transition(
+        prior_price=100, prior_currency="USD", prior_availability="SOLD_OUT", prior_region="US",
+        prior_source_healthy=True,
+        new_price=100, new_currency="USD", new_availability="AVAILABLE", new_region="US",
+        new_source_healthy=True,
+    )
+    assert restock == "RESTOCK"
+
+
+def test_different_region_pair_is_not_compared():
+    from app.services.editorial import classify_price_availability_transition
+
+    event_type, reasons = classify_price_availability_transition(
+        prior_price=100, prior_currency="USD", prior_availability="AVAILABLE", prior_region="US",
+        prior_source_healthy=True,
+        new_price=50, new_currency="USD", new_availability="SOLD_OUT", new_region="JP",
+        new_source_healthy=True,
+    )
+    assert event_type is None
+    assert any("not a valid before/after comparison" in r for r in reasons)
+
+
+def test_repeat_identical_observation_produces_no_event():
+    from app.services.editorial import classify_price_availability_transition
+
+    event_type, _ = classify_price_availability_transition(
+        prior_price=100, prior_currency="USD", prior_availability="AVAILABLE", prior_region="US",
+        prior_source_healthy=True,
+        new_price=100, new_currency="USD", new_availability="AVAILABLE", new_region="US",
+        new_source_healthy=True,
+    )
+    assert event_type is None
+
+
+def test_scoring_rewards_limited_edition_and_collaboration_and_material():
+    from app.services.editorial import EventEvidence, score_event
+
+    baseline = score_event(EventEvidence(event_type="NEW_REFERENCE", manufacturer="Citizen", brand="Citizen"))
+    enriched = score_event(
+        EventEvidence(
+            event_type="NEW_REFERENCE", manufacturer="Citizen", brand="Citizen",
+            is_limited_edition=True, limited_edition_quantity=1800,
+            is_collaboration=True, unusual_material="recrystallised titanium",
+        )
+    )
+    assert enriched.score > baseline.score
+    assert any("1800 pieces" in r for r in enriched.reasons)
+    assert any("collaboration" in r for r in enriched.reasons)
+    assert any("recrystallised titanium" in r for r in enriched.reasons)
+
+
+def test_price_change_score_scales_with_magnitude():
+    from app.services.editorial import EventEvidence, score_event
+
+    small = score_event(
+        EventEvidence(event_type="PRICE_CHANGE", manufacturer="Casio", brand="Casio", price_delta_pct=-3.0)
+    )
+    large = score_event(
+        EventEvidence(event_type="PRICE_CHANGE", manufacturer="Casio", brand="Casio", price_delta_pct=-40.0)
+    )
+    assert large.score > small.score
+
+
+def test_unknown_event_type_rejected():
+    from app.services.editorial import EventEvidence, score_event
+
+    with pytest.raises(ValueError):
+        score_event(EventEvidence(event_type="MADE_UP_EVENT", manufacturer="Casio", brand="Casio"))
+
+
+# --- Sprint 2: Discord notifier safety --------------------------------------
+
+
+def test_discord_notifier_noop_without_webhook_configured():
+    from app.core.config import Settings
+    from app.services.discord_notify import DiscordNotifier
+
+    settings = Settings(discord_editorial_webhook_url=None, discord_health_webhook_url=None)
+    notifier = DiscordNotifier(settings)
+    assert notifier.editorial_enabled is False
+    assert notifier.health_enabled is False
+    assert notifier.send_editorial_alert("test") is False
+    assert notifier.send_health_alert("test") is False
+
+
+def test_discord_notifier_never_raises_on_network_failure():
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.services.discord_notify import DiscordNotifier
+
+    settings = Settings(discord_editorial_webhook_url="https://discord.example/webhook/does-not-exist")
+    notifier = DiscordNotifier(settings)
+    with patch("httpx.post", side_effect=ConnectionError("simulated network failure")):
+        result = notifier.send_editorial_alert("test alert")
+    assert result is False  # never raises, just reports failure
+
+
+def test_discord_notifier_separates_editorial_and_health_channels():
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.services.discord_notify import DiscordNotifier
+
+    settings = Settings(
+        discord_editorial_webhook_url="https://discord.example/editorial",
+        discord_health_webhook_url="https://discord.example/health",
+    )
+    notifier = DiscordNotifier(settings)
+    calls = []
+    with patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()):
+        notifier.send_editorial_alert("editorial content")
+        notifier.send_health_alert("health content")
+    assert calls == ["https://discord.example/editorial", "https://discord.example/health"]
+
+
+def test_product_character_extraction_is_conservative():
+    from app.services.pipeline import PipelineService
+
+    # PipelineService requires a session; instantiate minimally for a pure helper call
+    extract = PipelineService.__dict__["_extract_product_character"]
+
+    class Dummy:
+        pass
+
+    result = extract(Dummy(), "CITIZEN ATTESA New Limited-Edition Recrystallised Titanium Model")
+    assert result["is_limited_edition"] is True
+    assert result["unusual_material"] == "recrystallised titanium"
+
+    result2 = extract(Dummy(), "CITIZEN PROMASTER New Wave Tracker Eco-Drive Watch")
+    assert result2["is_limited_edition"] is None
+    assert result2["unusual_material"] is None

@@ -128,6 +128,27 @@ def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
         return EXIT_FAILED
 
 
+def run_experimental_brand(brand: str, max_items: int = 10) -> int:
+    """EXPERIMENTAL lane: Citizen/Seiko news discovery. Isolated overlap
+    protection (own lock file + collector_id, see RunLockService), own
+    collector_runs rows — cannot interact with the Casio production run
+    started by run_live_or_scheduled above. Not part of --scheduled."""
+    settings = get_settings()
+    print(f"database_url={settings.resolved_database_url} brand={brand}")
+    with session_scope() as session:
+        pipeline = PipelineService(session)
+        try:
+            run = pipeline.run_brand_news_pipeline(brand, max_items=max_items)
+        except Exception as exc:
+            logger.exception("experimental_brand_run_fatal", brand=brand, error=str(exc))
+            print(f"FATAL: {exc}")
+            return EXIT_FATAL
+        print(f"[{brand}] Run id={run.id} status={run.status} summary={run.summary_metadata}")
+        if run.status in ("SUCCESS", "PARTIAL", "ZERO_ITEMS", "BLOCKED", "SKIPPED_OVERLAP"):
+            return EXIT_OK
+        return EXIT_FAILED
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Watch Clank Casio pipeline")
     parser.add_argument("--fixture-mode", action="store_true")
@@ -137,9 +158,17 @@ def main() -> None:
         action="store_true",
         help="Scheduled one-shot with lock + exit codes",
     )
+    parser.add_argument(
+        "--experimental-brand",
+        choices=["citizen", "seiko"],
+        default=None,
+        help="Run the EXPERIMENTAL Citizen/Seiko news-discovery lane instead of Casio",
+    )
     parser.add_argument("--max-items", type=int, default=10)
     args = parser.parse_args()
 
+    if args.experimental_brand:
+        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items))
     if args.fixture_mode:
         sys.exit(run_fixture_mode(args.max_items))
     if args.live or args.scheduled:

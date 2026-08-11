@@ -680,16 +680,43 @@ class PipelineService:
                 regions.add(lead.source_region)
         return frozenset(regions)
 
-    def _record_watch_event(self, *, watch: Watch, is_new_watch: bool, lead, region: str | None) -> dict:
+    def _extract_product_character(self, title: str) -> dict:
+        """Conservative keyword extraction from an announcement title only —
+        never guesses. Feeds the recall-tuning bonuses in editorial.score_event.
+        """
+        import re
+
+        t = title or ""
+        is_limited = bool(re.search(r"\blimited[\s-]edition\b", t, re.IGNORECASE))
+        is_collab = bool(re.search(r"\bcollaboration\b|\bx\s+[A-Z]", t))
+        material = None
+        m = re.search(
+            r"\b(recrystallised titanium|titanium|sapphire|ceramic|carbon(?:\s+fiber)?|gold)\b",
+            t,
+            re.IGNORECASE,
+        )
+        if m:
+            material = m.group(1).lower()
+        return {"is_limited_edition": is_limited or None, "is_collaboration": is_collab or None, "unusual_material": material}
+
+    def _record_watch_event(
+        self, *, watch: Watch, is_new_watch: bool, lead, region: str | None, notify: bool = False, experimental: bool = False
+    ) -> dict:
         """Classify and persist a deterministic Event for a resolved watch.
 
-        Only NEW_REFERENCE and NEW_REGION are implemented — these are the
-        two transitions we currently have real evidence for from a news
-        announcement (no price/spec/availability observation flows through
-        this path yet). Routine repeat-region observations create no event
-        and are stored silently, matching the "baseline is not news" rule.
+        Only NEW_REFERENCE and NEW_REGION are implemented from this call
+        site — these are the two transitions we currently have real evidence
+        for from a news announcement (PRICE_CHANGE/AVAILABILITY_CHANGE/
+        SOLD_OUT/RESTOCK exist in app.services.editorial but require a
+        healthy before/after SourceObservation pair, which only a product-
+        page/catalog collector produces — see classify_price_availability_
+        transition and its call site expectations). Routine repeat-region
+        observations create no event and are stored silently, matching the
+        "baseline is not news" rule.
         """
         from app.models import Event, EventWatch
+        from app.services.discord_notify import DiscordNotifier
+        from app.services.editorial import format_alert
 
         prior_regions = self._prior_regions_for_watch(watch.id, exclude_lead_id=lead.id)
 
@@ -700,6 +727,7 @@ class PipelineService:
         else:
             return {"event_type": None, "reason": "no_new_evidence"}
 
+        character = self._extract_product_character(lead.announcement_title or "")
         evidence = EventEvidence(
             event_type=event_type,
             manufacturer=watch.manufacturer,
@@ -709,6 +737,7 @@ class PipelineService:
             is_first_party=True,
             prior_regions=prior_regions,
             reference_raw=watch.reference_raw,
+            **character,
         )
         scored = score_event(evidence)
 
@@ -727,6 +756,8 @@ class PipelineService:
                 "announcement_url": lead.announcement_url,
                 "region": region,
                 "prior_regions": sorted(prior_regions),
+                "experimental": experimental,
+                "alerted": False,
             },
         )
         self.session.add(event)
@@ -741,6 +772,27 @@ class PipelineService:
             score=scored.score,
             confidence=scored.confidence,
         )
+
+        if notify:
+            settings = get_settings()
+            notifier = DiscordNotifier(settings)
+            threshold = settings.discord_experimental_min_score if experimental else 100.0
+            if notifier.editorial_enabled and scored.score >= threshold:
+                text = format_alert(
+                    manufacturer=watch.manufacturer,
+                    brand=watch.brand,
+                    reference_raw=watch.reference_raw,
+                    scored=scored,
+                    region=region,
+                    announcement_title=lead.announcement_title,
+                    announcement_url=lead.announcement_url,
+                    observed_at=datetime.now(UTC).isoformat(),
+                    experimental=experimental,
+                )
+                sent = notifier.send_editorial_alert(text)
+                event.extra = {**event.extra, "alerted": sent}
+                self.session.commit()
+
         return {
             "event_type": scored.event_type,
             "event_id": event.id,
@@ -762,6 +814,8 @@ class PipelineService:
         merge_key_prefix: str | None = None,
         default_region: str = "INTL",
         emit_events: bool = False,
+        notify: bool = False,
+        experimental: bool = False,
     ) -> dict:
         """Persist a news announcement as release lead (+ optional watches).
 
@@ -926,6 +980,8 @@ class PipelineService:
                         is_new_watch=is_new,
                         lead=lead,
                         region=lead.source_region,
+                        notify=notify,
+                        experimental=experimental,
                     )
                 )
         lead.watch_ids = watch_ids
@@ -959,7 +1015,7 @@ class PipelineService:
         from app.collectors.casio_japan import COLLECTOR_ID as CAT_ID
 
         settings = get_settings()
-        lock = RunLockService(self.session, settings)
+        lock = RunLockService(self.session, settings, collector_id="casio_multi")
         if not skip_lock:
             lock_result = lock.acquire()
             if not lock_result.acquired:
@@ -1121,12 +1177,10 @@ class PipelineService:
 
     # --- Experimental multi-brand news discovery (Citizen, Seiko) -----------
     # Deliberately NOT called from scripts/run_pipeline.py's --scheduled path
-    # and does NOT share RunLockService/COLLECTOR_ID="casio_japan" overlap
-    # protection with the production Casio pipeline above — it writes its own
-    # collector_runs rows under brand-specific collector_ids and cannot
-    # collide with the soaking Casio scheduled run. It has no DB-level
-    # concurrency lock of its own yet; that should be added before this ever
-    # runs on a schedule (see HANDOFF.md promotion criteria).
+    # (that stays Casio-only). Has its own overlap protection: distinct
+    # collector_id + distinct lock file per brand (see run_brand_news_pipeline
+    # below), so it cannot collide with the Casio lock in either direction and
+    # is safe to put on its own independent schedule (Sprint 2 requirement).
     _BRAND_REGISTRY: dict[str, dict[str, Any]] = {}
 
     def run_brand_news_pipeline(
@@ -1192,6 +1246,31 @@ class PipelineService:
             raise ValueError(f"unsupported experimental brand: {brand!r}")
         cfg = self._BRAND_REGISTRY[brand]
 
+        # Isolated overlap protection: distinct collector_id AND distinct
+        # lock file per brand, so this can never interact with the Casio
+        # lock (shared casio_japan.run.lock) in either direction, while
+        # still being safe to put on its own schedule (Sprint 2 requirement:
+        # an experimental scheduled lane must not be able to double-run).
+        settings = get_settings()
+        lock_path = settings.resolved_lock_path.parent / f"{cfg['collector_id']}.run.lock"
+        lock = RunLockService(
+            self.session, settings, collector_id=cfg["collector_id"], lock_path=lock_path
+        )
+        lock_result = lock.acquire()
+        if not lock_result.acquired:
+            started = datetime.now(UTC)
+            skip_run = CollectorRun(
+                collector_id=cfg["collector_id"],
+                collector_version=cfg["collector_version"],
+                started_at=started,
+                completed_at=started,
+                status="SKIPPED_OVERLAP",
+                summary_metadata={"reason": lock_result.reason, "active_run_id": lock_result.active_run_id},
+            )
+            self.session.add(skip_run)
+            self.session.commit()
+            return skip_run
+
         started = datetime.now(UTC)
         run = CollectorRun(
             collector_id=cfg["collector_id"],
@@ -1201,6 +1280,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        lock.update_run_id(run.id)
 
         try:
             collector = cfg["collector_cls"]()
@@ -1227,6 +1307,8 @@ class PipelineService:
                     merge_key_prefix=brand,
                     default_region=cfg["default_region"],
                     emit_events=emit_events,
+                    notify=emit_events,
+                    experimental=True,
                 )
                 if out["success"]:
                     parsed += 1
@@ -1272,4 +1354,6 @@ class PipelineService:
             self.session.add(run)
             self.session.commit()
             raise
+        finally:
+            lock.release()
 

@@ -1,6 +1,7 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** Casio Stage 1 soak (unaffected, still running) + experimental Citizen/Seiko discovery (new, not scheduled)
+**Current phase:** Casio Stage 1 soak (unaffected, still running) + experimental Citizen/Seiko discovery lane (now schedulable, still not on any real schedule)
+**Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
 **Repository path:** `C:\Users\anil\Desktop\Watch clank\watch-clank`
@@ -12,6 +13,141 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-11 (Sprint 2) — Recall tuning, price/availability logic, Discord, overlap-lock bug fix, portability
+
+**Starting point verified:** HEAD was `b76da6b` as expected, clean tree
+(only untracked `data/`), 48/48 tests passing, Ruff clean, Alembic at head.
+
+**Real defect found and fixed during Phase 0 verification (not something
+this sprint was looking for — found while checking soak health):**
+`collector_runs` id=65 (`casio_multi`) was stuck `RUNNING` since 07:12 UTC
+with a confirmed-dead process (pid checked via `Get-Process`, not present).
+Root cause: `RunLockService` (`app/services/run_lock.py`) hardcoded
+`collector_id == "casio_japan"` in its DB queries (`find_active_run`,
+`recover_stale_runs`) regardless of what it was protecting.
+`run_multi_source_pipeline` creates rows under `collector_id="casio_multi"`
+but reused this same class — so a crashed `casio_multi` run's RUNNING row
+could never be recovered, and would never even be detected as "active" by a
+concurrent-run check either. Fixed by adding a `collector_id` constructor
+parameter (default `"casio_japan"`, so every pre-existing caller is
+byte-identical) and passing `collector_id="casio_multi"` explicitly from
+`run_multi_source_pipeline`. Regression test added
+(`test_run_lock_is_scoped_to_collector_id`). **Manually recovered run 65
+against the real DB using the fixed code** (not hand SQL) — now `FAILED`
+with `stale_recovery: true`, stale lock file removed, and a fresh scheduled
+run (id=66) completed `PARTIAL` cleanly afterward. This also means the
+experimental brand lane (see below) is now genuinely safe to schedule — its
+lock was built with this fix already in place, isolated per-brand.
+
+**Phase 1 — seikowatches.com:** time-boxed further investigation. Confirmed
+`/v3/api/` is a live endpoint namespace served through Azure Front Door
+(ARRAffinity cookie, `x-azure-ref` header — real backend, not a static 404
+page) and returns `200 application/json` for guessed paths, but every
+guessed route/payload (`/v3/api/news`, `/News`, `/news/list`,
+`/News/GetList`, query-string and POST-body variants using the
+`Country`/`Language` config values seen in `news.js`) returned an empty
+body. The exact route/payload was not recovered in the time budgeted.
+**Not built.** Still the single highest-value next task for Seiko.
+
+**Phase 2 — product/catalogue observation:** not built this sprint. Casio's
+catalog collector/parser already supports price+availability
+(`app/parsers/casio_japan.py`), but it's Akamai-blocked. Citizen and Seiko
+have no product-page collectors yet — only news-announcement collectors,
+which rarely carry a numeric price (confirmed live: Citizen's Attesa
+announcement said "Price ... subject to change", no figure). Building
+real Citizen/Seiko catalog collectors from scratch was judged lower
+priority than fixing the scheduling bug above and shipping the
+recall-tuned scoring + safe Discord/portability work in the time available.
+**Top priority for a future session.**
+
+**Phase 3 — price/availability events:** the deterministic classifier is
+built and tested (`app/services/editorial.py::classify_price_availability_
+transition`), producing `PRICE_CHANGE` / `AVAILABILITY_CHANGE` / `SOLD_OUT`
+/ `RESTOCK` from a healthy before/after observation pair. Guards: never
+infers SOLD_OUT from a failed/unhealthy fetch on either side, never compares
+different regions, never compares different currencies (no conversion
+layer, explicitly out of scope). **Not wired to any live data source yet**
+— it has nothing to compare until Phase 2 product collectors exist. Ready
+to call the moment they do.
+
+**Phase 4 — cross-region:** `NEW_REGION` (from Sprint 1) unchanged.
+Confirmed via the existing test plus manual review that the merge-key
+dedup caveat documented in Sprint 1 still applies — realistic `NEW_REGION`
+needs more than one source per brand per region to be common.
+
+**Phase 5 — recall tuning (`app/services/editorial.py`,
+`SCORING_RULE_VERSION` 0.1.0 → 0.2.0):**
+- Confidence thresholds lowered (HIGH ≥55→≥50, MEDIUM ≥30→≥25) —
+  more genuine evidence now reaches MEDIUM/HIGH instead of LOW.
+- New scoring dimensions, all evidence-gated (never guessed): limited
+  edition (+10, +quantity if stated), named collaboration (+10), unusual
+  material (+10). Extracted conservatively from the announcement **title
+  only** via `PipelineService._extract_product_character` — e.g. "Limited-
+  Edition Recrystallised Titanium" title text, not inferred from anything
+  unstated.
+- PRICE_CHANGE now scales with magnitude (`price_delta_pct`), capped at +35.
+- `score_event` now rejects unknown `event_type` values (`ValueError`) —
+  a real safety net against a typo silently producing an unscored/garbage
+  event.
+- **Live proof this changed real output:** the same live Citizen ATTESA
+  announcement scored 60/100 in Sprint 1 and **80/100 in Sprint 2** (added
+  "+10 limited edition" and "+10 unusual material (recrystallised
+  titanium)") — same underlying evidence, better-tuned scoring.
+
+**Phase 6 — Discord (`app/services/discord_notify.py`, new):**
+`DiscordNotifier` with separate `send_editorial_alert`/`send_health_alert`,
+each reading its own webhook URL from `Settings` (env/.env only, nothing
+committed — `discord_editorial_webhook_url`, `discord_health_webhook_url`,
+both `None` by default). Every public method catches all exceptions and
+returns `False` on any failure — verified with a test that mocks
+`httpx.post` to raise `ConnectionError` and confirms no exception escapes.
+Wired into `_record_watch_event` via new `notify`/`experimental` params on
+`process_news_announcement`, used only by `run_brand_news_pipeline`
+(`notify=True, experimental=True`) — **the Casio production path never
+calls `notify=True`**, so it cannot send anything even if a webhook were
+configured. Threshold for the experimental lane is
+`DISCORD_EXPERIMENTAL_MIN_SCORE` (default 0 — alert on everything during
+tuning, per Sprint 2's explicit instruction). No real webhook is configured
+anywhere in this repo/environment, so this is built and tested but
+currently inert.
+
+**Phase 7/8 — portability:** added `scripts/run_scheduled.sh` (same
+exit-code contract, same log files as `run_scheduled.ps1`),
+`scripts/setup-linux.sh`, and `scripts/systemd/` (service/timer templates
+for both the Casio production lane and the experimental brand lane, plus a
+`README.md`). **Decision recorded per Phase 8's explicit requirement:**
+Windows and Linux/cloud use **independent SQLite databases** if run
+simultaneously — no synchronization is built or planned; see
+`scripts/systemd/README.md` for the full reasoning. The canonical runtime
+command stays `python -m scripts.run_pipeline` on both platforms
+(`--scheduled` for Casio, `--experimental-brand {citizen,seiko}` for the
+new lane) — no entrypoint was renamed.
+
+**Tests:** 48 → **62 passed**. New: run-lock collector_id scoping,
+price/availability transition classifier (6 tests covering the
+false-positive guards explicitly), recall-tuning scoring dimensions,
+unknown-event-type rejection, Discord notifier safety (no-op, never-raises,
+channel separation), product-character extraction. `ruff check .`: all
+checks passed. `alembic current`: unchanged, `003_release_leads (head)` —
+no new migration was needed (Discord config is env-only; price/availability
+reuses existing `SourceObservation` columns).
+
+**Promotion status:** still nothing new is scheduled. Citizen/Seiko are
+schedulable now (isolated lock fixed) but deliberately not yet added to any
+real scheduler — recommend a few days of manual `--experimental-brand` runs
+first to observe real event/alert volume before enabling a systemd timer or
+Windows task for them.
+
+**Next action / top 5 priorities**, in order: (1) recover the
+seikowatches.com `/v3/api/` route — likely the single highest-leverage
+remaining task; (2) build a real Citizen product-detail-page collector for
+price/availability (Citizen's news pages already link to product pages);
+(3) same for Seiko once/if the API is cracked; (4) once Phase 2 exists, wire
+`classify_price_availability_transition` into `process_fetch_result`; (5)
+after a few days of experimental-lane data, decide Citizen/Seiko systemd/
+Task Scheduler promotion using real observed alert quality, not just test
+passing.
 
 ## 2026-08-11 — Multi-brand sprint: Citizen + Seiko experimental discovery, deterministic event/scoring layer
 
