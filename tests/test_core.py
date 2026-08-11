@@ -78,7 +78,7 @@ def test_alembic_upgrade_fresh_db(tmp_path: Path):
         "alembic_version", "snapshot_blobs", "snapshot_fetches", "watches",
         "source_observations", "collector_runs", "pipeline_ledger",
         "watch_families", "family_memberships", "events", "event_watches",
-        "release_leads", "source_component_states",
+        "release_leads", "source_component_states", "specialist_leads",
     }
     assert expected.issubset(tables)
 
@@ -1856,3 +1856,203 @@ def test_seiko_pagination_dedupes_repeated_reference_across_pages():
     # second identical page contributes zero new (all refs already seen) —
     # discover_all_pages doesn't itself stop on a repeat, but dedup must hold
     assert len(items) == 3
+
+
+# --- Sprint 5: Layer B early-warning (CASIOBLOG + specialist leads) --------
+# casioblog_feed.xml is a real, live capture of casioblog.com/en/feed/
+# (2026-08-11) — genuine RSS, not synthetic.
+
+
+def test_casioblog_feed_parses_real_capture():
+    from app.parsers.casioblog import parse_casioblog_feed
+
+    xml = (FIXTURES / "casioblog_feed.xml").read_bytes()
+    result = parse_casioblog_feed(xml, max_items=20)
+    assert result.success
+    assert len(result.items) == 10
+    rumor_item = next(i for i in result.items if i.is_rumor_tagged)
+    assert "[Rumors]" in rumor_item.title or "[rumors]" in rumor_item.title.lower()
+    non_rumor = next(i for i in result.items if not i.is_rumor_tagged)
+    assert non_rumor.reference_candidates  # EFK-200 item has real refs
+    assert all(i.url.startswith("https://casioblog.com/") for i in result.items)
+    # no full article body copied — only a short excerpt
+    assert all(len(i.claim_text or "") <= 400 for i in result.items)
+
+
+def test_casioblog_feed_handles_leading_whitespace_quirk():
+    """The real feed emits a stray leading newline before the XML
+    declaration (confirmed live) — must not fail closed on that alone."""
+    from app.parsers.casioblog import parse_casioblog_feed
+
+    xml = b"\r\n" + (FIXTURES / "casioblog_feed.xml").read_bytes()
+    result = parse_casioblog_feed(xml)
+    assert result.success
+
+
+def test_casioblog_feed_malformed_xml_fails_closed():
+    from app.parsers.casioblog import parse_casioblog_feed
+
+    result = parse_casioblog_feed(b"<rss><channel><item><title>broken")
+    assert result.success is False
+    assert result.error
+
+
+def test_specialist_lead_ingest_dedupes_by_url(db_session: Session):
+    from app.services.specialist_leads import SpecialistLeadService
+
+    svc = SpecialistLeadService(db_session)
+    kwargs = {
+        "source_id": "casioblog", "lead_type": "POSSIBLE_NEW_REFERENCE", "title": "Test lead",
+        "source_url": "https://casioblog.com/en/test-lead", "published_at": "2026-06-01T00:00:00+00:00",
+        "reference_candidates": ["GA-2100"], "claim_text": "test claim", "manufacturer": "Casio",
+    }
+    first = svc.ingest_candidate(**kwargs)
+    second = svc.ingest_candidate(**kwargs)
+    assert first["created"] is True
+    assert second["created"] is False and second["reason"] == "already_seen"
+
+    from app.models import SpecialistLead
+    leads = db_session.scalars(select(SpecialistLead)).all()
+    assert len(leads) == 1
+    assert leads[0].source_type == "SPECIALIST_BLOG"  # from the registry, not guessed
+    assert leads[0].source_authority_tier == 2
+
+
+def test_specialist_lead_rejects_unregistered_source(db_session: Session):
+    from app.services.specialist_leads import SpecialistLeadService
+
+    svc = SpecialistLeadService(db_session)
+    with pytest.raises(KeyError):
+        svc.ingest_candidate(
+            source_id="totally_made_up_source", lead_type="POSSIBLE_NEW_REFERENCE", title="x",
+            source_url="https://example.com/x", published_at=None, reference_candidates=[], claim_text=None,
+        )
+
+
+def test_specialist_lead_correlates_conservatively_with_official_watch(db_session: Session):
+    """Sprint 5's example: a lead mentioning GA-XXXX-1A, later an official
+    Watch with that exact reference appears -> correlation + lead_time_days."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import SourceObservation, SpecialistLead, Watch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    svc = SpecialistLeadService(db_session)
+    lead_published = datetime(2026, 6, 1, tzinfo=UTC)
+    svc.ingest_candidate(
+        source_id="geesgshock_manual", lead_type="POSSIBLE_NEW_REFERENCE", title="Leaked GA-2100-9A",
+        source_url="https://instagram.com/p/fake123", published_at=lead_published.isoformat(),
+        reference_candidates=["GA-2100-9A"], claim_text="early photo", manufacturer="Casio",
+    )
+
+    # Official confirmation appears 4 days later
+    watch = Watch(
+        manufacturer="Casio", brand="Casio", reference_raw="GA-2100-9A", reference_canonical="GA-2100-9A",
+        created_at=lead_published + timedelta(days=4),
+    )
+    db_session.add(watch)
+    db_session.flush()
+    obs = SourceObservation(
+        watch_id=watch.id, collector_id="t", collector_version="0", parser_id="t", parser_version="0",
+        region="JP", source_url="https://casio.example/ga2100-9a",
+        observed_at=lead_published + timedelta(days=4), overall_confidence=90.0,
+    )
+    db_session.add(obs)
+    db_session.commit()
+
+    results = svc.correlate_pending_leads(manufacturer="Casio")
+    assert len(results) == 1
+    assert results[0]["watch_id"] == watch.id
+    assert results[0]["lead_time_days"] == pytest.approx(4.0, abs=0.1)
+
+    lead = db_session.scalars(select(SpecialistLead)).first()
+    assert lead.verification_status == "CORRELATED_WITH_OFFICIAL"
+    assert lead.correlated_watch_id == watch.id
+
+
+def test_specialist_lead_never_fuzzy_matches(db_session: Session):
+    """A lead mentioning a reference that only partially resembles an
+    official watch must NOT correlate — exact match only."""
+    from app.models import Watch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GA-2100-1A1JF", reference_canonical="GA-2100-1A1")
+    db_session.add(watch)
+    db_session.commit()
+
+    svc = SpecialistLeadService(db_session)
+    svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Rumored GA-2100 successor",
+        source_url="https://casioblog.com/en/rumor-ga2100-successor", published_at=None,
+        reference_candidates=["GA-2100"], claim_text=None, manufacturer="Casio",
+    )
+    results = svc.correlate_pending_leads(manufacturer="Casio")
+    assert results == []  # "GA-2100" != "GA-2100-1A1JF" or "GA-2100-1A1" — no match
+
+
+def test_casioblog_pipeline_baseline_then_repeat_creates_no_duplicates(db_session: Session, tmp_settings: Settings, monkeypatch):
+    from unittest.mock import patch
+
+    from app.core import config as config_mod
+    from app.models import CollectorRun, SpecialistLead
+    from app.services.specialist_leads import run_casioblog_pipeline
+
+    monkeypatch.setattr(config_mod, "get_settings", lambda: tmp_settings)
+    xml = (FIXTURES / "casioblog_feed.xml").read_bytes()
+
+    with patch("app.services.specialist_leads.get_settings", return_value=tmp_settings):
+        run1 = run_casioblog_pipeline(db_session, feed_xml=xml)
+        run2 = run_casioblog_pipeline(db_session, feed_xml=xml)
+
+    assert run1.status == "SUCCESS"
+    assert run1.summary_metadata["new_leads"] == 10
+    assert run2.status == "SUCCESS"
+    assert run2.summary_metadata["new_leads"] == 0  # repeat feed fetch -> no duplicates
+
+    leads = db_session.scalars(select(SpecialistLead)).all()
+    assert len(leads) == 10
+
+    runs = db_session.scalars(select(CollectorRun).where(CollectorRun.collector_id == "casioblog_rss")).all()
+    assert len(runs) == 2
+
+
+def test_casioblog_pipeline_failed_fetch_creates_no_leads(db_session: Session, tmp_settings: Settings):
+    from unittest.mock import patch
+
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_casioblog_pipeline
+
+    with patch("app.services.specialist_leads.get_settings", return_value=tmp_settings):
+        run = run_casioblog_pipeline(db_session, feed_xml=b"")  # simulates a failed/empty fetch
+
+    assert run.status in ("FAILED", "BLOCKED")
+    assert db_session.scalars(select(SpecialistLead)).first() is None
+
+
+def test_early_warning_alert_is_structurally_distinct_from_official():
+    from app.services.editorial import (
+        EventEvidence,
+        format_alert,
+        format_early_warning_alert,
+        score_event,
+    )
+
+    official_scored = score_event(EventEvidence(event_type="NEW_REFERENCE", manufacturer="Casio", brand="Casio"))
+    official_text = format_alert(
+        manufacturer="Casio", brand="Casio", reference_raw="GA-2100-1A1JF", scored=official_scored,
+        region="JP", announcement_title="Official announcement", announcement_url="https://casio.com/x",
+        observed_at="2026-08-11T00:00:00Z",
+    )
+    early_warning_text = format_early_warning_alert(
+        manufacturer="Casio", brand="G-Shock", reference_candidates=["GWR-B3000"],
+        lead_type="POSSIBLE_NEW_REFERENCE", source_display_name="CASIOBLOG", source_type="SPECIALIST_BLOG",
+        source_authority_tier=2, title="Rumored GWR-B3000", claim_text="early rumor",
+        source_url="https://casioblog.com/x", published_at="2026-08-01T00:00:00Z",
+        discovered_at="2026-08-11T00:00:00Z", confidence=55.0,
+    )
+    assert "EARLY WARNING" in early_warning_text and "UNCONFIRMED" in early_warning_text
+    assert "Requires human verification" in early_warning_text
+    assert "EARLY WARNING" not in official_text
+    assert "tier" in early_warning_text.lower()
+    # never claims official-style "Editorial score" language for a lead
+    assert "Editorial score" not in early_warning_text

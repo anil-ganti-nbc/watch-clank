@@ -186,6 +186,65 @@ def run_experimental_product(brand: str, max_items: int = 300) -> int:
         return EXIT_FAILED
 
 
+def run_experimental_specialist(source: str, max_items: int = 20) -> int:
+    """EXPERIMENTAL Layer B lane: specialist/early-warning source
+    collectors (currently: casioblog). Own lock file + collector_id, own
+    collector_runs rows, writes only to specialist_leads — never to
+    watches/source_observations/release_leads directly. See
+    app/services/specialist_leads.py."""
+    from app.services.specialist_leads import run_casioblog_pipeline
+
+    settings = get_settings()
+    print(f"database_url={settings.resolved_database_url} source={source}")
+    with session_scope() as session:
+        try:
+            if source == "casioblog":
+                run = run_casioblog_pipeline(session)
+            else:
+                print(f"FATAL: unknown specialist source {source!r}")
+                return EXIT_FATAL
+        except Exception as exc:
+            logger.exception("experimental_specialist_run_fatal", source=source, error=str(exc))
+            print(f"FATAL: {exc}")
+            return EXIT_FATAL
+        print(f"[{source}] Run id={run.id} status={run.status} summary={run.summary_metadata}")
+        if run.status in ("SUCCESS", "PARTIAL", "ZERO_ITEMS", "BLOCKED", "SKIPPED_OVERLAP"):
+            return EXIT_OK
+        return EXIT_FAILED
+
+
+def ingest_manual_lead(args: argparse.Namespace) -> int:
+    """Manual ingestion endpoint for sources that cannot be safely
+    automated (e.g. Instagram/@geesgshock — see HANDOFF.md Sprint 5:
+    automated Instagram collection was deliberately not built to avoid
+    bypassing authentication/anti-bot protections). A human pastes the
+    post URL and what it claims; this stores it exactly like a collector
+    would, with ingestion_method="manual" for traceability."""
+    from app.services.specialist_leads import SpecialistLeadService
+
+    if not args.lead_title or not args.lead_url:
+        print("FATAL: --lead-title and --lead-url are required")
+        return EXIT_FATAL
+
+    with session_scope() as session:
+        svc = SpecialistLeadService(session)
+        outcome = svc.ingest_candidate(
+            source_id=args.lead_source_id,
+            lead_type=args.lead_type,
+            title=args.lead_title,
+            source_url=args.lead_url,
+            published_at=args.lead_published_at,
+            reference_candidates=args.lead_reference,
+            claim_text=args.lead_claim,
+            manufacturer=args.lead_manufacturer,
+            confidence=args.lead_confidence,
+            ingestion_method="manual",
+        )
+        session.commit()
+        print(outcome)
+        return EXIT_OK
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Watch Clank Casio pipeline")
     parser.add_argument("--fixture-mode", action="store_true")
@@ -208,11 +267,43 @@ def main() -> None:
         help="Run the EXPERIMENTAL Citizen/Seiko product/catalogue-observation lane instead of Casio",
     )
     parser.add_argument(
+        "--experimental-specialist",
+        choices=["casioblog"],
+        default=None,
+        help="Run an EXPERIMENTAL Layer B (early-warning) specialist-source lane",
+    )
+    parser.add_argument(
+        "--ingest-manual-lead",
+        action="store_true",
+        help="Manually ingest one early-warning lead (e.g. a @geesgshock post) — see --lead-* flags",
+    )
+    parser.add_argument("--lead-source-id", default="geesgshock_manual")
+    parser.add_argument(
+        "--lead-type",
+        default="POSSIBLE_NEW_REFERENCE",
+        choices=[
+            "POSSIBLE_NEW_REFERENCE", "POSSIBLE_COLLABORATION", "POSSIBLE_NEW_REGION", "POSSIBLE_PRICE",
+            "POSSIBLE_RELEASE_DATE", "POSSIBLE_DISCONTINUATION", "POSSIBLE_LIMITED_EDITION",
+            "LEAKED_IMAGE", "EARLY_RETAIL_LISTING",
+        ],
+    )
+    parser.add_argument("--lead-title", default=None)
+    parser.add_argument("--lead-url", default=None)
+    parser.add_argument("--lead-reference", action="append", default=[])
+    parser.add_argument("--lead-claim", default=None)
+    parser.add_argument("--lead-published-at", default=None, help="ISO 8601 timestamp, if known")
+    parser.add_argument("--lead-manufacturer", default="Casio")
+    parser.add_argument("--lead-confidence", type=float, default=35.0)
+    parser.add_argument(
         "--max-items", type=int, default=None,
         help="Override per-mode default (Casio modes default 10; --experimental-product defaults 300 to cover the full discovered catalogue)",
     )
     args = parser.parse_args()
 
+    if args.ingest_manual_lead:
+        sys.exit(ingest_manual_lead(args))
+    if args.experimental_specialist:
+        sys.exit(run_experimental_specialist(args.experimental_specialist, args.max_items or 20))
     if args.experimental_brand:
         sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10))
     if args.experimental_product:

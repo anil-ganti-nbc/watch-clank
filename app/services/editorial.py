@@ -326,3 +326,50 @@ def format_alert(
     lines.append("")
     lines.append(f"Confidence: {scored.confidence}")
     return "\n".join(lines)
+
+
+def format_early_warning_alert(
+    *,
+    manufacturer: str | None,
+    brand: str | None,
+    reference_candidates: list[str],
+    lead_type: str,
+    source_display_name: str,
+    source_type: str,
+    source_authority_tier: int,
+    title: str,
+    claim_text: str | None,
+    source_url: str,
+    published_at: str | None,
+    discovered_at: str,
+    confidence: float,
+) -> str:
+    """Layer B alert block — structurally distinct from format_alert (Layer
+    A) so an early-warning lead can never be mistaken for an official
+    confirmation. Always says "UNCONFIRMED" / "Requires human verification"
+    up front; never claims a price/spec/availability fact the caller didn't
+    supply. Tier is always shown — a tier-3 social leak must never render
+    identically to a tier-2 specialist blog with a longer track record.
+    """
+    lines = [
+        f"EARLY WARNING — UNCONFIRMED (Layer B, tier {source_authority_tier})",
+        "",
+        f"{(manufacturer or 'UNKNOWN').upper()}" + (f" / {brand}" if brand and brand != manufacturer else ""),
+        f"Possible reference(s): {', '.join(reference_candidates) if reference_candidates else 'UNKNOWN'}",
+        f"Lead type: {lead_type}",
+        f"Source: {source_display_name}",
+        f"Source type: {source_type}",
+        f"Published: {published_at or 'UNKNOWN'}",
+        f"Detected: {discovered_at}",
+        "",
+        "Claim:",
+        claim_text or title,
+        "",
+        "Evidence:",
+        source_url,
+        "",
+        f"Confidence: {confidence:.0f}/100",
+        "",
+        "Requires human verification before any editorial use.",
+    ]
+    return "\n".join(lines)

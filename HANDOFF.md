@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** Casio Stage 1 soak (unaffected, still running) + FOUR experimental lanes (citizen_news, seiko_jp_news, citizen_products, seiko_products) approved for scheduling, wrapper/systemd templates in place, all four run successfully against the real production DB with real broad-catalogue data (311 Citizen watches, 225 Seiko watches at last run)
+**Current phase:** Casio soak healthy + FIVE Windows-scheduled tasks total (Casio + 4 experimental, all Ready/Enabled, verified live) + Layer B early-warning system started (CASIOBLOG live, manual ingestion for Instagram sources). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,146 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-11 (Sprint 5) — Shipped official hunter + started Layer B early-warning
+
+**Starting point verified:** HEAD was `c9b39b8` as expected, clean tree,
+85/85 tests passing, Ruff clean, Casio soak healthy.
+
+**Phase 1 — push, but with a real merge first.** `git push` was rejected —
+origin/main had diverged: a separate branch/session
+(`feature/cloud-migration-hetzner`) had already been merged via PR #2/#3,
+adding real, validated Hetzner deployment infrastructure (schema-mismatch
+refusal at startup, a `resolved_lock_path` bug fix found via a genuine
+Docker overlap test, Docker build, staging runbook). Investigated before
+touching anything — no destructive action taken. Merged cleanly (`git merge
+origin/main`, no conflicts; the one overlapping file, `scripts/run_pipeline.py`,
+touched different functions on each side). Fixed 3 pre-existing Ruff import-
+order issues in the merged branch, verified `--scheduled` still works with
+the new schema-check gate, then pushed. **Remote HEAD independently
+verified via `git ls-remote`** to match local exactly.
+
+**Phase 2 — Windows scheduling activated for real.** New
+`scripts/install_windows_experimental_tasks.ps1` (+ `run_scheduled_
+experimental.ps1` from Sprint 4) registered `WatchClank-{CitizenNews,
+SeikoNews,CitizenProducts,SeikoProducts}` alongside the existing
+`WatchClank-CasioJapan`. All five confirmed `Ready`/`Enabled`; a real
+triggered run of citizen-news produced a genuine new `collector_runs` row.
+**Confirmed still running unattended later in this same session** — runs
+78/79 (citizen_products, seiko_products) fired automatically via Task
+Scheduler while other work was in progress, with zero manual intervention.
+
+**Phase 3 — cloud: honest limitation, not built.** The merged Hetzner work
+means deployment infrastructure (Dockerfile, docker-compose.staging.yml,
+migrate-then-run procedure, the PID-namespace lock finding requiring an
+external `flock` wrapper) already exists and was validated in a separate
+session. This session has **no SSH/host access** to the actual Hetzner
+instance — `deploy_run.sh` lives on the host, not in this repo. Cloud
+deployment could not be literally performed here. Not fabricated as done.
+
+**Phase 4-10 — specialist source research.** See new
+`ai/handoff/SPECIALIST_SOURCE_RESEARCH.md` for the full table and evidence
+trail. Highlights: CASIOBLOG has a real, working RSS feed
+(`casioblog.com/en/feed/`) and is independently confirmed as a real
+historical Notebookcheck citation (Anubhav Sharma, MRG-B5000SA-2 leak).
+@geesgshock (Instagram) is the single most-cited specialist source found
+in this research (multiple real NBC articles, sole-cited source in at
+least one) but cannot be safely automated — no public API/RSS, and
+automating it would mean crossing exactly the authentication/anti-bot
+boundary this project has consistently refused (same reasoning as never
+attacking Casio's Akamai protection). NEEL (neel.co.jp) confirmed real —
+a legitimate Japanese authorized multi-brand retailer (Casio/Seiko/Citizen/
+Grand Seiko) — but no direct historical NBC citation was found for it in
+this sprint's search sample; documented, not implemented. Oracle Time
+(oracleoftime.com) confirmed real but is a broad general-watch magazine
+with no G-Shock/Casio leak evidence found — deprioritized. Great G-Shock
+World and @morgan_gshock were found as *additional* real sources via
+direct inspection of NBC articles' own "Source(s)" sections (not guessed) —
+Great G-Shock World is a strong candidate for the next specialist collector
+(same profile as CASIOBLOG: real blog, confirmed NBC citations, no
+automation blocker).
+
+**Phase 11-13 — early-warning data model.** New `specialist_leads` table
+(migration `004_specialist_leads`), deliberately **separate** from
+`release_leads` (Layer A/official) — see `app/models/specialist_lead.py`'s
+docstring for why reusing the official table would risk exactly what this
+sprint forbids (a leak becoming indistinguishable from a press release).
+Fields cover source type/tier/URL, publication vs. discovery timestamps,
+reference candidates, claim text, confidence, and correlation fields
+(`correlated_watch_id`, `official_first_observed_at`, `lead_time_days`) —
+enough to support future source-performance analytics (Phase 13) without
+building any now. `app/services/source_registry.py` is a plain Python dict
+mapping source_id -> (type, tier) — deliberately not a DB table yet, and
+raises loudly on an unregistered source_id rather than defaulting a tier.
+
+**Correlation is real and conservative, proven both ways:**
+`SpecialistLeadService.correlate_pending_leads()` only matches an exact
+(case-insensitive) reference string against `Watch.reference_raw`/
+`reference_canonical` — no fuzzy matching. Tested and **live-verified
+against the real production DB**: CASIOBLOG's real "GWR-B3000" rumor lead
+did NOT correlate with the real official `GWR-B3000-1A`/`-A2`/`-B8` watches
+already in the DB, because "GWR-B3000" (family-level, what the blog title
+says) is not byte-equal to "GWR-B3000-1A" (full official reference). This
+is the conservative design working exactly as intended, not a bug — and
+it's an honest, documented limitation (family-prefix vs. full-suffix
+matching would need real evidence before loosening, same bar every other
+normalization decision in this project has had to clear).
+
+**Implementation:** `app/collectors/casioblog.py` + `app/parsers/casioblog.py`
+(RSS, real `<10s` fetch, no anti-bot concerns) + `app/services/
+specialist_leads.py` (ingestion, correlation, `run_casioblog_pipeline`
+with the same isolated-lock pattern as every Sprint 3/4 experimental lane).
+Manual ingestion: `scripts/run_pipeline.py --ingest-manual-lead --lead-*`
+for sources that cannot be automated (built specifically for
+@geesgshock-style leads per the sprint's explicit fallback requirement).
+New `format_early_warning_alert()` in `app/services/editorial.py`,
+structurally distinct from the official `format_alert()` — always leads
+with "EARLY WARNING — UNCONFIRMED", always shows tier/source type, never
+uses "Editorial score" language.
+
+**A real, live parser bug was found and fixed via testing before any live
+run**: the real CASIOBLOG feed has a stray leading `\r\n` before its XML
+declaration (confirmed live, not a fixture artifact) that Python's
+`ElementTree` rejects per spec strictness even though it's harmless and
+every real feed reader tolerates it. Fixed by stripping leading whitespace
+before parsing.
+
+**Tests:** 85 → **105 passed** (+1 schema-check test updated for the new
+migration head, not a regression — see below). `ruff check .`: all checks
+passed. `alembic current`: now `004_specialist_leads (head)`.
+
+**Live validation (real network):**
+```
+CASIOBLOG: Run 1 -> 10 new leads (real, current rumors/announcements).
+           Run 2 (repeat) -> 0 new leads (dedup confirmed with live data).
+           Correlation pass against the real production DB -> 0 matches
+           (honest — see the GWR-B3000 example above).
+```
+Also ran a real triggered run of `WatchClank-CitizenNews` via the new
+Windows installer, and independently observed Windows firing
+`citizen_products`/`seiko_products` on its own schedule later in the same
+session — genuine unattended-scheduling evidence, not just installer
+success.
+
+**Discord:** still no webhook found in this environment (`.env` does not
+exist, `discord_editorial_webhook_url`/`discord_health_webhook_url` both
+unset). Not invented. `format_early_warning_alert()` is ready the moment
+one is configured — no further code change needed to wire it in.
+
+**Next action / top 5 priorities:** (1) implement Great G-Shock World as
+the second specialist collector — same low-risk profile as CASIOBLOG,
+already confirmed as a real NBC-cited source; (2) investigate whether
+family-prefix-to-full-reference correlation can be done safely (e.g. only
+when the family prefix uniquely identifies one Watch row) — would fix the
+GWR-B3000-style non-correlation seen live this sprint; (3) get actual SSH/
+host access to the Hetzner instance (or have the owner run the existing,
+already-validated `STAGING_RELEASE_RUNBOOK.md` procedure directly) to
+complete Phase 3; (4) investigate NEEL's own site structure the way Sprint
+3/4 did for citizenwatch.com/seikousa.com, to determine if it's safely
+collectible as RETAILER_EARLY_LISTING; (5) once a couple of specialist
+sources have run for real days, review whether any produced a lead that
+later actually correlated with an official watch, to start validating the
+lead-time metric with real (not just synthetic-test) data.
 
 ## 2026-08-11 (Sprint 4) — Turned it on: scheduling + broad catalogue coverage
 

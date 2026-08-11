@@ -1,0 +1,125 @@
+"""Layer B: early-warning leads from specialist/non-official sources.
+
+Deliberately a SEPARATE table from ReleaseLead (Layer A / official).
+ReleaseLead is shaped around official manufacturer announcements
+(manufacturer defaults "Casio", enrichment_status vocabulary is about
+official enrichment) — reusing it for third-party rumors/leaks would risk
+exactly what this sprint explicitly forbids: a specialist lead becoming
+indistinguishable from official evidence. This table's rows are never
+promoted into ReleaseLead/Watch/SourceObservation automatically; they are
+only ever *correlated* with an official Watch once one independently
+appears (see correlated_watch_id), preserving the distinction and letting
+lead-time be measured.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import JSON
+
+from app.models.base import Base
+
+# Source type vocabulary (Phase "SOURCE TYPES" in the sprint brief).
+SOURCE_TYPES = frozenset(
+    {
+        "SPECIALIST_PUBLICATION",
+        "SPECIALIST_BLOG",
+        "RETAILER_EARLY_LISTING",
+        "SOCIAL_LEAKER",
+        "COMMUNITY_SIGNAL",
+    }
+)
+
+# Lead type vocabulary (Phase 11). These are LEADS, never official
+# product-state transitions.
+LEAD_TYPES = frozenset(
+    {
+        "POSSIBLE_NEW_REFERENCE",
+        "POSSIBLE_COLLABORATION",
+        "POSSIBLE_NEW_REGION",
+        "POSSIBLE_PRICE",
+        "POSSIBLE_RELEASE_DATE",
+        "POSSIBLE_DISCONTINUATION",
+        "POSSIBLE_LIMITED_EDITION",
+        "LEAKED_IMAGE",
+        "EARLY_RETAIL_LISTING",
+    }
+)
+
+VERIFICATION_STATUSES = frozenset({"UNCONFIRMED", "CORRELATED_WITH_OFFICIAL", "REJECTED"})
+
+
+class SpecialistLead(Base):
+    """One discovered piece of early-warning evidence from a non-official
+    source. Never authoritative on its own — see module docstring."""
+
+    __tablename__ = "specialist_leads"
+    __table_args__ = (
+        CheckConstraint(
+            "source_type IN ('SPECIALIST_PUBLICATION','SPECIALIST_BLOG',"
+            "'RETAILER_EARLY_LISTING','SOCIAL_LEAKER','COMMUNITY_SIGNAL')",
+            name="ck_specialist_lead_source_type",
+        ),
+        CheckConstraint(
+            "source_authority_tier >= 1 AND source_authority_tier <= 4",
+            name="ck_specialist_lead_tier_range",
+        ),
+        CheckConstraint(
+            "verification_status IN ('UNCONFIRMED','CORRELATED_WITH_OFFICIAL','REJECTED')",
+            name="ck_specialist_lead_verification_status",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 100",
+            name="ck_specialist_lead_confidence_range",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    # 1=official (not used here, reserved), 2=highly reliable specialist/
+    # retailer with demonstrated history, 3=credible specialist/social
+    # requiring verification, 4=community signal/unverified. See
+    # app/services/source_registry.py for the source_id -> tier mapping.
+    source_authority_tier: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    account_or_domain: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+    lead_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    manufacturer: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    brand: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reference_candidates: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    claim_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True)
+
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    discovered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=30.0)
+    verification_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNCONFIRMED")
+
+    # Correlation with Layer A (official). Set only by deterministic exact
+    # reference-string matching against an existing Watch — never fuzzy.
+    correlated_watch_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("watches.id", ondelete="SET NULL"), nullable=True
+    )
+    correlated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    official_first_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lead_time_days: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    ingestion_method: Mapped[str] = mapped_column(String(16), nullable=False, default="collector")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
