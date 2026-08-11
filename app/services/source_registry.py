@@ -71,6 +71,22 @@ SOURCE_REGISTRY: dict[str, SourceProfile] = {
         account_or_domain="oracleoftime.com",
         display_name="Oracle Time",
     ),
+    # Sprint 7 additions -- see HANDOFF.md's Sprint 7 checkpoint for the
+    # research behind each.
+    "g_central": SourceProfile(
+        source_id="g_central",
+        source_type="SPECIALIST_BLOG",
+        tier=2,
+        account_or_domain="g-central.com",
+        display_name="G-Central",
+    ),
+    "plus9time": SourceProfile(
+        source_id="plus9time",
+        source_type="SPECIALIST_PUBLICATION",
+        tier=2,
+        account_or_domain="plus9time.com",
+        display_name="Plus9Time",
+    ),
 }
 
 

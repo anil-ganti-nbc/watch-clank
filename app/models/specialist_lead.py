@@ -17,7 +17,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -134,6 +144,14 @@ class SpecialistLead(Base):
     # Discord dedup (Sprint 6 Phase 4): set once an alert is actually sent so
     # a repeat pipeline run never re-notifies for the same lead.
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Sprint 7 epoch/baseline tracking -- see app/models/epoch.py. A lead
+    # discovered during Epoch 1's baseline is real data (correlation/
+    # lead-time math should still work on it later) but must never alert.
+    epoch_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("operational_epochs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    is_baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

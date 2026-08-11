@@ -1,4 +1,5 @@
 from app.models.base import Base
+from app.models.epoch import OperationalEpoch
 from app.models.observation import SourceObservation
 from app.models.pipeline import CollectorRun, Event, EventWatch, PipelineLedger
 from app.models.release_lead import ReleaseLead, SourceComponentState
@@ -12,6 +13,7 @@ __all__ = [
     "Event",
     "EventWatch",
     "FamilyMembership",
+    "OperationalEpoch",
     "PipelineLedger",
     "ReleaseLead",
     "SnapshotBlob",

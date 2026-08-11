@@ -107,3 +107,18 @@ independently verified against Instagram in this research (would require
 visiting the platform, which this sprint deliberately avoided per the
 anti-automation instruction) — reported dates above are Notebookcheck's own
 publication dates, not claimed as the leak's first-appearance time.
+
+## Sprint 7 additions (2026-08-11, Epoch 1 reset sprint)
+
+| Source | Type | Brands | URL | Access method | RSS? | Outcome |
+|---|---|---|---|---|---|---|
+| **G-Central** | SPECIALIST_BLOG | Casio (G-Shock focus) | g-central.com | Real, confirmed live (`/feed/`), WordPress RSS2.0, `updatePeriod=hourly` | Yes | **Implemented** — real regional-release, restock/availability, and collaboration coverage confirmed in live capture. Found and fixed a real false-positive during isolated live validation: the family-prefix reference regex matched "GAme" inside the plain word "game" (title: "G-Shock is now on Roblox with new obby game..."); fixed by requiring at least one digit in the matched suffix. |
+| **Plus9Time** | SPECIALIST_PUBLICATION | Seiko, Grand Seiko, Citizen | plus9time.com | Real, confirmed live (`/blog?format=rss`), Squarespace RSS2.0 | Yes | **Implemented**, with an honest finding: the real live capture is predominantly historical/archival (vintage catalog scans, patent filings, trademark news) rather than early-warning leads for current unreleased references. Brand is reliably identifiable from category text; reference extraction legitimately returns empty for most items. Still implemented because it is real, cheap, safe, and Seiko/Citizen specialist coverage was otherwise thin — not because it produces the highest-value leads of the three specialist sources. |
+| **Japan Select** | RETAILER_EARLY_LISTING (investigated) | Casio, Seiko, Citizen | japan-select.com | Real Shopify store, confirmed public `/collections/{brand}/products.json` (same mechanism already proven safe for Citizen/Seiko USA in Sprint 3), Casio collection alone showed 203 products with price/availability/reference per item | N/A (JSON) | **Deferred, not implemented.** Technically feasible and cheap by the same proven pattern as existing product collectors — this is a documented scope decision (stay within this sprint's bounded plan of two new automated sources, avoid "Commerce Clank" scope creep), not a technical blocker. Good candidate for a future sprint. |
+| **Great G-Shock World** | SPECIALIST_BLOG | Casio (G-Shock) | gshockjp.blog.jp | Real, confirmed live in Sprint 5 research (real NBC citations) | Not re-verified this sprint | Deferred again — G-Central and Plus9Time were prioritized per this sprint's explicit brief ordering; Great G-Shock World remains the next recommended specialist addition. |
+| **NEEL** | RETAILER_EARLY_LISTING | Casio, Seiko, Citizen, Grand Seiko | neel.co.jp | Real, confirmed live in Sprint 5 research | N/A | Deferred again — no new investigation depth added this sprint; still a real, legitimate, safely-collectible retailer with no confirmed NBC citation found so far. |
+
+Both newly implemented sources were live-validated against an isolated
+throwaway database (not the Epoch 1 operational DB) before being included
+in the Epoch 1 baseline — real network fetches, real baseline-then-repeat
+dedup confirmed (20 leads each on first run, 0 on immediate repeat).

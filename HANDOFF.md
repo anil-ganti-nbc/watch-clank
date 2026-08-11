@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** Casio soak healthy + SIX Windows-scheduled tasks total (Casio + 4 experimental brand/product lanes + CASIOBLOG, all Ready/Enabled, verified live) + Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment. Discord webhooks are still not configured anywhere (no real URLs available in this environment) — the sending code is wired, dedup-tested, but inert until the owner supplies `DISCORD_EDITORIAL_WEBHOOK_URL` / `DISCORD_HEALTH_WEBHOOK_URL`.
+**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. EIGHT Windows-scheduled tasks total (Casio + 4 experimental brand/product lanes + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live), silently baselined with zero editorial noise, then a real repeat run confirmed zero unexplained churn. Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; re-verified working against the new DB in Sprint 7 without a rebuild). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,121 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-11 (Sprint 7) — Epoch 1 reset: archive, fresh DB, baseline, G-Central + Plus9Time
+
+**Starting point verified:** HEAD `425b0e5`, clean tree, 120/120 tests passing,
+Ruff clean, schema at `005_specialist_lead_correlation_type`, 6 Windows tasks
+Ready/Enabled, DB had 558 watches / 2100 observations / 12 events / 10
+specialist leads / 99 collector_runs accumulated from Sprints 1-6's impromptu
+production soak.
+
+**Why:** the owner explicitly noted that initial discovery correctly treated
+everything unknown to Clank as "new," which was valuable for proving the
+pipeline but is not a useful newsroom starting state — most of that state
+represents watches/articles that existed in the world long before Clank
+started watching. This sprint distinguishes "first observed by Clank" from
+"new after operational baseline" going forward.
+
+**Phase 0-1 (freeze + archive):** disabled all 6 Windows tasks (confirmed
+none RUNNING first), confirmed DB quiescent (no locks, no stale RUNNING
+rows). Archived the entire pre-Epoch-1 state to
+`C:\Users\anil\Desktop\Watch clank\archives\watch-clank-pre-epoch1-20260811T125715Z\`
+(outside git, outside the repo's runtime paths): a safe sqlite3-backup-API
+copy of the live DB (independently `PRAGMA integrity_check` verified: `ok`),
+the actual retired live DB file, full status/schema/git-commit/scheduler/
+DB-counts/source-registry summaries, copied logs, and a README documenting
+what the archive is and how to restore it if ever needed. Never deleted.
+
+**Phase 2 (epoch model):** new `operational_epochs` table (migration
+`006_operational_epochs`) plus `epoch_id`/`is_baseline` columns on
+`collector_runs`, `source_observations`, and `specialist_leads` (deliberately
+NOT added to `events` — see below). New `app/services/epoch.py`
+(`start_epoch`/`start_baseline`/`complete_baseline`/`is_baseline_active`) and
+`scripts/epoch.py` CLI (`start`/`baseline-start`/`baseline-complete`/
+`status`) — no manual SQL needed anywhere in this process.
+
+**Phase 3 (fresh DB):** old `data/watch_clank.db` moved (not deleted) into
+the archive as a second, independent provenance copy. Ran `python -m
+scripts.migrate` against the now-empty path — normal migration path, no
+special-casing — producing a fresh, empty, schema-current DB at the exact
+same `DATABASE_URL` path every collector/the GUI/the EXE already resolve
+automatically. Started epoch `epoch_1` at 2026-08-11T13:11:25Z.
+
+**Phase 4 (baseline-suppression code):** `_record_product_transition` and
+`_record_watch_event` (app/services/pipeline.py) now check
+`is_baseline_active()` first and return `reason=epoch_baseline_active`
+without creating an `Event` row — this is why `Event` never needed an
+`epoch_id` column: baseline never creates one at all, by construction, not
+by a flag. `SpecialistLeadService.ingest_candidate` still creates
+`SpecialistLead` rows during baseline (stamped `is_baseline=True` — real
+discovery data, needed later for correlation/lead-time), but
+`notify_new_lead`/`notify_correlation` refuse to send while `is_baseline`
+is true. All of `PipelineService`'s ~5 real `CollectorRun` creation sites
+now stamp `epoch_id`/`is_baseline` via a new `_epoch_fields()` helper.
+11 new tests cover this directly, including a real product-observation-path
+stamping test and a real news-announcement-path suppression test.
+
+**Phase 4 (specialist source expansion, before the baseline):** researched
+and implemented G-Central (g-central.com, real WordPress RSS, Casio/G-Shock
+regional-release/restock/collaboration coverage) and Plus9Time
+(plus9time.com, real Squarespace RSS, Seiko/Grand Seiko/Citizen coverage —
+honest finding: mostly historical/archival content, few extractable current
+references, still implemented because it's real/cheap/safe and fills a
+coverage gap). Both built with a shared `app/parsers/rss_common.py` core
+(extracted, not touching the already-shipped `casioblog.py` parser). Found
+and fixed a real false-positive during isolated live validation against the
+actual live feed: the reference regex matched "GAme" inside the English word
+"game" in a real G-Central headline about G-Shock on Roblox — fixed by
+requiring a digit in the matched suffix, with a regression test using the
+exact real title. Investigated Japan Select (real Shopify store, confirmed
+public `/collections/casio/products.json`, 203 real Casio products with
+price/availability/reference each — same proven-safe mechanism as Sprint 3's
+Citizen/Seiko collectors) but deliberately deferred implementation to stay
+within this sprint's bounded scope (two new sources, not three). Both new
+collectors and their parsers passed the full acceptance bar (fixtures from
+real live feed captures, canonical-URL/timestamp/attribution/reference tests,
+duplicate suppression, silent-baseline, failure isolation) and were live-
+validated end-to-end against an isolated throwaway database — not the Epoch 1
+operational DB — before being included in the baseline.
+
+**Phase 6 (silent baseline):** ran all 8 finalized sources sequentially
+against the fresh operational DB with baseline active. Real results: Casio
+9 new watches (casio_japan still Akamai-BLOCKED as expected, not a
+regression), Citizen news 9 watches/10 leads, Seiko news 0 watches/1 lead,
+Citizen products 291 watches, Seiko products 222 watches, CASIOBLOG 10
+leads, G-Central 20 leads, Plus9Time 20 leads. **Zero Event rows created.
+Zero Discord alerts sent** (verified directly against the DB, not assumed).
+555 total watches, 50 total specialist leads, all stamped `is_baseline=true`.
+
+**Phase 7 (repeat-run validation — the critical test):** immediately ran all
+8 sources again against the now-LIVE (baseline-completed) epoch. Real
+result: **0 new watches, 0 new specialist leads, 0 new events, 0 alerts**
+across every source — verified directly against the DB before and after.
+No unexplained churn to investigate or document.
+
+**Phase 10-11 (GUI/EXE/scheduling):** re-enabled all 6 original Windows
+tasks, then installed 2 new ones (`WatchClank-GCentral` 45min,
+`WatchClank-Plus9Time` 360min — cadence justified by each source's real
+observed posting frequency, see `install_windows_gcentral_plus9time_tasks.ps1`).
+All 8 tasks Ready/Enabled, live-triggered GCentral and confirmed a real new
+`collector_runs` row with zero side effects on watch/event/lead counts
+(expected repeat). Both the GUI (`local_windows/control_centre/main.py`,
+launched from source) and the already-built EXE
+(`WatchClankControlCentre.exe`, launched **without rebuilding** — it didn't
+need to change, since `app/services/health.py`'s query shape didn't change)
+were live-screenshotted showing the new DB correctly: 555 watches, "Latest
+official event: none", all 6 legacy sources HEALTHY.
+
+**Test result:** 142 passed (up from 120 at sprint start — 22 new: epoch
+lifecycle x5, baseline-suppression x6, health/DB-backup unaffected, G-Central
+x5, Plus9Time x5, source-attribution x1). Ruff clean throughout.
+
+**Next priorities:** get real Discord webhook URLs from the owner; Japan
+Select implementation (technically ready, deliberately deferred); Great
+G-Shock World and NEEL (deferred again, unchanged from Sprint 5/6); actual
+cloud deployment execution (infra exists, still no host access from any
+session so far).
 
 ## 2026-08-11 (Sprint 6) — Control Centre GUI/EXE, Discord wiring, family-aware correlation, cloud handoff prep
 

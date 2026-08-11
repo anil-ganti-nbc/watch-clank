@@ -80,6 +80,7 @@ def test_alembic_upgrade_fresh_db(tmp_path: Path):
         "source_observations", "collector_runs", "pipeline_ledger",
         "watch_families", "family_memberships", "events", "event_watches",
         "release_leads", "source_component_states", "specialist_leads",
+        "operational_epochs",
     }
     assert expected.issubset(tables)
 
@@ -1903,6 +1904,188 @@ def test_seiko_pagination_dedupes_repeated_reference_across_pages():
 # (2026-08-11) — genuine RSS, not synthetic.
 
 
+# --- Sprint 7: G-Central + Plus9Time specialist sources ---------------------
+
+
+def test_gcentral_feed_parses_real_capture():
+    from app.parsers.gcentral import parse_gcentral_feed
+
+    xml = (FIXTURES / "gcentral_feed.xml").read_bytes()
+    result = parse_gcentral_feed(xml, max_items=20)
+    assert result.success
+    assert len(result.items) == 15
+    assert all(i.url.startswith("https://www.g-central.com/") for i in result.items)
+    assert all(len(i.claim_text or "") <= 400 for i in result.items)  # no full body copied
+    ref_item = next(i for i in result.items if i.reference_candidates)
+    assert ref_item.reference_candidates
+    collab_item = next(i for i in result.items if i.is_collaboration)
+    assert collab_item is not None
+    restock_item = next(i for i in result.items if i.is_restock_or_availability)
+    assert restock_item is not None
+
+
+def test_gcentral_feed_malformed_xml_fails_closed():
+    from app.parsers.gcentral import parse_gcentral_feed
+
+    result = parse_gcentral_feed(b"<rss><channel><item><title>broken")
+    assert result.success is False
+    assert result.error
+
+
+def test_gcentral_reference_regex_ignores_plain_words():
+    """Regression: found live during Sprint 7 isolated validation against
+    the real feed -- "new obby game and virtual items" false-positived as
+    reference "GAME" before the regex required a digit in the suffix."""
+    from app.parsers.gcentral import parse_gcentral_feed
+
+    xml = b"""<?xml version="1.0"?><rss><channel>
+    <item><title>G-Shock is now on Roblox with new obby game and virtual items</title>
+    <link>https://www.g-central.com/x/</link><pubDate>Mon, 01 Jun 2026 00:00:00 +0000</pubDate>
+    </item></channel></rss>"""
+    result = parse_gcentral_feed(xml)
+    assert result.success
+    assert result.items[0].reference_candidates == []
+
+
+def test_gcentral_reference_extraction_is_deterministic():
+    """Same family-prefix regex discipline as casioblog.py -- matches the
+    family root up to the first hyphen-colorway boundary, never the full
+    multi-hyphen suffix. Consistent with Sprint 6's FAMILY_MATCH design:
+    correlation, not this regex, is responsible for exact-vs-family
+    distinction."""
+    from app.parsers.gcentral import parse_gcentral_feed
+
+    xml = b"""<?xml version="1.0"?><rss><channel>
+    <item><title>New G-Shock GA-2100-1A1 colorway announced</title>
+    <link>https://www.g-central.com/x/</link><pubDate>Mon, 01 Jun 2026 00:00:00 +0000</pubDate>
+    </item></channel></rss>"""
+    result = parse_gcentral_feed(xml)
+    assert result.success
+    assert result.items[0].reference_candidates == ["GA-2100"]
+
+
+def test_plus9time_feed_parses_real_capture():
+    from app.parsers.plus9time import parse_plus9time_feed
+
+    xml = (FIXTURES / "plus9time_feed.xml").read_bytes()
+    result = parse_plus9time_feed(xml, max_items=20)
+    assert result.success
+    assert len(result.items) == 15
+    assert all(i.url.startswith("https://www.plus9time.com/") for i in result.items)
+    assert all(len(i.claim_text or "") <= 400 for i in result.items)
+    # Honest finding: this real capture is predominantly historical/archival
+    # (catalog scans, patents) with brand identifiable but few/no current
+    # extractable references -- not a parser bug, see module docstring.
+    brands = {i.brand_guess for i in result.items}
+    assert "Seiko" in brands or "Citizen" in brands
+
+
+def test_plus9time_feed_malformed_xml_fails_closed():
+    from app.parsers.plus9time import parse_plus9time_feed
+
+    result = parse_plus9time_feed(b"<rss><channel><item><title>broken")
+    assert result.success is False
+    assert result.error
+
+
+def test_plus9time_reference_extraction_and_brand_guess():
+    from app.parsers.plus9time import parse_plus9time_feed
+
+    xml = b"""<?xml version="1.0"?><rss><channel>
+    <item><title>Seiko SBGA211 spotted early</title><category>Seiko</category>
+    <link>https://www.plus9time.com/blog/x</link><pubDate>Mon, 01 Jun 2026 00:00:00 +0000</pubDate>
+    </item></channel></rss>"""
+    result = parse_plus9time_feed(xml)
+    assert result.success
+    assert result.items[0].reference_candidates == ["SBGA211"]
+    assert result.items[0].brand_guess == "Seiko"
+
+
+def test_gcentral_pipeline_baseline_then_repeat_creates_no_duplicates(db_session: Session, tmp_settings: Settings, monkeypatch):
+    from unittest.mock import patch
+
+    from app.core import config as config_mod
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_gcentral_pipeline
+
+    monkeypatch.setattr(config_mod, "get_settings", lambda: tmp_settings)
+    xml = (FIXTURES / "gcentral_feed.xml").read_bytes()
+
+    with patch("app.services.specialist_leads.get_settings", return_value=tmp_settings):
+        run1 = run_gcentral_pipeline(db_session, feed_xml=xml)
+        run2 = run_gcentral_pipeline(db_session, feed_xml=xml)
+
+    assert run1.status == "SUCCESS"
+    assert run1.summary_metadata["new_leads"] == 15
+    assert run2.status == "SUCCESS"
+    assert run2.summary_metadata["new_leads"] == 0
+
+    leads = db_session.scalars(select(SpecialistLead)).all()
+    assert len(leads) == 15
+    assert all(lead.source_id == "g_central" for lead in leads)
+
+
+def test_plus9time_pipeline_baseline_then_repeat_creates_no_duplicates(db_session: Session, tmp_settings: Settings, monkeypatch):
+    from unittest.mock import patch
+
+    from app.core import config as config_mod
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_plus9time_pipeline
+
+    monkeypatch.setattr(config_mod, "get_settings", lambda: tmp_settings)
+    xml = (FIXTURES / "plus9time_feed.xml").read_bytes()
+
+    with patch("app.services.specialist_leads.get_settings", return_value=tmp_settings):
+        run1 = run_plus9time_pipeline(db_session, feed_xml=xml)
+        run2 = run_plus9time_pipeline(db_session, feed_xml=xml)
+
+    assert run1.status == "SUCCESS"
+    assert run1.summary_metadata["new_leads"] == 15
+    assert run2.status == "SUCCESS"
+    assert run2.summary_metadata["new_leads"] == 0
+
+    leads = db_session.scalars(select(SpecialistLead)).all()
+    assert len(leads) == 15
+    assert all(lead.source_id == "plus9time" for lead in leads)
+
+
+def test_gcentral_pipeline_failed_fetch_creates_no_leads(db_session: Session, tmp_settings: Settings):
+    from unittest.mock import patch
+
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_gcentral_pipeline
+
+    with patch("app.services.specialist_leads.get_settings", return_value=tmp_settings):
+        run = run_gcentral_pipeline(db_session, feed_xml=b"")
+
+    assert run.status in ("FAILED", "BLOCKED")
+    assert db_session.scalars(select(SpecialistLead)).first() is None
+
+
+def test_plus9time_pipeline_failed_fetch_creates_no_leads(db_session: Session, tmp_settings: Settings):
+    from unittest.mock import patch
+
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_plus9time_pipeline
+
+    with patch("app.services.specialist_leads.get_settings", return_value=tmp_settings):
+        run = run_plus9time_pipeline(db_session, feed_xml=b"")
+
+    assert run.status in ("FAILED", "BLOCKED")
+    assert db_session.scalars(select(SpecialistLead)).first() is None
+
+
+def test_gcentral_and_plus9time_source_attribution_distinct():
+    from app.services.source_registry import get_source_profile
+
+    g = get_source_profile("g_central")
+    p = get_source_profile("plus9time")
+    assert g.source_type == "SPECIALIST_BLOG"
+    assert p.source_type == "SPECIALIST_PUBLICATION"
+    assert g.account_or_domain == "g-central.com"
+    assert p.account_or_domain == "plus9time.com"
+
+
 def test_casioblog_feed_parses_real_capture():
     from app.parsers.casioblog import parse_casioblog_feed
 
@@ -2141,6 +2324,204 @@ def test_casioblog_pipeline_failed_fetch_creates_no_leads(db_session: Session, t
 
     assert run.status in ("FAILED", "BLOCKED")
     assert db_session.scalars(select(SpecialistLead)).first() is None
+
+
+# --- Sprint 7: operational epoch lifecycle ----------------------------------
+
+
+def test_epoch_starts_and_is_active(db_session: Session):
+    from app.services.epoch import get_active_epoch, is_baseline_active, start_epoch
+
+    assert get_active_epoch(db_session) is None
+    assert is_baseline_active(db_session) is False
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    assert epoch.id is not None
+    assert epoch.started_at is not None
+    assert get_active_epoch(db_session).id == epoch.id
+    assert is_baseline_active(db_session) is False  # baseline not started yet
+
+
+def test_epoch_refuses_duplicate_name(db_session: Session):
+    from app.services.epoch import start_epoch
+
+    start_epoch(db_session, name="epoch_1")
+    with pytest.raises(ValueError):
+        start_epoch(db_session, name="epoch_1")
+
+
+def test_epoch_baseline_lifecycle(db_session: Session):
+    from app.services.epoch import (
+        complete_baseline,
+        is_baseline_active,
+        start_baseline,
+        start_epoch,
+    )
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    assert is_baseline_active(db_session) is False
+
+    start_baseline(db_session, epoch)
+    assert is_baseline_active(db_session) is True
+
+    complete_baseline(db_session, epoch)
+    assert is_baseline_active(db_session) is False
+
+
+def test_epoch_baseline_refuses_double_start(db_session: Session):
+    from app.services.epoch import start_baseline, start_epoch
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    with pytest.raises(ValueError):
+        start_baseline(db_session, epoch)
+
+
+def test_epoch_baseline_complete_refuses_without_start(db_session: Session):
+    from app.services.epoch import complete_baseline, start_epoch
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    with pytest.raises(ValueError):
+        complete_baseline(db_session, epoch)
+
+
+def test_baseline_active_suppresses_new_reference_event(db_session: Session, tmp_settings: Settings):
+    """While an epoch's baseline is active, discovering a brand-new watch
+    must create the Watch/Observation/ReleaseLead as real data but must
+    NOT create an Event -- catalog population during baseline is known
+    existing state, not news."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.parsers.citizen_news import parse_citizen_news_html
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    fr = FetchResult(
+        url="https://www.citizenwatch-global.com/news/2026/20260610/index.html",
+        success=True, status_code=200, content_type="text/html", payload=detail_html,
+    )
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, discovered_meta={"source_region": "GLOBAL"},
+        collector_id="citizen_news", manufacturer="Citizen", brand="Citizen",
+        parse_fn=parse_citizen_news_html, merge_key_prefix="citizen",
+        default_region="GLOBAL", emit_events=True,
+    )
+    assert out["new_watch"] is True  # real discovery still happened
+    assert out["watch_events"][0]["event_type"] is None
+    assert out["watch_events"][0]["reason"] == "epoch_baseline_active"
+    assert db_session.scalars(select(Event)).first() is None  # no Event created
+
+    watch = db_session.scalars(select(Watch)).one()
+    assert watch.reference_raw  # the watch itself is real (news path -- no SourceObservation expected)
+
+
+def test_baseline_active_stamps_product_observation(db_session: Session, tmp_settings: Settings):
+    """The product-page path (process_fetch_result) does create a
+    SourceObservation -- verify it gets stamped epoch_id/is_baseline."""
+    import json
+
+    from app.collectors.base import FetchResult
+    from app.collectors.citizen_products import CitizenProductsCollector
+    from app.parsers.citizen_products import parse_citizen_search_hit
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    html = (FIXTURES / "citizen_search_attesa_page1.html").read_text(encoding="utf-8")
+    items, _ = CitizenProductsCollector().parse_search_page(html)
+    product_dict = items[0].metadata["product_dict"]
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    fr = FetchResult(
+        url="https://citizenwatch.com/us/en/product/CC4107-80H", success=True, status_code=200,
+        content_type="application/json", payload=json.dumps(product_dict).encode("utf-8"),
+    )
+    pipeline.process_fetch_result(
+        fr, run_id=run.id, collector_id="citizen_products", collector_version="0.1.0",
+        parse_fn=parse_citizen_search_hit, default_region="US", emit_events=True,
+    )
+    obs = db_session.scalars(select(SourceObservation)).first()
+    assert obs is not None
+    assert obs.is_baseline is True
+    assert obs.epoch_id == epoch.id
+
+
+def test_pipeline_stamps_collector_run_with_active_epoch(db_session: Session, tmp_settings: Settings):
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    fields = pipeline._epoch_fields()
+    assert fields == {"epoch_id": epoch.id, "is_baseline": True}
+
+
+def test_specialist_lead_ingest_stamps_baseline(db_session: Session):
+    from app.models import SpecialistLead
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    svc = SpecialistLeadService(db_session)
+    outcome = svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Baseline-era post",
+        source_url="https://casioblog.com/en/baseline-post", published_at=None,
+        reference_candidates=["GA-2100"], claim_text=None, manufacturer="Casio",
+    )
+    lead = db_session.get(SpecialistLead, outcome["lead_id"])
+    assert lead.is_baseline is True
+    assert lead.epoch_id == epoch.id
+
+
+def test_notify_new_lead_suppressed_during_baseline(db_session: Session):
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead
+    from app.services.discord_notify import DiscordNotifier
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    svc = SpecialistLeadService(db_session)
+    outcome = svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Baseline-era post",
+        source_url="https://casioblog.com/en/baseline-post-2", published_at=None,
+        reference_candidates=["GA-2100"], claim_text=None, manufacturer="Casio", confidence=90.0,
+    )
+    lead = db_session.get(SpecialistLead, outcome["lead_id"])
+    assert lead.is_baseline is True
+
+    with patch("httpx.post") as mock_post:
+        sent = svc.notify_new_lead(lead, notifier=DiscordNotifier(settings))
+
+    assert sent is False
+    mock_post.assert_not_called()
 
 
 # --- Sprint 6: health snapshot + DB backup ----------------------------------

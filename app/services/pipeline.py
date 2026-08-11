@@ -56,6 +56,18 @@ class PipelineService:
         self.session = session
         self.storage = storage or SnapshotStorageService()
 
+    def _epoch_fields(self) -> dict:
+        """epoch_id/is_baseline kwargs for a new CollectorRun -- see
+        app/services/epoch.py. Every real (non-skip) CollectorRun creation
+        site should spread this in so baseline runs are auditable."""
+        from app.services.epoch import get_active_epoch, is_baseline_active
+
+        epoch = get_active_epoch(self.session)
+        return {
+            "epoch_id": epoch.id if epoch else None,
+            "is_baseline": bool(epoch and is_baseline_active(self.session)),
+        }
+
     def _ledger(
         self,
         *,
@@ -376,6 +388,7 @@ class PipelineService:
 
             region = default_region
             overall = safe_overall_confidence(pw.field_confidence)
+            epoch_fields = self._epoch_fields()
             obs = SourceObservation(
                 watch_id=watch.id,
                 fetch_id=fetch.id,
@@ -392,6 +405,8 @@ class PipelineService:
                 overall_confidence=overall,
                 field_confidence=pw.field_confidence or {},
                 parser_warnings=pw.parser_warnings or [],
+                epoch_id=epoch_fields["epoch_id"],
+                is_baseline=epoch_fields["is_baseline"],
             )
             self.session.add(obs)
             self.session.flush()
@@ -501,6 +516,7 @@ class PipelineService:
             collector_version=COLLECTOR_VERSION,
             started_at=started,
             status="RUNNING",
+            **self._epoch_fields(),
         )
         self.session.add(run)
         self.session.commit()
@@ -641,6 +657,7 @@ class PipelineService:
                 collector_id="replay",
                 collector_version=COLLECTOR_VERSION,
                 status="RUNNING",
+                **self._epoch_fields(),
             )
             self.session.add(run)
             self.session.commit()
@@ -763,6 +780,15 @@ class PipelineService:
             format_alert,
             score_event,
         )
+        from app.services.epoch import is_baseline_active
+
+        if is_baseline_active(self.session):
+            # Epoch 1 (or any epoch's) baseline: the Watch/SourceObservation
+            # rows already got created by the caller -- that's real discovery
+            # data. But a transition detected purely because the fresh DB has
+            # never seen this watch/region before is not news; never create
+            # an Event (and therefore never notify) while baselining.
+            return {"event_type": None, "reason": "epoch_baseline_active"}
 
         if is_new_watch:
             return {"event_type": None, "reason": "baseline_new_watch"}
@@ -885,6 +911,12 @@ class PipelineService:
         from app.models import Event, EventWatch
         from app.services.discord_notify import DiscordNotifier
         from app.services.editorial import format_alert
+        from app.services.epoch import is_baseline_active
+
+        if is_baseline_active(self.session):
+            # See the matching guard in _record_product_transition: baseline
+            # discovery of a watch/region is known-existing-state, not news.
+            return {"event_type": None, "reason": "epoch_baseline_active"}
 
         prior_regions = self._prior_regions_for_watch(watch.id, exclude_lead_id=lead.id)
 
@@ -1209,6 +1241,7 @@ class PipelineService:
             collector_version="0.2.0",
             started_at=started,
             status="RUNNING",
+            **self._epoch_fields(),
         )
         self.session.add(run)
         self.session.commit()
@@ -1445,6 +1478,7 @@ class PipelineService:
             collector_version=cfg["collector_version"],
             started_at=started,
             status="RUNNING",
+            **self._epoch_fields(),
         )
         self.session.add(run)
         self.session.commit()
@@ -1627,6 +1661,7 @@ class PipelineService:
             collector_version=cfg["collector_version"],
             started_at=started,
             status="RUNNING",
+            **self._epoch_fields(),
         )
         self.session.add(run)
         self.session.commit()

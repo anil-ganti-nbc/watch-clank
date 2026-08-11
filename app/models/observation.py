@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -73,6 +74,12 @@ class SourceObservation(Base):
 
     field_confidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     parser_warnings: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+
+    # Sprint 7 epoch/baseline tracking -- see app/models/epoch.py.
+    epoch_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("operational_epochs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    is_baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
     watch: Mapped[Watch] = relationship("Watch", back_populates="observations")
     fetch: Mapped[SnapshotFetch | None] = relationship(

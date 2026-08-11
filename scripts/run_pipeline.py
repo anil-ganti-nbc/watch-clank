@@ -191,18 +191,28 @@ def run_experimental_product(brand: str, max_items: int = 300) -> int:
 
 def run_experimental_specialist(source: str, max_items: int = 20) -> int:
     """EXPERIMENTAL Layer B lane: specialist/early-warning source
-    collectors (currently: casioblog). Own lock file + collector_id, own
-    collector_runs rows, writes only to specialist_leads — never to
-    watches/source_observations/release_leads directly. See
-    app/services/specialist_leads.py."""
-    from app.services.specialist_leads import run_casioblog_pipeline
+    collectors (casioblog, gcentral, plus9time). Own lock file +
+    collector_id per source, own collector_runs rows, writes only to
+    specialist_leads — never to watches/source_observations/release_leads
+    directly. See app/services/specialist_leads.py."""
+    from app.services.specialist_leads import (
+        run_casioblog_pipeline,
+        run_gcentral_pipeline,
+        run_plus9time_pipeline,
+    )
+
+    runners = {
+        "casioblog": run_casioblog_pipeline,
+        "gcentral": run_gcentral_pipeline,
+        "plus9time": run_plus9time_pipeline,
+    }
 
     settings = get_settings()
     print(f"database_url={settings.resolved_database_url} source={source}")
     with session_scope() as session:
         try:
-            if source == "casioblog":
-                run = run_casioblog_pipeline(session)
+            if source in runners:
+                run = runners[source](session)
             else:
                 print(f"FATAL: unknown specialist source {source!r}")
                 return EXIT_FATAL
@@ -271,7 +281,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--experimental-specialist",
-        choices=["casioblog"],
+        choices=["casioblog", "gcentral", "plus9time"],
         default=None,
         help="Run an EXPERIMENTAL Layer B (early-warning) specialist-source lane",
     )

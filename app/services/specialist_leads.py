@@ -18,6 +18,7 @@ from app.core.time import ensure_utc
 from app.models import CollectorRun, SourceObservation, SpecialistLead, Watch
 from app.services.discord_notify import DiscordNotifier
 from app.services.editorial import format_correlation_followup_alert, format_early_warning_alert
+from app.services.epoch import get_active_epoch, is_baseline_active
 from app.services.run_lock import RunLockService
 from app.services.source_registry import get_source_profile
 
@@ -71,6 +72,7 @@ class SpecialistLeadService:
             except ValueError:
                 pub_dt = None
 
+        active_epoch = get_active_epoch(self.session)
         lead = SpecialistLead(
             source_id=source_id,
             source_type=profile.source_type,
@@ -89,6 +91,8 @@ class SpecialistLeadService:
             verification_status="UNCONFIRMED",
             ingestion_method=ingestion_method,
             notes=notes,
+            epoch_id=active_epoch.id if active_epoch else None,
+            is_baseline=bool(active_epoch and is_baseline_active(self.session)),
         )
         self.session.add(lead)
         self.session.flush()
@@ -205,6 +209,8 @@ class SpecialistLeadService:
         settings = get_settings()
         if not settings.editorial_notifications_enabled:
             return False
+        if lead.is_baseline:
+            return False
         if lead.notified_at is not None:
             return False
         if lead.confidence < settings.discord_specialist_min_confidence:
@@ -243,6 +249,8 @@ class SpecialistLeadService:
         at most once."""
         settings = get_settings()
         if not settings.editorial_notifications_enabled:
+            return False
+        if lead.is_baseline:
             return False
         notifier = notifier or DiscordNotifier(settings)
         if not notifier.editorial_enabled or lead.correlated_watch_id is None:
@@ -294,7 +302,12 @@ def run_casioblog_pipeline(session: Session, *, feed_xml: bytes | None = None, m
         return skip_run
 
     started = datetime.now(UTC)
-    run = CollectorRun(collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, started_at=started, status="RUNNING")
+    active_epoch = get_active_epoch(session)
+    run = CollectorRun(
+        collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, started_at=started, status="RUNNING",
+        epoch_id=active_epoch.id if active_epoch else None,
+        is_baseline=bool(active_epoch and is_baseline_active(session)),
+    )
     session.add(run)
     session.commit()
     lock.update_run_id(run.id)
@@ -351,6 +364,204 @@ def run_casioblog_pipeline(session: Session, *, feed_xml: bytes | None = None, m
         run.summary_metadata = {"new_leads": new_leads, "component_status": status}
         session.commit()
         logger.info("casioblog_pipeline_completed", run_id=run.id, status=run.status, new_leads=new_leads)
+        return run
+    except Exception as exc:
+        session.rollback()
+        run.status = "FAILED"
+        run.completed_at = datetime.now(UTC)
+        run.summary_metadata = {"fatal_error": str(exc)}
+        session.add(run)
+        session.commit()
+        raise
+    finally:
+        lock.release()
+
+
+def run_gcentral_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20) -> CollectorRun:
+    """Experimental Layer B collector run for G-Central (independent
+    G-Shock fan site, real confirmed RSS feed) -- same isolated-lock
+    pattern as run_casioblog_pipeline, own collector_id/lock file, cannot
+    interact with Casio production or CASIOBLOG's lane."""
+    from app.collectors.gcentral import COLLECTOR_ID, COLLECTOR_VERSION, GCentralCollector
+    from app.parsers.gcentral import parse_gcentral_feed
+
+    settings = get_settings()
+    lock_path = settings.resolved_lock_path.parent / f"{COLLECTOR_ID}.run.lock"
+    lock = RunLockService(session, settings, collector_id=COLLECTOR_ID, lock_path=lock_path)
+    lock_result = lock.acquire()
+    if not lock_result.acquired:
+        started = datetime.now(UTC)
+        skip_run = CollectorRun(
+            collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, started_at=started, completed_at=started,
+            status="SKIPPED_OVERLAP",
+            summary_metadata={"reason": lock_result.reason, "active_run_id": lock_result.active_run_id},
+        )
+        session.add(skip_run)
+        session.commit()
+        return skip_run
+
+    started = datetime.now(UTC)
+    active_epoch = get_active_epoch(session)
+    run = CollectorRun(
+        collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, started_at=started, status="RUNNING",
+        epoch_id=active_epoch.id if active_epoch else None,
+        is_baseline=bool(active_epoch and is_baseline_active(session)),
+    )
+    session.add(run)
+    session.commit()
+    lock.update_run_id(run.id)
+
+    try:
+        result = GCentralCollector().run(feed_xml=feed_xml)
+        status = result.metadata.get("component_status") or "FAILED"
+
+        new_leads = 0
+        if status == "SUCCESS":
+            fr = result.fetched[0]
+            parsed = parse_gcentral_feed(fr.payload, max_items=max_items)
+            if not parsed.success:
+                status = "FAILED"
+            else:
+                svc = SpecialistLeadService(session)
+                notifier = DiscordNotifier(settings)
+                for item in parsed.items:
+                    lead_type = (
+                        "POSSIBLE_COLLABORATION" if item.is_collaboration
+                        else "EARLY_RETAIL_LISTING" if item.is_restock_or_availability
+                        else "POSSIBLE_NEW_REFERENCE" if item.reference_candidates
+                        else "LEAKED_IMAGE"
+                    )
+                    outcome = svc.ingest_candidate(
+                        source_id="g_central",
+                        lead_type=lead_type,
+                        title=item.title,
+                        source_url=item.url,
+                        published_at=item.published_at,
+                        reference_candidates=item.reference_candidates,
+                        claim_text=item.claim_text,
+                        manufacturer="Casio",
+                        confidence=(
+                            35.0
+                            + (15.0 if item.reference_candidates else 0.0)
+                            + (10.0 if item.is_restock_or_availability else 0.0)
+                        ),
+                    )
+                    if outcome["created"]:
+                        new_leads += 1
+                        new_lead = session.get(SpecialistLead, outcome["lead_id"])
+                        svc.notify_new_lead(new_lead, notifier=notifier)
+                correlated = svc.correlate_pending_leads(manufacturer="Casio")
+                for c in correlated:
+                    correlated_lead = session.get(SpecialistLead, c["lead_id"])
+                    svc.notify_correlation(correlated_lead, notifier=notifier)
+                session.commit()
+                status = "ZERO_ITEMS" if not parsed.items else "SUCCESS"
+
+        completed = datetime.now(UTC)
+        run.completed_at = completed
+        run.status = status
+        run.discovered_count = new_leads
+        run.parsed_count = new_leads
+        run.duration_ms = int((completed - started).total_seconds() * 1000)
+        run.summary_metadata = {"new_leads": new_leads, "component_status": status}
+        session.commit()
+        logger.info("gcentral_pipeline_completed", run_id=run.id, status=run.status, new_leads=new_leads)
+        return run
+    except Exception as exc:
+        session.rollback()
+        run.status = "FAILED"
+        run.completed_at = datetime.now(UTC)
+        run.summary_metadata = {"fatal_error": str(exc)}
+        session.add(run)
+        session.commit()
+        raise
+    finally:
+        lock.release()
+
+
+def run_plus9time_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20) -> CollectorRun:
+    """Experimental Layer B collector run for Plus9Time (Seiko/Citizen
+    industry publication, real confirmed RSS feed). Same isolated-lock
+    pattern as the other specialist lanes. Honest expectation, documented
+    in app/parsers/plus9time.py: most items will have zero extractable
+    references (historical/archival content) -- that is not a bug."""
+    from app.collectors.plus9time import COLLECTOR_ID, COLLECTOR_VERSION, Plus9TimeCollector
+    from app.parsers.plus9time import parse_plus9time_feed
+
+    settings = get_settings()
+    lock_path = settings.resolved_lock_path.parent / f"{COLLECTOR_ID}.run.lock"
+    lock = RunLockService(session, settings, collector_id=COLLECTOR_ID, lock_path=lock_path)
+    lock_result = lock.acquire()
+    if not lock_result.acquired:
+        started = datetime.now(UTC)
+        skip_run = CollectorRun(
+            collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, started_at=started, completed_at=started,
+            status="SKIPPED_OVERLAP",
+            summary_metadata={"reason": lock_result.reason, "active_run_id": lock_result.active_run_id},
+        )
+        session.add(skip_run)
+        session.commit()
+        return skip_run
+
+    started = datetime.now(UTC)
+    active_epoch = get_active_epoch(session)
+    run = CollectorRun(
+        collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, started_at=started, status="RUNNING",
+        epoch_id=active_epoch.id if active_epoch else None,
+        is_baseline=bool(active_epoch and is_baseline_active(session)),
+    )
+    session.add(run)
+    session.commit()
+    lock.update_run_id(run.id)
+
+    try:
+        result = Plus9TimeCollector().run(feed_xml=feed_xml)
+        status = result.metadata.get("component_status") or "FAILED"
+
+        new_leads = 0
+        if status == "SUCCESS":
+            fr = result.fetched[0]
+            parsed = parse_plus9time_feed(fr.payload, max_items=max_items)
+            if not parsed.success:
+                status = "FAILED"
+            else:
+                svc = SpecialistLeadService(session)
+                notifier = DiscordNotifier(settings)
+                for item in parsed.items:
+                    outcome = svc.ingest_candidate(
+                        source_id="plus9time",
+                        lead_type="POSSIBLE_NEW_REFERENCE" if item.reference_candidates else "LEAKED_IMAGE",
+                        title=item.title,
+                        source_url=item.url,
+                        published_at=item.published_at,
+                        reference_candidates=item.reference_candidates,
+                        claim_text=item.claim_text,
+                        manufacturer=item.brand_guess,
+                        confidence=30.0 + (20.0 if item.reference_candidates else 0.0),
+                    )
+                    if outcome["created"]:
+                        new_leads += 1
+                        new_lead = session.get(SpecialistLead, outcome["lead_id"])
+                        svc.notify_new_lead(new_lead, notifier=notifier)
+                # Correlate separately per brand -- never cross-brand, same
+                # discipline as the rest of correlate_pending_leads' callers.
+                for mfr in ("Seiko", "Citizen"):
+                    correlated = svc.correlate_pending_leads(manufacturer=mfr)
+                    for c in correlated:
+                        correlated_lead = session.get(SpecialistLead, c["lead_id"])
+                        svc.notify_correlation(correlated_lead, notifier=notifier)
+                session.commit()
+                status = "ZERO_ITEMS" if not parsed.items else "SUCCESS"
+
+        completed = datetime.now(UTC)
+        run.completed_at = completed
+        run.status = status
+        run.discovered_count = new_leads
+        run.parsed_count = new_leads
+        run.duration_ms = int((completed - started).total_seconds() * 1000)
+        run.summary_metadata = {"new_leads": new_leads, "component_status": status}
+        session.commit()
+        logger.info("plus9time_pipeline_completed", run_id=run.id, status=run.status, new_leads=new_leads)
         return run
     except Exception as exc:
         session.rollback()

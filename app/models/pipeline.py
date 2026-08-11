@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -51,6 +52,14 @@ class CollectorRun(Base):
 
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     summary_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    # Sprint 7 epoch/baseline tracking -- see app/models/epoch.py and
+    # app/services/epoch.py. Nullable/default-False so pre-Epoch-1 rows
+    # (archived, not migrated forward) remain valid.
+    epoch_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("operational_epochs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    is_baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
     ledger_entries: Mapped[list["PipelineLedger"]] = relationship(
         "PipelineLedger",
