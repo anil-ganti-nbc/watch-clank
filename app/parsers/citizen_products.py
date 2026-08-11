@@ -81,38 +81,25 @@ def _water_resistance_m(text: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def parse_citizen_product_html(html: str | bytes, *, source_url: str = "") -> ParseResult:
-    if isinstance(html, bytes):
-        html = html.decode("utf-8", errors="ignore")
-    if not html or not html.strip():
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="empty html")
-
-    data = _extract_product_json(html)
-    if not data:
-        return ParseResult(
-            success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION,
-            error="product JSON block not found or malformed",
-        )
-
-    reference_raw = data.get("id")
-    if not reference_raw:
-        return ParseResult(
-            success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION,
-            error="no product id in extracted JSON",
-        )
-
+def _watch_from_product_data(
+    data: dict, *, reference_raw: str, price, currency, has_inventory: bool, availability_status, source_url: str
+) -> ParsedWatch:
+    """Shared field mapping for both discovery paths:
+    - the full product-page JSON (has price/currency/inventory inline, via
+      parse_citizen_product_html)
+    - a search-hit's representedProduct dict (has neither price/currency nor
+      inventory inline — the collector supplies price/currency from the
+      parent hit, and there is no availability signal in search results at
+      all, so availability_status is always None/UNKNOWN from that path —
+      see parse_citizen_search_hit).
+    """
     field_confidence: dict[str, float] = {"reference": 1.0}
     name = data.get("name")
     if name:
         field_confidence["model_name"] = 0.95
-
-    price = data.get("price")
-    currency = data.get("currency")
     if price is not None and currency:
         field_confidence["price"] = 0.9
-
-    availability_status = _availability_from_inventory(data.get("inventory"))
-    if availability_status:
+    if has_inventory and availability_status:
         field_confidence["availability_status"] = 0.9
 
     case_material = data.get("c_caseMaterial")
@@ -138,7 +125,13 @@ def parse_citizen_product_html(html: str | bytes, *, source_url: str = "") -> Pa
 
     collection = data.get("c_PDCollection4") or data.get("c_PDCollection3") or data.get("c_PDCollection2")
 
-    watch = ParsedWatch(
+    parser_warnings = []
+    if price is None:
+        parser_warnings.append("no_price_in_source")
+    if not has_inventory:
+        parser_warnings.append("no_availability_in_source")
+
+    return ParsedWatch(
         reference_raw=str(reference_raw),
         manufacturer="Citizen",
         brand="Citizen",
@@ -152,11 +145,82 @@ def parse_citizen_product_html(html: str | bytes, *, source_url: str = "") -> Pa
         caliber_or_module=movement,
         price=float(price) if isinstance(price, (int, float)) else None,
         currency=currency,
-        availability_status=availability_status,
+        availability_status=availability_status if has_inventory else None,
         extra_specs=extra_specs,
         field_confidence=field_confidence,
-        parser_warnings=[] if price is not None else ["no_price_in_source"],
+        parser_warnings=parser_warnings,
         overall_confidence=safe_overall_confidence(field_confidence),
+        source_url=source_url,
+    )
+
+
+def parse_citizen_product_html(html: str | bytes, *, source_url: str = "") -> ParseResult:
+    if isinstance(html, bytes):
+        html = html.decode("utf-8", errors="ignore")
+    if not html or not html.strip():
+        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="empty html")
+
+    data = _extract_product_json(html)
+    if not data:
+        return ParseResult(
+            success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION,
+            error="product JSON block not found or malformed",
+        )
+
+    reference_raw = data.get("id")
+    if not reference_raw:
+        return ParseResult(
+            success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION,
+            error="no product id in extracted JSON",
+        )
+
+    watch = _watch_from_product_data(
+        data,
+        reference_raw=reference_raw,
+        price=data.get("price"),
+        currency=data.get("currency"),
+        has_inventory=True,
+        availability_status=_availability_from_inventory(data.get("inventory")),
+        source_url=source_url,
+    )
+    return ParseResult(success=True, parser_id=PARSER_ID, parser_version=PARSER_VERSION, watches=[watch])
+
+
+def parse_citizen_search_hit(payload: bytes | str | dict, *, source_url: str = "") -> ParseResult:
+    """Parse one merged search-hit record: the collector flattens a hit's
+    top-level price/currency together with its representedProduct dict into
+    one JSON object (see app/collectors/citizen_products.py::
+    discover_via_search) before this is called.
+
+    Broader/cheaper than parse_citizen_product_html (no per-product HTTP
+    fetch — the listing page already carries this data for every hit on
+    the page), at the cost of no availability signal — Citizen's search API
+    does not expose inventory/orderable state in listing results, only on
+    the individual product page. This is a deliberate breadth-over-depth
+    tradeoff for Sprint 4's catalogue-widening priority.
+    """
+    if isinstance(payload, dict):
+        data = payload
+    else:
+        raw = payload.decode("utf-8", errors="ignore") if isinstance(payload, bytes) else payload
+        if not raw or not raw.strip():
+            return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="empty payload")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=f"invalid JSON: {exc}")
+
+    reference_raw = data.get("id")
+    if not reference_raw:
+        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="no product id in search hit")
+
+    watch = _watch_from_product_data(
+        data,
+        reference_raw=reference_raw,
+        price=data.get("_hit_price"),
+        currency=data.get("_hit_currency"),
+        has_inventory=False,
+        availability_status=None,
         source_url=source_url,
     )
     return ParseResult(success=True, parser_id=PARSER_ID, parser_version=PARSER_VERSION, watches=[watch])

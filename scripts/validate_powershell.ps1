@@ -12,6 +12,7 @@ $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 $Targets = @(
     (Join-Path $ScriptDir "install_windows_task.ps1"),
     (Join-Path $ScriptDir "run_scheduled.ps1"),
+    (Join-Path $ScriptDir "run_scheduled_experimental.ps1"),
     (Join-Path $ScriptDir "status_windows_task.ps1"),
     (Join-Path $ScriptDir "remove_windows_task.ps1"),
     (Join-Path $ScriptDir "validate_powershell.ps1")

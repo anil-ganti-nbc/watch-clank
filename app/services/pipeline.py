@@ -151,6 +151,8 @@ class PipelineService:
             crystal=extra.get("crystal"),
             water_resistance_m=extra.get("water_resistance_m"),
             limited_edition=extra.get("limited_edition"),
+            movement_type=extra.get("movement_type"),
+            caliber_or_module=extra.get("caliber_or_module"),
             extra_specs=extra.get("extra_specs") or {},
         )
         self.session.add(watch)
@@ -356,6 +358,8 @@ class PipelineService:
                 "crystal": pw.crystal,
                 "water_resistance_m": pw.water_resistance_m,
                 "limited_edition": pw.limited_edition,
+                "movement_type": pw.movement_type,
+                "caliber_or_module": pw.caliber_or_module,
                 "extra_specs": pw.extra_specs,
             }
 
@@ -1531,7 +1535,7 @@ class PipelineService:
         self,
         brand: str,
         *,
-        max_items: int | None = 10,
+        max_items: int | None = 300,
         offline_fixture: object = None,
         emit_events: bool = True,
     ) -> CollectorRun:
@@ -1569,7 +1573,7 @@ class PipelineService:
             from app.collectors.seiko_products import (
                 SeikoProductsCollector,
             )
-            from app.parsers.citizen_products import parse_citizen_product_html
+            from app.parsers.citizen_products import parse_citizen_search_hit
             from app.parsers.seiko_products import parse_seiko_product_json
 
             self._PRODUCT_REGISTRY.update(
@@ -1578,9 +1582,9 @@ class PipelineService:
                         "collector_cls": CitizenProductsCollector,
                         "collector_id": CITIZEN_PROD_ID,
                         "collector_version": CITIZEN_PROD_VER,
-                        "parse_fn": parse_citizen_product_html,
+                        "parse_fn": parse_citizen_search_hit,
                         "default_region": CITIZEN_PROD_REGION,
-                        "offline_kwarg": "collection_html",
+                        "offline_kwarg": "search_pages",
                     },
                     "seiko": {
                         "collector_cls": SeikoProductsCollector,
@@ -1588,7 +1592,7 @@ class PipelineService:
                         "collector_version": SEIKO_PROD_VER,
                         "parse_fn": parse_seiko_product_json,
                         "default_region": SEIKO_PROD_REGION,
-                        "offline_kwarg": "listing_json",
+                        "offline_kwarg": "listing_pages",
                     },
                 }
             )

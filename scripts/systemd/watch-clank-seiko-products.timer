@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL Seiko product/catalogue lane every 6 hours
+
+[Timer]
+# Same reasoning as Citizen's product timer: the full ~2-3-request paginated
+# catalogue crawl (225 watches) 4x/day is light on the source and still
+# catches same-day price/availability transitions.
+OnBootSec=20min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

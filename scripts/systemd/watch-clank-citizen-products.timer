@@ -1,0 +1,15 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL Citizen product/catalogue lane every 6 hours
+
+[Timer]
+# Price/availability move slower than announcements — a same-day sell-out or
+# price change is still caught well within a news cycle at 4x/day, while
+# keeping the ~12-request paginated crawl (mens+womens, ~530 candidates)
+# to a conservative total request volume (~48 fetches/day against the
+# source, not per-product — see app/collectors/citizen_products.py).
+OnBootSec=15min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

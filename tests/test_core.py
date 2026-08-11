@@ -1463,6 +1463,11 @@ def test_citizen_product_baseline_observation_creates_no_event(db_session: Sessi
     watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Citizen")).all()
     assert len(watches) == 1
     assert watches[0].reference_canonical == "AT8294-59E"  # conservative pass-through identity
+    # Regression: caliber_or_module/movement_type were parsed by every brand's
+    # parser but never actually passed into the Watch row (found live during
+    # Sprint 4 field-completeness validation — 0/311 real Citizen watches had
+    # a movement recorded despite the parser correctly extracting "H800").
+    assert watches[0].caliber_or_module == "H800"
 
     obs = db_session.scalars(select(SourceObservation)).all()
     assert len(obs) == 1
@@ -1697,3 +1702,157 @@ def test_seiko_product_pipeline_baseline_then_price_change(db_session: Session, 
 
     events = db_session.scalars(select(Event)).all()
     assert len(events) == 1 and events[0].event_type == "PRICE_CHANGE"
+
+
+# --- Sprint 4: Citizen broad catalogue discovery (search-hit pagination) ---
+# citizen_search_attesa_page{1,2}.html are real Citizen search-hit records
+# (from the live attesa collection, 2026-08-11) trimmed to essential fields,
+# split across two synthetic "pages" with an inflated total (50) purely to
+# exercise multi-page pagination mechanics deterministically and quickly —
+# the real site would never split 3 hits across 2 pages of limit=48, but the
+# offset/total loop logic under test doesn't care how many hits are on any
+# one page, only whether it keeps fetching until offset reaches the
+# source-reported total.
+
+
+def test_citizen_search_page_parses_hits_and_total():
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    html = (FIXTURES / "citizen_search_attesa_page1.html").read_text(encoding="utf-8")
+    items, total = CitizenProductsCollector().parse_search_page(html)
+    assert total == 50
+    assert [i.reference_hint for i in items] == ["CC4107-80H", "CC4078-51E"]
+    assert items[0].metadata["product_dict"]["_hit_price"] == 2195
+
+
+def test_citizen_search_pagination_follows_total_across_pages():
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    p1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    p2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+    items, fetches = CitizenProductsCollector().discover_via_search(search_pages={"mens": [p1, p2]})
+    refs = [i.reference_hint for i in items]
+    assert refs == ["CC4107-80H", "CC4078-51E", "AT8384-58E"]
+    # 2 real pages for "mens" + 1 failed attempt for "womens" (no fixture
+    # supplied) = 3 fetch attempts, proving both real pagination continuation
+    # AND graceful handling of a collection with no data available.
+    assert len(fetches) == 3
+    assert fetches[-1].success is False
+
+
+def test_citizen_search_pagination_dedupes_across_collections():
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    p1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    p2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+    items, _ = CitizenProductsCollector().discover_via_search(search_pages={"mens": [p1, p2], "womens": [p1, p2]})
+    # same 3 references appear via both "mens" and "womens" fixtures reused —
+    # must be deduplicated to 3, not 6
+    assert len(items) == 3
+
+
+def test_citizen_search_pagination_respects_safety_cap():
+    """A collector bug or anomalous source reporting a huge total must not
+    trigger unbounded pagination — the MAX_CANDIDATES_PER_COLLECTION cap
+    bounds it, protecting against a catalogue-collapse-style runaway."""
+    import app.collectors.citizen_products as citizen_products_mod
+
+    p1 = (FIXTURES / "citizen_search_attesa_page1.html").read_text(encoding="utf-8")
+    huge_total_page = p1.replace('"total":50', '"total":999999').encode("utf-8")
+    # Same page repeated many times — pagination must stop at the cap, not
+    # loop until it runs out of list items or hits total=999999.
+    pages = [huge_total_page] * 20
+    original_cap = citizen_products_mod.MAX_CANDIDATES_PER_COLLECTION
+    citizen_products_mod.MAX_CANDIDATES_PER_COLLECTION = 10
+    try:
+        items, fetches = citizen_products_mod.CitizenProductsCollector().discover_via_search(
+            search_pages={"mens": pages}
+        )
+    finally:
+        citizen_products_mod.MAX_CANDIDATES_PER_COLLECTION = original_cap
+    assert len(fetches) < 20  # stopped well before exhausting the fixture list
+
+
+def test_citizen_search_hit_pipeline_baseline_then_no_duplicate(db_session: Session, tmp_settings: Settings):
+    """A search-hit-sourced observation has no availability signal (UNKNOWN,
+    not guessed) but still participates correctly in baseline/dedup."""
+    import json
+
+    from app.collectors.base import FetchResult
+    from app.models import Event, Watch
+    from app.parsers.citizen_products import parse_citizen_search_hit
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    html = (FIXTURES / "citizen_search_attesa_page1.html").read_text(encoding="utf-8")
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    items, _ = CitizenProductsCollector().parse_search_page(html)
+    product_dict = items[0].metadata["product_dict"]
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    def process():
+        fr = FetchResult(
+            url="https://citizenwatch.com/us/en/product/CC4107-80H", success=True, status_code=200,
+            content_type="application/json", payload=json.dumps(product_dict).encode("utf-8"),
+        )
+        return pipeline.process_fetch_result(
+            fr, run_id=run.id, collector_id="citizen_products", collector_version="0.1.0",
+            parse_fn=parse_citizen_search_hit, default_region="US", emit_events=True,
+        )
+
+    out1 = process()
+    assert out1["success"] and out1["new_watch"] is True
+    assert out1["product_event"]["event_type"] is None
+
+    out2 = process()
+    assert out2["new_watch"] is False
+    assert out2["product_event"]["event_type"] is None  # identical repeat -> no event
+
+    watches = db_session.scalars(select(Watch).where(Watch.reference_canonical == "CC4107-80H")).all()
+    assert len(watches) == 1
+    assert watches[0].case_material == "Super Titanium"
+    assert db_session.scalars(select(Event)).first() is None
+
+
+# --- Sprint 4: Seiko full-catalogue pagination ------------------------------
+# seiko_products_page{1,2}.json are real captures (2026-08-11) trimmed to a
+# few products each; page3_empty.json is the real empty-products response
+# Shopify returns past the last page — the natural pagination terminator.
+
+
+def test_seiko_pagination_follows_pages_until_empty():
+    from app.collectors.seiko_products import SeikoProductsCollector
+
+    p1 = (FIXTURES / "seiko_products_page1.json").read_bytes()
+    p2 = (FIXTURES / "seiko_products_page2.json").read_bytes()
+    p3 = (FIXTURES / "seiko_products_page3_empty.json").read_bytes()
+    items, fetches = SeikoProductsCollector().discover_all_pages(listing_pages=[p1, p2, p3])
+    # page1 has 1 strap (filtered) + 3 watches, page2 has 2 more watches
+    assert len(items) == 5
+    assert len(fetches) == 3  # stopped after the empty page, did not overrun
+    assert all(f.success for f in fetches)
+
+
+def test_seiko_pagination_stops_on_first_empty_page():
+    from app.collectors.seiko_products import SeikoProductsCollector
+
+    p1 = (FIXTURES / "seiko_products_page1.json").read_bytes()
+    p3 = (FIXTURES / "seiko_products_page3_empty.json").read_bytes()
+    items, fetches = SeikoProductsCollector().discover_all_pages(listing_pages=[p1, p3])
+    assert len(items) == 3  # only page1's watches
+    assert len(fetches) == 2
+
+
+def test_seiko_pagination_dedupes_repeated_reference_across_pages():
+    from app.collectors.seiko_products import SeikoProductsCollector
+
+    p1 = (FIXTURES / "seiko_products_page1.json").read_bytes()
+    items, _ = SeikoProductsCollector().discover_all_pages(listing_pages=[p1, p1])  # same page "twice"
+    # second identical page contributes zero new (all refs already seen) —
+    # discover_all_pages doesn't itself stop on a repeat, but dedup must hold
+    assert len(items) == 3

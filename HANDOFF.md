@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** Casio Stage 1 soak (unaffected, still running) + experimental Citizen/Seiko discovery AND product/catalogue observation lanes (both real, live-validated, both schedulable, neither on any real schedule yet)
+**Current phase:** Casio Stage 1 soak (unaffected, still running) + FOUR experimental lanes (citizen_news, seiko_jp_news, citizen_products, seiko_products) approved for scheduling, wrapper/systemd templates in place, all four run successfully against the real production DB with real broad-catalogue data (311 Citizen watches, 225 Seiko watches at last run)
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,164 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-11 (Sprint 4) — Turned it on: scheduling + broad catalogue coverage
+
+**Starting point verified:** HEAD was `114d7be` as expected, clean tree,
+77/77 tests passing, Ruff clean, Alembic at head, Casio soak healthy (run
+66 `PARTIAL`, run 65's Sprint-2 stale-recovery still in effect, no leftover
+locks).
+
+**Owner explicitly approved scheduling the four experimental lanes** based
+on Sprint 3's passing acceptance criteria — not re-litigated this sprint.
+
+**Phase 1 — scheduling infrastructure:**
+- `scripts/run_pipeline.py`: new `--experimental-product {citizen,seiko}`
+  flag (mirrors Sprint 3's `--experimental-brand`), default `max_items=300`
+  to cover the full discovered catalogue rather than a small sample.
+- `scripts/run_scheduled_experimental.ps1` (new): one generic Windows
+  wrapper parameterized by `-Lane`, same exit-code contract and log-writing
+  pattern as `run_scheduled.ps1`, own log files per lane
+  (`scheduled-experimental-<lane>-{wrapper,python}.log`) so nothing
+  interleaves with Casio's logs. Added to `validate_powershell.ps1`'s
+  syntax-check list.
+- `scripts/systemd/`: replaced the single ambiguous Sprint-2
+  `watch-clank-experimental.*` pair (which was actually Citizen-news-only)
+  with four clearly-named unit pairs: `watch-clank-{citizen-news,seiko-news,
+  citizen-products,seiko-products}.{service,timer}`. Cadence: news lanes
+  90 min (matches Casio's own interval — announcements are infrequent);
+  product lanes 6h (same-day price/availability transitions are still
+  caught well within a news cycle; keeps the paginated catalogue crawl's
+  request volume low). Rationale documented in each `.timer` file and in
+  `scripts/systemd/README.md`.
+- **At least one real run of all four lanes was performed against the
+  actual production `data/watch_clank.db`** (not a throwaway DB — the
+  owner explicitly approved this): run ids 68-73. Casio's own run 67 fired
+  naturally via Task Scheduler *during* this session, interleaved with the
+  experimental runs, with zero interference in either direction — real
+  proof of isolation, not just a design claim.
+
+**Phase 2 — Citizen catalogue expansion (the sprint's highest-value task):**
+Sprint 3's discovery only scraped product links off 3 small collection
+pages (~8 references). Investigated citizenwatch.com broadly: no
+sitemap.xml exists, but the collection pages themselves are backed by a
+server-rendered search/listing API (`"data":{"limit":...,
+"effectiveSearchMode"` JSON, same hydration pattern as the individual
+product page) supporting `?offset=&limit=` pagination and reporting an
+authoritative `total`. Confirmed live: `mens` collection total=348,
+`womens` total=182. Each search "hit" already carries a `representedProduct`
+object with almost the full spec set (case material, movement, water
+resistance, dial/band/crystal, intro date, collection) — **no second HTTP
+request per product needed**, unlike Sprint 3's per-page-fetch approach.
+New `CitizenProductsCollector.discover_via_search()` paginates both
+categories (bounded by `MAX_CANDIDATES_PER_COLLECTION=600` as
+catalogue-collapse protection against an anomalous `total`), new
+`parse_citizen_search_hit()` parser (shares field-mapping with the existing
+`parse_citizen_product_html` via a new `_watch_from_product_data` helper).
+Tradeoff, stated plainly: this broader path has no availability signal
+(Citizen's search API doesn't expose inventory/orderable state, only the
+individual product page does) — `availability_status` is `None`/UNKNOWN
+from this path, never guessed. The old per-product-page path
+(`discover_from_collection_html` + `parse_citizen_product_html`, which
+*does* have availability) is kept, unused by default `run()`, available for
+a future smaller/deeper pass.
+
+**A pagination bug was found and fixed via testing before this shipped:**
+the original loop terminated on "page returned fewer than `limit` items,"
+which is correct for the real site (pages are always full except the last)
+but broke on small test fixtures. Fixed to rely solely on the
+source-reported `total` (authoritative) with the short-page heuristic only
+as a fallback when `total` is unavailable. Caught by
+`test_citizen_search_pagination_follows_total_across_pages` before any live
+run, not after.
+
+**Phase 3 — Seiko catalogue expansion:** `seikousa.com`'s
+`/collections/all/products.json` supports Shopify's standard `?page=N`
+pagination. Confirmed live: page 1 = 250 products, page 2 = 26 more, page 3
+= empty (natural terminator) — **276 total products, 225 of them
+`product_type == "Wrist Watches"`** (the rest: straps, clocks, gifts,
+filtered out deterministically by that field, not by reference-format
+guessing). This is the full catalogue, not a sample. New
+`SeikoProductsCollector.discover_all_pages()`, bounded by `MAX_PAGES=20` as
+catalogue-collapse protection. Seiko per-product-page enrichment (JSON-LD
+`Product` schema exists and does carry a rich description — confirmed via a
+time-boxed check) was investigated and found reliably obtainable, but
+**deliberately not built**: it would require a second HTTP fetch per
+product (225 extra requests) for enrichment beyond what the existing
+Shopify listing already provides (title, sku, price, availability),
+contradicting the "no second fetch per product" design just adopted for
+Citizen. Documented as a real, available, not-yet-taken option — not a
+blocker.
+
+**Real, pre-existing bug found and fixed via this sprint's live
+validation** (not something Sprint 4 introduced — present since Sprint 1):
+`caliber_or_module`/`movement_type` are fields on both `ParsedWatch` and
+`Watch`, correctly extracted by every brand's parser (confirmed: Citizen's
+parser test already asserted `w.caliber_or_module == "H800"` at the
+`ParsedWatch` level), but `_resolve_or_create_watch`'s `Watch(...)`
+constructor in `app/services/pipeline.py` never read them from the `extra`
+dict — and the `extra` dict itself never included them either. Silently
+dropped for every brand, forever, until this sprint's field-completeness
+check on the real production DB showed 0/311 Citizen watches had a
+recorded movement despite the parser extracting one correctly. Fixed both
+gaps; regression test added
+(`test_citizen_product_baseline_observation_creates_no_event` now also
+asserts `watches[0].caliber_or_module == "H800"`). Only affects newly
+created watches going forward — the 311 Citizen/225 Seiko rows already in
+the production DB from this session's live runs keep `caliber_or_module =
+NULL` until a future observation backfills them (existing-watch backfill
+only covers `model_name`/`collection` today, a pre-existing and unchanged
+design choice, not expanded this sprint).
+
+**Tests:** 77 → **85 passed**. New: Citizen search-hit pagination
+(page-following, cross-collection dedup, safety-cap enforcement, the
+baseline/no-duplicate-event pipeline path through the new parser), Seiko
+multi-page pagination (follows pages until empty, stops on first empty
+page, dedup across repeated pages), and the `caliber_or_module` regression.
+`ruff check .`: all checks passed. `alembic current`: unchanged.
+
+**Real production-DB state after this session's live runs:**
+```
+watches:                Casio 22, Citizen 311, Seiko 225
+Citizen field completeness (of 311): case_material 297, collection 310,
+  water_resistance_m 247, caliber_or_module 0 at capture time (bug found
+  live, fixed for future observations — see above)
+Citizen SourceObservations: 600 (price 600/600, availability 0/600 — all
+  from the broad search-hit path this session; the depth path with real
+  availability exists but wasn't the one scheduled by default)
+Seiko SourceObservations: 450 (price 450/450, availability 450/450)
+Events: 11 NEW_REFERENCE (all from citizen_news; product lanes correctly
+  produced 0 events on both their baseline and repeat runs — real evidence,
+  not fixture-only)
+```
+Repeat-run proof, real data, not synthetic: citizen_products run 68 → 300
+new watches; run 69 (immediately after, live data unchanged) → 0 new
+watches, 0 events. seiko_products run 70 → 225 new watches; run 71 → 0 new
+watches, 0 events.
+
+**Casio soak:** unaffected throughout. Run 67 fired via Task Scheduler
+mid-session (`SUCCESS`), interleaved with six experimental runs, with zero
+interaction — real evidence for the isolation claim, not just a design
+argument.
+
+**Discord:** still inert — no webhook found in this environment, none
+invented, per instruction. `notify=True` is wired for both product lanes
+identically to the news lanes (Sprint 2 pattern), so it activates the
+moment a webhook is configured; no further code change needed.
+
+**Next action / top 5 priorities:** (1) decide on Citizen's availability
+gap — either accept UNKNOWN availability from the broad search path
+long-term, or add a periodic smaller deep pass using the existing
+per-product-page path for a curated subset (e.g. only watches with a
+recent price/reference change) to recover availability without 500+ extra
+requests every cycle; (2) if real Seiko availability enrichment
+(movement/case material) is wanted later, the JSON-LD path is confirmed
+viable — budget the extra per-product request cost explicitly; (3)
+consider a backfill pass for the 311/225 watches already missing
+`caliber_or_module` from before this session's fix; (4) let the four
+scheduled lanes run unattended for a few real days and review event/alert
+quality at real volume; (5) seikowatches.com's `/v3/api/` remains
+unresolved — still not the priority while seikousa.com continues to work.
 
 ## 2026-08-11 (Sprint 3) — Real Citizen + Seiko product observations flowing
 

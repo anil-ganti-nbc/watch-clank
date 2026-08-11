@@ -149,6 +149,26 @@ def run_experimental_brand(brand: str, max_items: int = 10) -> int:
         return EXIT_FAILED
 
 
+def run_experimental_product(brand: str, max_items: int = 300) -> int:
+    """EXPERIMENTAL lane: Citizen/Seiko product/catalogue observation.
+    Same isolation as run_experimental_brand above — own lock file +
+    collector_id, own collector_runs rows, cannot touch Casio state."""
+    settings = get_settings()
+    print(f"database_url={settings.resolved_database_url} brand={brand}")
+    with session_scope() as session:
+        pipeline = PipelineService(session)
+        try:
+            run = pipeline.run_product_observation_pipeline(brand, max_items=max_items)
+        except Exception as exc:
+            logger.exception("experimental_product_run_fatal", brand=brand, error=str(exc))
+            print(f"FATAL: {exc}")
+            return EXIT_FATAL
+        print(f"[{brand}] Run id={run.id} status={run.status} summary={run.summary_metadata}")
+        if run.status in ("SUCCESS", "PARTIAL", "ZERO_ITEMS", "BLOCKED", "SKIPPED_OVERLAP"):
+            return EXIT_OK
+        return EXIT_FAILED
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Watch Clank Casio pipeline")
     parser.add_argument("--fixture-mode", action="store_true")
@@ -164,15 +184,27 @@ def main() -> None:
         default=None,
         help="Run the EXPERIMENTAL Citizen/Seiko news-discovery lane instead of Casio",
     )
-    parser.add_argument("--max-items", type=int, default=10)
+    parser.add_argument(
+        "--experimental-product",
+        choices=["citizen", "seiko"],
+        default=None,
+        help="Run the EXPERIMENTAL Citizen/Seiko product/catalogue-observation lane instead of Casio",
+    )
+    parser.add_argument(
+        "--max-items", type=int, default=None,
+        help="Override per-mode default (Casio modes default 10; --experimental-product defaults 300 to cover the full discovered catalogue)",
+    )
     args = parser.parse_args()
 
     if args.experimental_brand:
-        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items))
+        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10))
+    if args.experimental_product:
+        kwargs = {} if args.max_items is None else {"max_items": args.max_items}
+        sys.exit(run_experimental_product(args.experimental_product, **kwargs))
     if args.fixture_mode:
-        sys.exit(run_fixture_mode(args.max_items))
+        sys.exit(run_fixture_mode(args.max_items or 10))  # preserves prior argparse-default behavior (10, not the function's own 5)
     if args.live or args.scheduled:
-        sys.exit(run_live_or_scheduled(args.max_items, scheduled=args.scheduled))
+        sys.exit(run_live_or_scheduled(args.max_items or 10, scheduled=args.scheduled))
     parser.print_help()
     sys.exit(1)
 

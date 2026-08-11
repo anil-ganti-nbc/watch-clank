@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL Citizen news lane every 90 minutes
+
+[Timer]
+# Same cadence as Casio's own news lane (watch-clank.timer) — press
+# announcements arrive infrequently; 90 minutes is frequent enough to catch
+# a same-day announcement without hammering the source.
+OnBootSec=6min
+OnUnitActiveSec=90min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
