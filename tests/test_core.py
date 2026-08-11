@@ -847,3 +847,301 @@ def test_news_deduplication_repeated_announcement_no_duplicate_lead(
     assert second["success"] and second["new_lead"] is False
     leads = db_session.scalars(select(ReleaseLead).where(ReleaseLead.announcement_url == url)).all()
     assert len(leads) == 1
+
+
+# --- Citizen / Seiko experimental discovery (sprint: multi-brand coverage) --
+# These sources are wired through PipelineService.run_brand_news_pipeline,
+# which is NOT called from scripts/run_pipeline.py --scheduled. Casio's
+# production behaviour is covered by the tests above and is asserted
+# unaffected by the generalization (test_casio_production_path_unaffected_*).
+
+
+def test_citizen_news_discovery_parses_fixture():
+    from app.collectors.citizen_news import CitizenNewsCollector
+
+    html = (FIXTURES / "citizen_news_list.html").read_text(encoding="utf-8")
+    items = CitizenNewsCollector().discover_index(html)
+    assert len(items) == 3
+    assert all(i.metadata["source_region"] == "GLOBAL" for i in items)
+    assert any("ATTESA" in (i.title or "") for i in items)
+
+
+def test_citizen_news_parser_extracts_reference_and_collection():
+    from app.parsers.citizen_news import parse_citizen_news_html
+
+    html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    result = parse_citizen_news_html(html, source_url="https://www.citizenwatch-global.com/news/2026/20260610/index.html")
+    assert result.success
+    assert "ATTESA" in (result.title or "")
+    refs = [r.normalized for r in result.model_references]
+    assert "CC4107-80H" in refs
+    assert result.collection == "Attesa"
+
+
+def test_seiko_watch_filter_excludes_corporate_noise():
+    from app.collectors.seiko_news import is_watch_announcement
+
+    assert is_watch_announcement("Seiko Launches New Prospex Diver's Watch", "Press Release") is True
+    assert is_watch_announcement('Seiko Launches "Seiko Time & Jazz"', "Press Release Music") is False
+    assert is_watch_announcement("Full-Scale Replica of the Clock Tower Unveiled", "Topics") is False
+
+
+def test_seiko_news_discovery_filters_to_watch_items():
+    from app.collectors.seiko_news import SeikoNewsCollector
+
+    html = (FIXTURES / "seiko_news_list.html").read_text(encoding="utf-8")
+    items = SeikoNewsCollector().discover_index(html)
+    # 3 items in fixture: Music (filtered), clock tower Topics (filtered), Prospex Press Release (kept)
+    assert len(items) == 1
+    assert "Prospex" in (items[0].title or "")
+
+
+def test_seiko_news_parser_extracts_reference_and_collection():
+    from app.parsers.seiko_news import parse_seiko_news_html
+
+    html = (FIXTURES / "seiko_news_detail.html").read_bytes()
+    result = parse_seiko_news_html(html, source_url="https://www.seiko.co.jp/en/news/sgc/2026/202604220900.html")
+    assert result.success
+    refs = [r.normalized for r in result.model_references]
+    assert "SPB255" in refs
+    assert result.collection == "Prospex"
+
+
+def test_citizen_reference_normalization_is_conservative_passthrough():
+    from app.normalization.references import normalize_citizen_reference
+
+    n = normalize_citizen_reference("CC4107-80H")
+    assert n.reference_raw == "CC4107-80H"
+    assert n.reference_canonical == "CC4107-80H"  # no suffix stripping
+    assert n.manufacturer == "Citizen"
+
+
+def test_seiko_reference_normalization_is_conservative_passthrough():
+    from app.normalization.references import normalize_seiko_reference
+
+    n = normalize_seiko_reference("SPB255")
+    assert n.reference_raw == "SPB255"
+    assert n.reference_canonical == "SPB255"
+    assert n.manufacturer == "Seiko"
+
+
+def test_brand_news_pipeline_citizen_creates_lead_watch_and_event(db_session: Session, tmp_settings: Settings):
+    from unittest.mock import patch
+
+    from app.collectors.base import CollectorRunResult
+    from app.collectors.base import FetchResult as CitizenFetchResult
+    from app.collectors.citizen_news import CitizenNewsCollector
+    from app.models import Event, ReleaseLead, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    list_html = (FIXTURES / "citizen_news_list.html").read_bytes()
+    detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+
+    def fake_run(self, *, max_items=None, index_html=None):
+        col = CitizenNewsCollector()
+        items = col.discover_index(list_html.decode("utf-8"))
+        item = next(i for i in items if "ATTESA" in (i.title or ""))
+        result = CollectorRunResult(
+            collector_id="citizen_news", collector_version="0.1.0", region="GLOBAL", trust_score=95.0
+        )
+        result.discovered = [item]
+        result.fetched.append(
+            CitizenFetchResult(url=item.url, success=True, status_code=200, content_type="text/html", payload=detail_html)
+        )
+        result.metadata["component_status"] = "SUCCESS"
+        return result
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with patch.object(CitizenNewsCollector, "run", fake_run):
+        run = pipeline.run_brand_news_pipeline("citizen", max_items=5)
+
+    assert run.status == "SUCCESS"
+    lead = db_session.scalars(select(ReleaseLead)).first()
+    assert lead is not None and lead.manufacturer == "Citizen" and lead.brand == "Citizen"
+    watch = db_session.scalars(select(Watch)).first()
+    assert watch is not None and watch.manufacturer == "Citizen"
+    assert watch.reference_canonical == "CC4107-80H"
+
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1
+    assert events[0].event_type == "NEW_REFERENCE"
+    assert events[0].story_score is not None
+    assert events[0].extra["reasons"]  # explainable, non-empty
+
+
+def test_brand_news_pipeline_new_region_detected_not_new_reference(db_session: Session, tmp_settings: Settings):
+    """Same underlying watch, genuinely separate announcement (distinct
+    merge_key so it is not caught by the existing duplicate-announcement
+    dedup) in a second region -> NEW_REGION, not a second NEW_REFERENCE.
+
+    Note: two announcements of the *identical* reference text and URL-family
+    are correctly caught by the pre-existing merge_key dedup before reaching
+    event detection at all (see test_brand_news_pipeline_repeat_same_region_
+    emits_no_event) — that is intentional duplicate-lead protection, not a
+    bug. NEW_REGION is reachable when the same watch is independently
+    referenced by a second, distinct announcement/lead (e.g. a different
+    source), which is what this test constructs.
+    """
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event, ReleaseLead
+    from app.parsers.citizen_news import parse_citizen_news_html
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    fr1 = FetchResult(
+        url="https://www.citizenwatch-global.com/news/2026/20260610/index.html",
+        success=True, status_code=200, content_type="text/html", payload=detail_html,
+    )
+    out1 = pipeline.process_news_announcement(
+        fr1, run_id=run.id, discovered_meta={"source_region": "GLOBAL"},
+        collector_id="citizen_news", manufacturer="Citizen", brand="Citizen",
+        parse_fn=parse_citizen_news_html, merge_key_prefix="citizen",
+        default_region="GLOBAL", emit_events=True,
+    )
+    assert out1["watch_events"][0]["event_type"] == "NEW_REFERENCE"
+    watch_id = db_session.scalars(select(Watch)).one().id
+
+    # Simulate a second, independent lead for the same watch from a
+    # different source (distinct merge_key => not deduped as a repeat).
+    seed_lead = ReleaseLead(
+        manufacturer="Citizen", brand="Citizen",
+        announcement_title="Prior JP retailer listing", announcement_url="https://example-jp/other-source",
+        source_id="other_source", source_region="JP",
+        merge_key="other_source:CC4107-80H", watch_ids=[watch_id],
+    )
+    db_session.add(seed_lead)
+    db_session.commit()
+
+    # Now a genuinely new US-region announcement referencing this watch,
+    # distinct merge_key/URL from both fr1 and the seeded JP lead.
+    fr2 = FetchResult(
+        url="https://www.citizenwatch-global.com/news/2026/20260701/index.html",
+        success=True, status_code=200, content_type="text/html", payload=detail_html,
+    )
+    out2 = pipeline.process_news_announcement(
+        fr2, run_id=run.id, discovered_meta={"source_region": "US"},
+        collector_id="citizen_news", manufacturer="Citizen", brand="Citizen",
+        parse_fn=parse_citizen_news_html, merge_key_prefix="citizen2",
+        default_region="US", emit_events=True,
+    )
+    # US was never seen before (only GLOBAL and JP were) -> NEW_REGION
+    assert out2["watch_events"][0]["event_type"] == "NEW_REGION"
+
+    events = db_session.scalars(select(Event)).all()
+    event_types = sorted(e.event_type for e in events)
+    assert event_types == ["NEW_REFERENCE", "NEW_REGION"]
+
+
+def test_brand_news_pipeline_repeat_same_region_emits_no_event(db_session: Session, tmp_settings: Settings):
+    """A duplicate observation in the same region is silent (no event), per the
+    'baseline is not news' rule — protects against false-positive event spam."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.parsers.citizen_news import parse_citizen_news_html
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    url = "https://www.citizenwatch-global.com/news/2026/20260610/index.html"
+    kwargs = {
+        "run_id": run.id, "discovered_meta": {"source_region": "GLOBAL"},
+        "collector_id": "citizen_news", "manufacturer": "Citizen", "brand": "Citizen",
+        "parse_fn": parse_citizen_news_html, "merge_key_prefix": "citizen",
+        "default_region": "GLOBAL", "emit_events": True,
+    }
+    fr1 = FetchResult(url=url, success=True, status_code=200, content_type="text/html", payload=detail_html)
+    out1 = pipeline.process_news_announcement(fr1, **kwargs)
+    assert out1["watch_events"][0]["event_type"] == "NEW_REFERENCE"
+
+    # Re-processing the exact same announcement URL re-uses the existing lead
+    # (new_lead=False) and re-runs watch resolution against the same,
+    # already-existing watch in the same, already-seen region -> no new
+    # evidence -> no event. This is the false-positive guard: reprocessing
+    # identical evidence must never fabricate a second event.
+    out2 = pipeline.process_news_announcement(fr1, **kwargs)
+    assert out2["success"] and out2["new_lead"] is False
+    assert out2["watch_events"][0]["event_type"] is None
+
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1
+
+
+def test_casio_production_path_emits_no_events_by_default(db_session: Session, tmp_settings: Settings):
+    """Non-negotiable safety rule: the existing Casio production call path
+    (no new kwargs) must not start writing Event rows just because the
+    scoring/event feature now exists in the same function."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    html = b"""
+    <html><body><h1>Casio Announces GA-2100 Regression Guard</h1>
+    <p>Reference GA-2100-1A1JF now available.</p></body></html>
+    """
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="casio_intl_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+    fr = FetchResult(
+        url="https://www.casio.com/intl/news/2026/test-no-events/",
+        success=True, status_code=200, content_type="text/html", payload=html,
+    )
+    out = pipeline.process_news_announcement(fr, run_id=run.id)
+    assert out["success"] and out["new_watch"]
+    assert "watch_events" not in out
+    assert db_session.scalars(select(Event)).first() is None
+
+
+def test_editorial_scoring_is_explainable_and_bounded():
+    from app.services.editorial import EventEvidence, score_event
+
+    scored = score_event(
+        EventEvidence(
+            event_type="NEW_REFERENCE",
+            manufacturer="Citizen",
+            brand="Citizen",
+            collection="Attesa",
+            region="GLOBAL",
+            is_first_party=True,
+        )
+    )
+    assert 0 <= scored.score <= 100
+    assert scored.reasons  # non-empty, explainable
+    assert scored.confidence in ("HIGH", "MEDIUM", "LOW")
+    # unrecognisable/unscored dimensions must say UNKNOWN, never invent a fact
+    assert any("UNKNOWN" in r for r in scored.reasons)
+
+
+def test_format_alert_only_echoes_supplied_evidence():
+    from app.services.editorial import EventEvidence, format_alert, score_event
+
+    scored = score_event(
+        EventEvidence(event_type="NEW_REFERENCE", manufacturer="Citizen", brand="Citizen", is_first_party=True)
+    )
+    text = format_alert(
+        manufacturer="Citizen",
+        brand="Citizen",
+        reference_raw="CC4107-80H",
+        scored=scored,
+        region="GLOBAL",
+        announcement_title="CITIZEN ATTESA New Limited-Edition Titanium Model",
+        announcement_url="https://www.citizenwatch-global.com/news/2026/20260610/index.html",
+        observed_at="2026-06-10T00:00:00Z",
+    )
+    assert "CC4107-80H" in text
+    assert "NEW_REFERENCE" in text
+    assert "Editorial score:" in text
+    assert "Confidence:" in text

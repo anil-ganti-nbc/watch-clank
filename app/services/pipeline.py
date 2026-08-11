@@ -28,12 +28,27 @@ from app.models import (
     Watch,
     WatchFamily,
 )
-from app.normalization.references import normalize_casio_reference, safe_overall_confidence
+from app.normalization.references import (
+    normalize_casio_reference,
+    normalize_citizen_reference,
+    normalize_seiko_reference,
+    safe_overall_confidence,
+)
 from app.parsers.casio_japan import PARSER_ID, PARSER_VERSION, parse_casio_product_html
+from app.services.editorial import EventEvidence, score_event
 from app.services.run_lock import RunLockService
 from app.services.snapshot_storage import SnapshotStorageService
 
 logger = get_logger(__name__)
+
+# Dispatch table for per-manufacturer reference normalization. Casio keeps its
+# exact original call path (default kwargs identical to pre-multi-brand code)
+# so existing Casio behaviour is provably unchanged.
+_NORMALIZERS = {
+    "Casio": normalize_casio_reference,
+    "Citizen": normalize_citizen_reference,
+    "Seiko": normalize_seiko_reference,
+}
 
 
 class PipelineService:
@@ -85,7 +100,8 @@ class PipelineService:
         run_id: int | None,
     ) -> tuple[Watch, bool]:
         """Return (watch, is_new). Identity: manufacturer + brand + reference_canonical."""
-        norm = normalize_casio_reference(
+        normalizer = _NORMALIZERS.get(manufacturer, normalize_casio_reference)
+        norm = normalizer(
             reference_raw,
             manufacturer=manufacturer,
             brand_hint=brand,
@@ -640,6 +656,98 @@ class PipelineService:
         backoff_until = ensure_utc(state.backoff_until)
         return backoff_until > datetime.now(UTC)
 
+    def _prior_regions_for_watch(self, watch_id: int, *, exclude_lead_id: int | None) -> frozenset[str]:
+        """Regions this watch has previously been announced/observed in.
+
+        Looked up from ReleaseLead history (JSON watch_ids column) rather
+        than SourceObservation, since news-announcement leads do not create
+        observations. Deliberately conservative: only counts leads with a
+        stored source_region, and never counts the lead currently being
+        processed.
+        """
+        from app.models import ReleaseLead
+
+        regions: set[str] = set()
+        candidates = self.session.query(ReleaseLead).filter(
+            ReleaseLead.watch_ids.isnot(None)
+        )
+        for lead in candidates:
+            if exclude_lead_id is not None and lead.id == exclude_lead_id:
+                continue
+            if not lead.source_region:
+                continue
+            if watch_id in (lead.watch_ids or []):
+                regions.add(lead.source_region)
+        return frozenset(regions)
+
+    def _record_watch_event(self, *, watch: Watch, is_new_watch: bool, lead, region: str | None) -> dict:
+        """Classify and persist a deterministic Event for a resolved watch.
+
+        Only NEW_REFERENCE and NEW_REGION are implemented — these are the
+        two transitions we currently have real evidence for from a news
+        announcement (no price/spec/availability observation flows through
+        this path yet). Routine repeat-region observations create no event
+        and are stored silently, matching the "baseline is not news" rule.
+        """
+        from app.models import Event, EventWatch
+
+        prior_regions = self._prior_regions_for_watch(watch.id, exclude_lead_id=lead.id)
+
+        if is_new_watch:
+            event_type = "NEW_REFERENCE"
+        elif region and prior_regions and region not in prior_regions:
+            event_type = "NEW_REGION"
+        else:
+            return {"event_type": None, "reason": "no_new_evidence"}
+
+        evidence = EventEvidence(
+            event_type=event_type,
+            manufacturer=watch.manufacturer,
+            brand=watch.brand,
+            collection=watch.collection or lead.collection,
+            region=region,
+            is_first_party=True,
+            prior_regions=prior_regions,
+            reference_raw=watch.reference_raw,
+        )
+        scored = score_event(evidence)
+
+        event = Event(
+            event_type=scored.event_type,
+            title=f"{watch.manufacturer} {watch.reference_raw}: {scored.event_type}",
+            status="DRAFT",
+            story_score=scored.score,
+            confidence_score={"HIGH": 90.0, "MEDIUM": 60.0, "LOW": 30.0}[scored.confidence],
+            data_completeness_score=lead.completeness_score,
+            scoring_rule_version=scored.scoring_rule_version,
+            extra={
+                "reasons": scored.reasons,
+                "confidence_label": scored.confidence,
+                "lead_id": lead.id,
+                "announcement_url": lead.announcement_url,
+                "region": region,
+                "prior_regions": sorted(prior_regions),
+            },
+        )
+        self.session.add(event)
+        self.session.flush()
+        self.session.add(EventWatch(event_id=event.id, watch_id=watch.id, role="subject"))
+
+        logger.info(
+            "editorial_event_recorded",
+            event_id=event.id,
+            event_type=scored.event_type,
+            watch_id=watch.id,
+            score=scored.score,
+            confidence=scored.confidence,
+        )
+        return {
+            "event_type": scored.event_type,
+            "event_id": event.id,
+            "score": scored.score,
+            "confidence": scored.confidence,
+        }
+
     def process_news_announcement(
         self,
         fr: FetchResult,
@@ -648,10 +756,26 @@ class PipelineService:
         discovered_meta: dict | None = None,
         collector_id: str = "casio_intl_news",
         collector_version: str = "0.1.0",
+        manufacturer: str = "Casio",
+        brand: str = "Casio",
+        parse_fn=None,
+        merge_key_prefix: str | None = None,
+        default_region: str = "INTL",
+        emit_events: bool = False,
     ) -> dict:
-        """Persist a news announcement as release lead (+ optional watches)."""
+        """Persist a news announcement as release lead (+ optional watches).
+
+        manufacturer/brand/parse_fn/merge_key_prefix default to the original
+        Casio-only behaviour exactly, so existing callers (the production
+        Casio pipeline) are unaffected. Other brands pass their own parser
+        and identity via these kwargs (see run_brand_news_pipeline).
+        """
         from app.models import ReleaseLead
-        from app.parsers.casio_news import parse_casio_news_html
+
+        if parse_fn is None:
+            from app.parsers.casio_news import parse_casio_news_html as parse_fn
+        if merge_key_prefix is None:
+            merge_key_prefix = manufacturer.lower()
 
         outcome = {
             "success": False,
@@ -703,7 +827,7 @@ class PipelineService:
         self.session.add(fetch)
         self.session.flush()
 
-        parsed = parse_casio_news_html(fr.payload, source_url=fr.url)
+        parsed = parse_fn(fr.payload, source_url=fr.url)
         if not parsed.success:
             outcome["error"] = parsed.error
             self.session.commit()
@@ -724,7 +848,7 @@ class PipelineService:
         # merge key: preferred first model ref, else normalized URL path
         merge_key = None
         if parsed.model_references:
-            merge_key = f"casio:{parsed.model_references[0].normalized}"
+            merge_key = f"{merge_key_prefix}:{parsed.model_references[0].normalized}"
         else:
             merge_key = f"url:{fr.url.rstrip('/').lower()}"
 
@@ -753,15 +877,15 @@ class PipelineService:
             outcome["new_lead"] = False
         else:
             lead = ReleaseLead(
-                manufacturer="Casio",
-                brand="Casio",
+                manufacturer=manufacturer,
+                brand=brand,
                 collection=parsed.collection,
                 announcement_title=title[:512],
                 announcement_date=parsed.publication_date
                 or (discovered_meta or {}).get("publication_date_text"),
                 announcement_url=fr.url,
                 source_id=collector_id,
-                source_region=(discovered_meta or {}).get("source_region") or "INTL",
+                source_region=(discovered_meta or {}).get("source_region") or default_region,
                 source_language=(discovered_meta or {}).get("source_language") or "en",
                 model_references=refs_payload,
                 product_urls=parsed.product_urls,
@@ -783,8 +907,8 @@ class PipelineService:
                 continue
             watch, is_new = self._resolve_or_create_watch(
                 reference_raw=ref.raw,
-                manufacturer="Casio",
-                brand="Casio",
+                manufacturer=manufacturer,
+                brand=brand,
                 collection=parsed.collection,
                 model_name=None,
                 extra={},
@@ -795,6 +919,15 @@ class PipelineService:
                 watch_ids.append(watch.id)
             if is_new:
                 outcome["new_watch"] = True
+            if emit_events:
+                outcome.setdefault("watch_events", []).append(
+                    self._record_watch_event(
+                        watch=watch,
+                        is_new_watch=is_new,
+                        lead=lead,
+                        region=lead.source_region,
+                    )
+                )
         lead.watch_ids = watch_ids
         if watch_ids and not refs_payload:
             lead.enrichment_status = "ANNOUNCEMENT_ONLY"
@@ -985,4 +1118,158 @@ class PipelineService:
         finally:
             if not skip_lock:
                 lock.release()
+
+    # --- Experimental multi-brand news discovery (Citizen, Seiko) -----------
+    # Deliberately NOT called from scripts/run_pipeline.py's --scheduled path
+    # and does NOT share RunLockService/COLLECTOR_ID="casio_japan" overlap
+    # protection with the production Casio pipeline above — it writes its own
+    # collector_runs rows under brand-specific collector_ids and cannot
+    # collide with the soaking Casio scheduled run. It has no DB-level
+    # concurrency lock of its own yet; that should be added before this ever
+    # runs on a schedule (see HANDOFF.md promotion criteria).
+    _BRAND_REGISTRY: dict[str, dict[str, Any]] = {}
+
+    def run_brand_news_pipeline(
+        self,
+        brand: str,
+        *,
+        max_items: int | None = 10,
+        index_html: bytes | None = None,
+        emit_events: bool = True,
+    ) -> CollectorRun:
+        """Run an experimental single-brand news-discovery pipeline.
+
+        brand: "citizen" or "seiko". Casio is intentionally not supported
+        here — its production path is run_multi_source_pipeline/
+        run_casio_pipeline and must not be duplicated or bypassed.
+        """
+        if not self._BRAND_REGISTRY:
+            from app.collectors.citizen_news import (
+                COLLECTOR_ID as CITIZEN_ID,
+            )
+            from app.collectors.citizen_news import (
+                COLLECTOR_VERSION as CITIZEN_VER,
+            )
+            from app.collectors.citizen_news import (
+                CitizenNewsCollector,
+            )
+            from app.collectors.seiko_news import (
+                COLLECTOR_ID as SEIKO_ID,
+            )
+            from app.collectors.seiko_news import (
+                COLLECTOR_VERSION as SEIKO_VER,
+            )
+            from app.collectors.seiko_news import (
+                SeikoNewsCollector,
+            )
+            from app.parsers.citizen_news import parse_citizen_news_html
+            from app.parsers.seiko_news import parse_seiko_news_html
+
+            self._BRAND_REGISTRY.update(
+                {
+                    "citizen": {
+                        "collector_cls": CitizenNewsCollector,
+                        "collector_id": CITIZEN_ID,
+                        "collector_version": CITIZEN_VER,
+                        "parse_fn": parse_citizen_news_html,
+                        "manufacturer": "Citizen",
+                        "brand": "Citizen",
+                        "default_region": "GLOBAL",
+                    },
+                    "seiko": {
+                        "collector_cls": SeikoNewsCollector,
+                        "collector_id": SEIKO_ID,
+                        "collector_version": SEIKO_VER,
+                        "parse_fn": parse_seiko_news_html,
+                        "manufacturer": "Seiko",
+                        "brand": "Seiko",
+                        "default_region": "JP",
+                    },
+                }
+            )
+
+        if brand not in self._BRAND_REGISTRY:
+            raise ValueError(f"unsupported experimental brand: {brand!r}")
+        cfg = self._BRAND_REGISTRY[brand]
+
+        started = datetime.now(UTC)
+        run = CollectorRun(
+            collector_id=cfg["collector_id"],
+            collector_version=cfg["collector_version"],
+            started_at=started,
+            status="RUNNING",
+        )
+        self.session.add(run)
+        self.session.commit()
+
+        try:
+            collector = cfg["collector_cls"]()
+            result = collector.run(max_items=max_items, index_html=index_html)
+            status = result.metadata.get("component_status") or "FAILED"
+            self._update_component_state(cfg["collector_id"], status, len(result.discovered))
+
+            new_leads = new_watches = parsed = failures = 0
+            events: list[dict] = []
+            meta_by_url = {i.url: i.metadata | {"title": i.title} for i in result.discovered}
+            for fr in result.fetched:
+                if not fr.success:
+                    failures += 1
+                    continue
+                out = self.process_news_announcement(
+                    fr,
+                    run_id=run.id,
+                    discovered_meta=meta_by_url.get(fr.url),
+                    collector_id=cfg["collector_id"],
+                    collector_version=cfg["collector_version"],
+                    manufacturer=cfg["manufacturer"],
+                    brand=cfg["brand"],
+                    parse_fn=cfg["parse_fn"],
+                    merge_key_prefix=brand,
+                    default_region=cfg["default_region"],
+                    emit_events=emit_events,
+                )
+                if out["success"]:
+                    parsed += 1
+                    if out.get("new_lead"):
+                        new_leads += 1
+                    if out.get("new_watch"):
+                        new_watches += 1
+                    events.extend(e for e in out.get("watch_events", []) if e.get("event_type"))
+                else:
+                    failures += 1
+
+            completed = datetime.now(UTC)
+            run.completed_at = completed
+            run.status = status
+            run.discovered_count = len(result.discovered)
+            run.fetched_count = sum(1 for f in result.fetched if f.success)
+            run.parsed_count = parsed
+            run.new_watch_count = new_watches
+            run.failure_count = failures
+            run.duration_ms = int((completed - started).total_seconds() * 1000)
+            run.summary_metadata = {
+                "brand": brand,
+                "component_status": status,
+                "new_leads": new_leads,
+                "new_watches": new_watches,
+                "events": events,
+            }
+            self.session.commit()
+            logger.info(
+                "brand_news_pipeline_completed",
+                run_id=run.id,
+                brand=brand,
+                status=run.status,
+                new_leads=new_leads,
+                events=len(events),
+            )
+            return run
+        except Exception as exc:
+            self.session.rollback()
+            run.status = "FAILED"
+            run.completed_at = datetime.now(UTC)
+            run.summary_metadata = {"fatal_error": str(exc)}
+            self.session.add(run)
+            self.session.commit()
+            raise
 

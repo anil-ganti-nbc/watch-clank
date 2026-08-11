@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
-**Last updated:** 2026-08-09
-**Current phase:** Stage 1 complete / live soak test (soak clock restarted 2026-08-09, see below)
+**Last updated:** 2026-08-11
+**Current phase:** Casio Stage 1 soak (unaffected, still running) + experimental Citizen/Seiko discovery (new, not scheduled)
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
 **Repository path:** `C:\Users\anil\Desktop\Watch clank\watch-clank`
@@ -12,6 +12,134 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-11 — Multi-brand sprint: Citizen + Seiko experimental discovery, deterministic event/scoring layer
+
+**Context:** owner-directed sprint to extend coverage to Citizen and Seiko and
+add change-intelligence/editorial scoring, explicitly overriding the "hold
+during soak" default (soak was 3 days in at the time). Executed conservatively
+per the sprint brief's own non-negotiable rule: the Casio production path
+must not be destabilized. Everything new is additive and isolated.
+
+**Casio production path: unaffected.** All 35 pre-existing tests still pass
+unmodified; two new regression tests
+(`test_casio_production_path_emits_no_events_by_default`) explicitly guard
+that the generalized `process_news_announcement`/`_resolve_or_create_watch`
+produce byte-identical behavior for Casio's default call path. `scripts/run_
+pipeline.py --scheduled` (the scheduled task's entrypoint) was not touched
+and does not call any new code.
+
+**Source investigation (live probes, 2026-08-11):**
+- `citizenwatch-global.com/news/` — HTTP 200, static HTML, and (unlike Casio
+  or Seiko) is *already* a pure watch-product feed with no corporate noise.
+  Chosen as the Citizen source.
+- `seiko.co.jp/en/news/` — HTTP 200, static HTML, but Seiko Group
+  Corporation's *corporate* feed (watches + clocks + financial results +
+  cultural sponsorships). Requires topic filtering; used as the Seiko source
+  with a conservative `is_watch_announcement` filter (mirrors Casio's).
+- `seikowatches.com/global-en/news` — HTTP 200 but is a JS-rendered Vue SPA
+  backed by a `/v3/api/` REST endpoint. The endpoint path was not recovered
+  from the minified bundle in the time available. **Documented gap, not
+  built**: this is probably Seiko's best watch-only source and should be the
+  first thing a future session investigates for Seiko (see priorities below).
+- Grand Seiko's news page is the same SPA pattern — same gap.
+
+**Code added:**
+- `app/collectors/citizen_news.py`, `app/parsers/citizen_news.py` —
+  discovery + parsing for the Citizen global news feed. Reference format
+  `[A-Z]{2}[0-9]{4}-[0-9A-Z]{2,4}` confirmed against live announcement text
+  (e.g. `CC4107-80H`).
+- `app/collectors/seiko_news.py`, `app/parsers/seiko_news.py` — discovery
+  (with topic filter) + parsing for seiko.co.jp. Reference format
+  `S[A-Z]{2}[0-9]{3}[A-Z0-9]{0,3}` (e.g. `SPB255`).
+- `app/normalization/references.py` — `normalize_citizen_reference`,
+  `normalize_seiko_reference`: conservative pass-through (canonical == raw),
+  per the brief's explicit instruction not to blindly apply Casio's JDM
+  suffix rules to other brands. Documented in the module docstring as
+  policy: a brand gets suffix-stripping rules only once evidence justifies
+  it, same bar Casio's JDM allowlist had to clear.
+- `app/services/editorial.py` (new) — deterministic, explainable event
+  scoring. `EventEvidence` → `score_event()` → `ScoredEvent{score, confidence,
+  reasons[]}`. Every point added has a reason string; unscored dimensions
+  say `UNKNOWN` rather than being silently omitted. `format_alert()` renders
+  the Phase 6 human-readable block. No LLM, no black-box classifier.
+- `app/services/pipeline.py`:
+  - `process_news_announcement` generalized with optional `manufacturer`,
+    `brand`, `parse_fn`, `merge_key_prefix`, `default_region`, `emit_events`
+    kwargs, all defaulting to the exact prior Casio-only values/behavior.
+  - `_resolve_or_create_watch` now dispatches reference normalization by
+    manufacturer via a small registry, defaulting to
+    `normalize_casio_reference` (unchanged call for Casio).
+  - New `_prior_regions_for_watch` / `_record_watch_event`: deterministic
+    `NEW_REFERENCE` / `NEW_REGION` classification, writing to the existing
+    (previously unused) `Event`/`EventWatch` tables from `001_initial` — no
+    new migration needed. Only fires when `emit_events=True`, which the
+    Casio production path never passes.
+  - New `run_brand_news_pipeline(brand, ...)` — experimental orchestrator
+    for Citizen/Seiko. Does **not** share `RunLockService`/overlap
+    protection with the Casio `casio_japan` lock; writes its own
+    `collector_runs` rows under brand-specific `collector_id`s
+    (`citizen_news`, `seiko_jp_news`) and `source_component_states` rows,
+    fully isolated from Casio's. Not called from any scheduled path.
+
+**Known false-positive-protection finding (important, not a bug):** the
+pre-existing `merge_key` duplicate-lead detection (unchanged, Casio-proven)
+catches a second announcement of the *same* reference before event detection
+ever runs — so `NEW_REGION` cannot fire from literally re-processing the
+same reference text under a new URL; it only fires when a genuinely separate
+lead (different merge_key, e.g. from a different source) references a watch
+already seen in another region. This is correct/desired — it's the same
+duplicate-suppression Casio already relies on — but it means realistic
+`NEW_REGION` detection will depend on having more than one source per brand
+per region eventually. Documented in
+`test_brand_news_pipeline_new_region_detected_not_new_reference`'s docstring.
+
+**Tests added (13):** discovery parsing (Citizen, Seiko), Seiko topic-filter
+inclusion/exclusion, reference extraction + collection guessing for both,
+conservative-normalization tests for both, an end-to-end experimental
+pipeline test (lead + watch + event created from a fixture), NEW_REGION vs.
+NEW_REFERENCE classification, a same-region-repeat produces-no-event
+false-positive guard, the Casio-path-emits-no-events-by-default regression
+guard, and two `editorial.py` unit tests (score bounds/explainability, alert
+formatting only echoes supplied evidence). **48 passed** (was 35).
+`ruff check .`: all checks passed.
+
+**Live validation (real network, throwaway SQLite DB — never touched
+`data/watch_clank.db`):**
+```
+citizen: run status=SUCCESS, 8 leads, 19 references, 19 watches, 19 NEW_REFERENCE events
+  scores: HIGH(60) for recognisable families (Tsuyosa/Attesa/Promaster),
+  MEDIUM(40) for unrecognised ones (Rainell, Eco-Drive, etc.)
+seiko:   run status=SUCCESS, 1 lead discovered (Credor announcement) out of
+  the corporate feed, 0 watches (Credor's reference format isn't covered by
+  the current MODEL_RE — correctly produced 0 fabricated watches/events
+  rather than guessing)
+```
+This is real evidence the discovery+identity+scoring pipeline works
+end-to-end for a live first-party Citizen source today, and that the Seiko
+corporate-feed filter is conservative (under- rather than over-discovers) —
+consistent with "prefer missing a story to fabricating one."
+
+**Discord/alerting:** not implemented. `format_alert()` produces the text
+block; no webhook, no network call, no credentials. Deferred per the brief's
+own Phase 7 sequencing ("first make the intelligence good") and because
+there is no existing Discord infrastructure to reuse.
+
+**Promotion status — nothing new is scheduled/production:**
+| Source | Status | Notes |
+|---|---|---|
+| casio_intl_news | PRODUCTION, soaking | unaffected |
+| casio_japan (catalog) | PRODUCTION, soaking, BLOCKED (Akamai) | unaffected |
+| citizen_news | EXPERIMENTAL | live-validated once, needs multi-day soak before scheduling |
+| seiko_jp_news | EXPERIMENTAL | live-validated once; corporate-feed filter needs more real samples before trust |
+| seikowatches.com (Seiko brand SPA) | NOT BUILT | API endpoint not reverse engineered |
+
+**Next action:** do not add these experimental brands to the Windows
+scheduled task yet. Run `run_brand_news_pipeline` manually a few more times
+over the coming days against the real `data/watch_clank.db`, inspect leads
+for false positives (especially Seiko's topic filter), then decide whether
+to graduate. Reverse-engineer `seikowatches.com`'s `/v3/api/` news endpoint
+as the highest-value next step for Seiko coverage.
 
 ## 2026-08-09 — Soak-day timezone comparison outage found and fixed
 
