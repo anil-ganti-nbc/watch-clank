@@ -13,7 +13,8 @@ sys.path.insert(0, str(ROOT))
 from app.collectors.base import FetchResult
 from app.core.config import get_settings
 from app.core.logging import get_logger, setup_logging
-from app.db.session import session_scope
+from app.db.schema_check import check_schema
+from app.db.session import get_engine, session_scope
 from app.models import CollectorRun
 from app.services.pipeline import PipelineService
 from app.services.snapshot_storage import SnapshotStorageService
@@ -25,10 +26,13 @@ logger = get_logger(__name__)
 #   0 = SUCCESS, PARTIAL, ZERO_ITEMS, BLOCKED, SKIPPED_OVERLAP (nonfatal)
 #   1 = pipeline FAILED
 #   2 = setup / configuration / unhandled fatal exception
-#   3 = migration / database failure (reserved for wrapper/installer)
+#   3 = migration / database failure -- schema does not match the code's
+#       expected Alembic head. Run `python -m scripts.migrate` explicitly,
+#       then retry. Never auto-applied here (see app/db/schema_check.py).
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_FATAL = 2
+EXIT_SCHEMA_MISMATCH = 3
 
 
 def run_fixture_mode(max_items: int = 5) -> int:
@@ -89,6 +93,19 @@ def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
     db_url = settings.resolved_database_url
     print(f"database_url={db_url}")
     logger.info("pipeline_start", database_url=db_url, scheduled=scheduled, max_items=max_items)
+
+    schema = check_schema(get_engine())
+    if not schema.matches:
+        msg = (
+            f"SCHEMA MISMATCH: database is at "
+            f"{schema.actual_version or '(uninitialized)'}, code expects "
+            f"{schema.expected_head}. Refusing to run -- this is exactly the "
+            f"outage class documented in HANDOFF.md. Run "
+            f"`python -m scripts.migrate` explicitly, then retry."
+        )
+        logger.error("schema_mismatch", expected=schema.expected_head, actual=schema.actual_version)
+        print(msg)
+        return EXIT_SCHEMA_MISMATCH
 
     with session_scope() as session:
         pipeline = PipelineService(session)
