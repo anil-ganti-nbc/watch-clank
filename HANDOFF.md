@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** Casio soak healthy + FIVE Windows-scheduled tasks total (Casio + 4 experimental, all Ready/Enabled, verified live) + Layer B early-warning system started (CASIOBLOG live, manual ingestion for Instagram sources). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
+**Current phase:** Casio soak healthy + SIX Windows-scheduled tasks total (Casio + 4 experimental brand/product lanes + CASIOBLOG, all Ready/Enabled, verified live) + Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment. Discord webhooks are still not configured anywhere (no real URLs available in this environment) — the sending code is wired, dedup-tested, but inert until the owner supplies `DISCORD_EDITORIAL_WEBHOOK_URL` / `DISCORD_HEALTH_WEBHOOK_URL`.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,98 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-11 (Sprint 6) — Control Centre GUI/EXE, Discord wiring, family-aware correlation, cloud handoff prep
+
+**Starting point verified:** HEAD was `08cf8c7` as expected, clean tree, 108/108 tests
+passing (post-migration bump from 105), Ruff clean. Two Sprint 5 commits
+(`61ce5ac`, `08cf8c7`) were unpushed from the prior sprint's deliberately-scoped
+push authorization; this sprint's owner brief explicitly authorized pushing the
+validated portable/core changes from those plus this sprint's own work, while
+keeping the new Windows GUI/EXE strictly local. Pushed `08cf8c7` (containing
+those two commits) first, verified remote HEAD, then did all Sprint 6 work on
+top and pushed again separately as `0377718`.
+
+**Family-aware correlation (migration `005_specialist_lead_correlation_type`):**
+`SpecialistLeadService.correlate_pending_leads` now distinguishes
+`EXACT_REFERENCE_MATCH` from `FAMILY_MATCH` (candidate matches a watch's
+hyphen-stripped family root, e.g. lead "GWR-B3000" vs official
+"GWR-B3000-1A") — deterministic, no fuzzy string similarity. Live-verified
+against the real production DB: 3 real CASIOBLOG leads (including the
+GWR-B3000 example documented in Sprint 5's research doc) now correctly
+correlate as FAMILY_MATCH with real lead times of 66.8/87.6/119.8 days. A
+new `format_correlation_followup_alert` labels FAMILY_MATCH explicitly as
+"NOT EXACT", never as a confirmation.
+
+**Discord wiring:** `SpecialistLeadService.notify_new_lead` /
+`notify_correlation` send the Layer B early-warning / follow-up alerts,
+gated by a new `discord_specialist_min_confidence` threshold and a new
+`editorial_notifications_enabled` config flag (for the future cloud-handoff
+policy: Windows can be told to stop sending once cloud becomes
+authoritative, without any distributed-DB sync). Dedup via a new
+`specialist_leads.notified_at` column — tested to fire once, never twice,
+across repeat pipeline runs. Health-webhook alerts wired for the two real
+outage classes this project has already hit: stale-run recovery
+(`RunLockService.recover_stale_runs`) and schema mismatch
+(`scripts/run_pipeline.py`'s existing gate) — both live-tested, and tested
+to stay silent when there's nothing actionable (no health spam). **Webhook
+URLs are still not configured anywhere in this environment** — nothing was
+invented; see the final report for exactly what the owner needs to supply.
+
+**CASIOBLOG scheduling:** new `WatchClank-Casioblog` Windows task, 45-minute
+cadence (justified in `install_windows_casioblog_task.ps1`'s header —
+cheap RSS, real ~hourly updateFrequency, well within the brief's 30-60 min
+guidance). Registered and live-verified: triggered, fired, created a real
+new `collector_runs` row (SUCCESS, 0 new leads — correctly deduped against
+already-known leads).
+
+**Ops improvements (kept small per the brief):** `app/services/health.py`
+— a single reusable health-snapshot function (schema state, DB integrity
+via `PRAGMA quick_check`, per-source HEALTHY/WARNING/FAILED/NEVER_RUN with
+a heartbeat-overdue check against each collector's expected cadence, active
+locks, stale RUNNING count) — used by both `scripts/status.py` (one-command
+CLI, works on cloud too) and the new GUI's Health tab, so the two can never
+disagree about what "healthy" means. `scripts/db_backup.py` uses sqlite3's
+actual backup API (not a raw file copy, which can capture a torn snapshot
+under WAL) with retention pruning — live-tested against the real production
+DB (4.4MB backup produced). PowerShell wrapper logs (`scheduled-*.log`,
+previously unbounded) now get a simple one-backup rotation via new
+`lib_log_rotate.ps1`. Python's own log rotation (`RotatingFileHandler` in
+`app/core/logging.py`) already existed from an earlier sprint — verified,
+not rebuilt.
+
+**Windows Control Centre GUI + EXE (local-only, NOT pushed):**
+`local_windows/control_centre/` — Tkinter (stdlib), six tabs (Overview,
+Recent Intelligence, Operations, Scheduler, Logs, Health/Diagnostics). Reads
+the real DB via `app.services.health` and plain model queries; RUN NOW
+buttons shell out to the real `python -m scripts.run_pipeline` (same code
+path Task Scheduler uses, same lock protection — the GUI cannot bypass
+`RunLockService`); Scheduler tab is restricted to a fixed list of known
+Watch Clank tasks only (never arbitrary Task Scheduler administration), and
+disabling the Casio production task requires an explicit confirmation
+dialog. Packaged with PyInstaller as `WatchClankControlCentre.exe`
+(`local_windows/dist/`) — a launcher, not a bundled second copy of the
+collector stack: at startup it walks upward from its own on-disk location
+looking for `alembic.ini` to find the real repo, and shells out to the
+repo's own `.venv\Scripts\python.exe` for every actual run. Both the
+source GUI and the built EXE were live-launched (not just code-reviewed)
+against the real production DB and screenshotted mid-session: Overview
+("WATCH CLANK IS ALIVE", 558 real watches, all 6 sources HEALTHY), Recent
+Intelligence (real official events + real early-warning leads including
+the FAMILY_MATCH correlation above), and Scheduler (real Task Scheduler
+state for all 6 tasks) all confirmed rendering correctly. `.gitignore`
+updated (`local_windows/`, `*.spec`, `WatchClank*.exe`) — confirmed via
+`git status` that none of it is tracked.
+
+**Test result:** 120 passed (up from 108 at sprint start — 12 new tests:
+family-match correlation x3, Discord dedup x3, health snapshot x3, DB
+backup x2, correlation-followup alert format x1). Ruff clean.
+
+**Next priorities (per this sprint's own final report):** get real Discord
+webhook URLs from the owner; Great G-Shock World collector (Sprint 5
+research, deferred); NEEL investigation depth (Sprint 5 research,
+deferred); actual cloud deployment execution (infra exists, no host
+access from any session so far).
 
 ## 2026-08-11 (Sprint 5) — Shipped official hunter + started Layer B early-warning
 
