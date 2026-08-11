@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # that exists today) keeps working unchanged.
     editorial_notifications_enabled: bool = Field(default=True)
 
+    # Sprint 8 freshness bugfix: how old a specialist lead's publication
+    # timestamp may be and still count as "editorially fresh" current
+    # intelligence, vs. historical evidence. Deliberately short — this is
+    # a breaking/current-story surface for a journalist, not an archive.
+    # See app/services/freshness.py.
+    specialist_freshness_window_hours: int = Field(default=72)
+
     @property
     def project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]

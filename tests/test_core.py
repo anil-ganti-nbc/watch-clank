@@ -2524,6 +2524,267 @@ def test_notify_new_lead_suppressed_during_baseline(db_session: Session):
     mock_post.assert_not_called()
 
 
+# --- Sprint 8: editorial freshness bugfix ------------------------------------
+# See ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md. These are the real production
+# failure scenarios turned into fixtures, not synthetic hypotheticals.
+
+
+def test_freshness_old_specialist_article_discovered_after_baseline(db_session: Session):
+    """Scenario 1: a real July G-Central article discovered in August,
+    after the epoch's baseline already completed. Must be stored, but
+    classified STALE_PUBLICATION -- not FRESH, not Discord-eligible, and
+    excluded from the GUI's Recent Intelligence query filter."""
+
+    from app.models import SpecialistLead
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)  # baseline already over
+
+    svc = SpecialistLeadService(db_session)
+    outcome = svc.ingest_candidate(
+        source_id="g_central", lead_type="POSSIBLE_COLLABORATION",
+        title="Rapper Larry June's Midnight Organic releases limited G-Shock DW6900MO26-4",
+        source_url="https://www.g-central.com/rapper-larry-junes-midnight-organic/",
+        published_at="2026-07-26T08:44:21+00:00",  # real publish date from the incident
+        reference_candidates=["DW-6900", "DW6900MO26"], claim_text=None, manufacturer="Casio",
+    )
+    lead = db_session.get(SpecialistLead, outcome["lead_id"])
+
+    assert lead.is_baseline is False  # genuinely discovered post-baseline
+    assert lead.editorial_freshness == "STALE_PUBLICATION"
+    assert "72h" in lead.freshness_reason or "hour" in lead.freshness_reason.lower()
+
+    # Mirrors the GUI's get_recent_leads() filter exactly.
+    recent = db_session.query(SpecialistLead).filter(SpecialistLead.editorial_freshness == "FRESH").all()
+    assert lead not in recent
+
+
+def test_freshness_fresh_specialist_article_is_eligible(db_session: Session):
+    """Scenario 2: an article published an hour ago, discovered now,
+    after baseline. Must classify FRESH and be Discord-eligible."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import SpecialistLead
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    svc = SpecialistLeadService(db_session)
+    recent_pub = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    outcome = svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Brand new rumor",
+        source_url="https://casioblog.com/en/brand-new-rumor", published_at=recent_pub,
+        reference_candidates=["GA-2100"], claim_text=None, manufacturer="Casio", confidence=60.0,
+    )
+    lead = db_session.get(SpecialistLead, outcome["lead_id"])
+
+    assert lead.editorial_freshness == "FRESH"
+    recent = db_session.query(SpecialistLead).filter(SpecialistLead.editorial_freshness == "FRESH").all()
+    assert lead in recent
+
+
+def test_freshness_baseline_article_classified_baseline_regardless_of_publish_date(db_session: Session):
+    """Scenario 3: whether the article is old or freshly published,
+    discovery DURING baseline always classifies BASELINE, never FRESH."""
+    from datetime import UTC, datetime
+
+    from app.models import SpecialistLead
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)  # baseline still active
+
+    svc = SpecialistLeadService(db_session)
+    fresh_pub_during_baseline = svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Published today, found during baseline",
+        source_url="https://casioblog.com/en/today-during-baseline", published_at=datetime.now(UTC).isoformat(),
+        reference_candidates=["GA-2100"], claim_text=None, manufacturer="Casio",
+    )
+    lead = db_session.get(SpecialistLead, fresh_pub_during_baseline["lead_id"])
+    assert lead.editorial_freshness == "BASELINE"
+    assert lead.is_baseline is True
+
+
+def test_freshness_official_product_without_publication_date_still_surfaces(db_session: Session, tmp_settings: Settings):
+    """Scenario 4: official catalogue discoveries never had a publication-
+    timestamp gate and must not gain one from this fix -- Events are
+    created directly by pipeline transition logic, untouched here."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.parsers.citizen_news import parse_citizen_news_html
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    fr = FetchResult(
+        url="https://www.citizenwatch-global.com/news/2026/20260610/index.html",
+        success=True, status_code=200, content_type="text/html", payload=detail_html,
+    )
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, discovered_meta={"source_region": "GLOBAL"},
+        collector_id="citizen_news", manufacturer="Citizen", brand="Citizen",
+        parse_fn=parse_citizen_news_html, merge_key_prefix="citizen",
+        default_region="GLOBAL", emit_events=True,
+    )
+    assert out["watch_events"][0]["event_type"] == "NEW_REFERENCE"
+    assert db_session.scalars(select(Event)).first() is not None
+
+
+def test_freshness_old_product_current_restock_still_fires(db_session: Session, tmp_settings: Settings):
+    """Scenario 5: a RESTOCK/SOLD_OUT transition detected today must fire
+    regardless of how old the underlying product's history is -- the
+    transition observation time is authoritative here, not any
+    publication timestamp (this path doesn't touch SpecialistLead at
+    all, confirming the freshness fix didn't leak into it)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    watch = Watch(manufacturer="Citizen", brand="Citizen", reference_raw="CC4107-80H", reference_canonical="CC4107-80H")
+    db_session.add(watch)
+    db_session.flush()
+    old_obs = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_products", collector_version="0.1.0",
+        parser_id="t", parser_version="0", region="US", source_url="https://x/old",
+        availability_status="AVAILABLE", observed_at=datetime.now(UTC) - timedelta(days=200),
+        overall_confidence=90.0,
+    )
+    db_session.add(old_obs)
+    db_session.commit()
+
+    new_obs = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_products", collector_version="0.1.0",
+        parser_id="t", parser_version="0", region="US", source_url="https://x/new",
+        availability_status="SOLD_OUT", observed_at=datetime.now(UTC), overall_confidence=90.0,
+    )
+    db_session.add(new_obs)
+    db_session.flush()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    result = pipeline._record_product_transition(watch=watch, new_obs=new_obs, is_new_watch=False)
+    assert result["event_type"] == "SOLD_OUT"
+    assert db_session.scalars(select(Event)).first() is not None
+
+
+def test_freshness_null_publication_timestamp_is_conservative(db_session: Session):
+    """Scenario 6: a specialist source with no publication timestamp must
+    never be assumed fresh -- explicit UNKNOWN_TIMESTAMP, not FRESH."""
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.freshness import classify_lead_freshness
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    result = classify_lead_freshness(
+        source_type="SPECIALIST_BLOG", ingestion_method="collector", is_baseline=False,
+        published_at=None, discovered_at=now, now=now, window_hours=72,
+    )
+    assert result.state == "UNKNOWN_TIMESTAMP"
+
+
+def test_freshness_manual_ingestion_without_date_is_labeled_distinctly(db_session: Session):
+    """Manual social ingestion with no publication timestamp gets its own
+    honest label (MANUAL_UNDATED) rather than the generic
+    UNKNOWN_TIMESTAMP -- "a human ingested this without dating it" is a
+    different situation from "the parser couldn't find a date."""
+    from datetime import UTC, datetime
+
+    from app.services.freshness import classify_lead_freshness
+
+    now = datetime.now(UTC)
+    result = classify_lead_freshness(
+        source_type="SOCIAL_LEAKER", ingestion_method="manual", is_baseline=False,
+        published_at=None, discovered_at=now, now=now, window_hours=72,
+    )
+    assert result.state == "MANUAL_UNDATED"
+
+
+def test_freshness_timezone_boundary_never_makes_july_look_current():
+    """Scenario 7: a naive (no-tzinfo) July timestamp must not slip past
+    the freshness window through timezone mishandling."""
+    from datetime import datetime, timedelta
+
+    from app.services.freshness import classify_lead_freshness
+
+    naive_july = datetime(2026, 7, 15, 12, 0, 0)  # deliberately no tzinfo
+    now = datetime(2026, 8, 12, 12, 0, 0)  # also naive, ~28 days later
+    result = classify_lead_freshness(
+        source_type="SPECIALIST_BLOG", ingestion_method="collector", is_baseline=False,
+        published_at=naive_july, discovered_at=now, now=now, window_hours=72,
+    )
+    assert result.state == "STALE_PUBLICATION"
+
+    # And a genuinely fresh UTC-aware timestamp close to a naive "now"
+    # still correctly classifies FRESH -- proves ensure_utc normalizes
+    # rather than accidentally penalizing/favoring naive inputs.
+    from datetime import UTC
+
+    recent = now - timedelta(hours=2)
+    result2 = classify_lead_freshness(
+        source_type="SPECIALIST_BLOG", ingestion_method="collector", is_baseline=False,
+        published_at=recent, discovered_at=now, now=now.replace(tzinfo=UTC), window_hours=72,
+    )
+    assert result2.state == "FRESH"
+
+
+def test_get_recent_leads_query_filter_matches_service_classification(db_session: Session, tmp_settings: Settings, monkeypatch):
+    """End-to-end proof the GUI's actual filter (mirrored here since
+    local_windows/ isn't a Python package) agrees with the service's
+    classification -- the real bug was these two disagreeing (the GUI had
+    no filter at all)."""
+    from unittest.mock import patch
+
+    from app.core import config as config_mod
+    from app.models import SpecialistLead
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.specialist_leads import run_gcentral_pipeline
+
+    monkeypatch.setattr(config_mod, "get_settings", lambda: tmp_settings)
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    xml = (FIXTURES / "gcentral_feed.xml").read_bytes()
+    with patch("app.services.specialist_leads.get_settings", return_value=tmp_settings):
+        run_gcentral_pipeline(db_session, feed_xml=xml)
+
+    all_leads = db_session.query(SpecialistLead).all()
+    assert len(all_leads) == 15
+    # Every item in this real fixture is from March-August, well outside a
+    # 72h window from "now" -- all must be STALE_PUBLICATION, none FRESH.
+    assert all(lead.editorial_freshness == "STALE_PUBLICATION" for lead in all_leads)
+    recent = db_session.query(SpecialistLead).filter(SpecialistLead.editorial_freshness == "FRESH").all()
+    assert recent == []
+
+
 # --- Sprint 6: health snapshot + DB backup ----------------------------------
 
 
@@ -2642,9 +2903,11 @@ def test_notify_new_lead_sends_and_sets_notified_at(db_session: Session):
 
     settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
     svc = SpecialistLeadService(db_session)
+    from datetime import UTC, datetime
+
     outcome = svc.ingest_candidate(
         source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Rumored GWR-B3000",
-        source_url="https://casioblog.com/en/rumor-gwr-b3000", published_at=None,
+        source_url="https://casioblog.com/en/rumor-gwr-b3000", published_at=datetime.now(UTC).isoformat(),
         reference_candidates=["GWR-B3000"], claim_text=None, manufacturer="Casio", confidence=60.0,
     )
     lead = db_session.get(SpecialistLead, outcome["lead_id"])
@@ -2671,9 +2934,11 @@ def test_notify_new_lead_does_not_resend_once_notified(db_session: Session):
 
     settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
     svc = SpecialistLeadService(db_session)
+    from datetime import UTC, datetime
+
     outcome = svc.ingest_candidate(
         source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Rumored GWR-B3000",
-        source_url="https://casioblog.com/en/rumor-gwr-b3000-2", published_at=None,
+        source_url="https://casioblog.com/en/rumor-gwr-b3000-2", published_at=datetime.now(UTC).isoformat(),
         reference_candidates=["GWR-B3000"], claim_text=None, manufacturer="Casio", confidence=60.0,
     )
     lead = db_session.get(SpecialistLead, outcome["lead_id"])

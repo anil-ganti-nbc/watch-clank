@@ -19,6 +19,7 @@ from app.models import CollectorRun, SourceObservation, SpecialistLead, Watch
 from app.services.discord_notify import DiscordNotifier
 from app.services.editorial import format_correlation_followup_alert, format_early_warning_alert
 from app.services.epoch import get_active_epoch, is_baseline_active
+from app.services.freshness import classify_lead_freshness
 from app.services.run_lock import RunLockService
 from app.services.source_registry import get_source_profile
 
@@ -73,6 +74,19 @@ class SpecialistLeadService:
                 pub_dt = None
 
         active_epoch = get_active_epoch(self.session)
+        is_baseline = bool(active_epoch and is_baseline_active(self.session))
+        now = datetime.now(UTC)
+        discovered_at = now
+        freshness = classify_lead_freshness(
+            source_type=profile.source_type,
+            ingestion_method=ingestion_method,
+            is_baseline=is_baseline,
+            published_at=pub_dt,
+            discovered_at=discovered_at,
+            now=now,
+            window_hours=get_settings().specialist_freshness_window_hours,
+        )
+
         lead = SpecialistLead(
             source_id=source_id,
             source_type=profile.source_type,
@@ -92,7 +106,10 @@ class SpecialistLeadService:
             ingestion_method=ingestion_method,
             notes=notes,
             epoch_id=active_epoch.id if active_epoch else None,
-            is_baseline=bool(active_epoch and is_baseline_active(self.session)),
+            is_baseline=is_baseline,
+            editorial_freshness=freshness.state,
+            freshness_reason=freshness.reason,
+            freshness_evaluated_at=now,
         )
         self.session.add(lead)
         self.session.flush()
@@ -210,6 +227,10 @@ class SpecialistLeadService:
         if not settings.editorial_notifications_enabled:
             return False
         if lead.is_baseline:
+            return False
+        # STALE_PUBLICATION/UNKNOWN_TIMESTAMP/MANUAL_UNDATED must never
+        # alert as current news -- see ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md.
+        if lead.editorial_freshness != "FRESH":
             return False
         if lead.notified_at is not None:
             return False

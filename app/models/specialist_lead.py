@@ -62,6 +62,29 @@ LEAD_TYPES = frozenset(
 
 VERIFICATION_STATUSES = frozenset({"UNCONFIRMED", "CORRELATED_WITH_OFFICIAL", "REJECTED"})
 
+# Sprint 8 freshness bugfix (see ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md).
+# DISCOVERY NOVELTY ("have we seen this before" -- is_baseline/dedup) and
+# EDITORIAL FRESHNESS ("is this current enough to show a journalist as
+# news") are different questions; this is the latter.
+#   FRESH             - published_at (or, for RETAILER_EARLY_LISTING with
+#                        no publication concept, discovered_at) within the
+#                        configured freshness window. Eligible for Recent
+#                        Intelligence / Discord.
+#   STALE_PUBLICATION - older than the freshness window. Kept as
+#                        historical/correlation evidence, never alerted.
+#   BASELINE          - discovered during an epoch's baseline run. Always
+#                        historical, regardless of publication age.
+#   UNKNOWN_TIMESTAMP - no publication timestamp and the source class
+#                        requires one. Never assumed fresh.
+#   MANUAL_UNDATED    - manually ingested with no publication timestamp
+#                        supplied. Distinct from UNKNOWN_TIMESTAMP so the
+#                        record honestly says "a human ingested this
+#                        without dating it" rather than "the parser
+#                        couldn't find a date."
+EDITORIAL_FRESHNESS_STATES = frozenset(
+    {"FRESH", "STALE_PUBLICATION", "BASELINE", "UNKNOWN_TIMESTAMP", "MANUAL_UNDATED"}
+)
+
 # Phase 7 (Sprint 6): how a correlated lead matched an official Watch.
 # EXACT_REFERENCE_MATCH = full reference string matched, e.g. "GWR-B3000-1A".
 # FAMILY_MATCH = only the family root matched (e.g. lead "GWR-B3000" against
@@ -96,6 +119,11 @@ class SpecialistLead(Base):
         CheckConstraint(
             "correlation_type IS NULL OR correlation_type IN ('EXACT_REFERENCE_MATCH','FAMILY_MATCH')",
             name="ck_specialist_lead_correlation_type",
+        ),
+        CheckConstraint(
+            "editorial_freshness IS NULL OR editorial_freshness IN "
+            "('FRESH','STALE_PUBLICATION','BASELINE','UNKNOWN_TIMESTAMP','MANUAL_UNDATED')",
+            name="ck_specialist_lead_editorial_freshness",
         ),
     )
 
@@ -152,6 +180,14 @@ class SpecialistLead(Base):
         Integer, ForeignKey("operational_epochs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     is_baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+
+    # Sprint 8 freshness bugfix -- see EDITORIAL_FRESHNESS_STATES above and
+    # app/services/freshness.py. Nullable because it's computed at ingest
+    # time (or backfilled by migration 007 for pre-existing rows), never
+    # because "unset" is a meaningful state to query against.
+    editorial_freshness: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    freshness_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    freshness_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

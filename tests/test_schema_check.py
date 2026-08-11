@@ -52,8 +52,8 @@ def test_db_at_older_revision_does_not_match(tmp_path: Path):
     """Direct reproduction of the real outage class: code expects the
     current migration head, database is pinned at an older revision
     (originally reproduced with 002_ops_statuses vs 003_release_leads;
-    updated to 006_operational_epochs as the code's head advanced -- the
-    outage class under test is unchanged)."""
+    updated to 007_specialist_lead_editorial_freshness as the code's head
+    advanced -- the outage class under test is unchanged)."""
     db_path = tmp_path / "stale.db"
     config = _alembic_config(db_path)
     command.upgrade(config, "002_ops_statuses")
@@ -62,7 +62,7 @@ def test_db_at_older_revision_does_not_match(tmp_path: Path):
     status = check_schema(engine, alembic_ini_path=str(ROOT / "alembic.ini"))
     assert not status.matches
     assert status.actual_version == "002_ops_statuses"
-    assert status.expected_head == "006_operational_epochs"
+    assert status.expected_head == "007_specialist_lead_editorial_freshness"
 
 
 def test_run_pipeline_refuses_on_schema_mismatch(tmp_path, monkeypatch):
