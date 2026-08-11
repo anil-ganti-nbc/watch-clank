@@ -105,6 +105,9 @@ def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
         )
         logger.error("schema_mismatch", expected=schema.expected_head, actual=schema.actual_version)
         print(msg)
+        from app.services.discord_notify import DiscordNotifier
+
+        DiscordNotifier(settings).send_health_alert(f"WATCH CLANK — OPS\n{msg}")
         return EXIT_SCHEMA_MISMATCH
 
     with session_scope() as session:

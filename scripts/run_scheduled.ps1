@@ -39,6 +39,10 @@ if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 }
 
+. (Join-Path $ScriptDir "lib_log_rotate.ps1")
+Invoke-LogRotate -Path $WrapperLog
+Invoke-LogRotate -Path $PythonLog
+
 Write-WrapperLog "START pid=$PID repo=$RepoRoot"
 Write-WrapperLog "DB_PATH=$SqlitePath"
 Write-WrapperLog "VENV_PYTHON=$VenvPython"

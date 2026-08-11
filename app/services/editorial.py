@@ -373,3 +373,45 @@ def format_early_warning_alert(
         "Requires human verification before any editorial use.",
     ]
     return "\n".join(lines)
+
+
+def format_correlation_followup_alert(
+    *,
+    manufacturer: str | None,
+    brand: str | None,
+    lead_reference_candidates: list[str],
+    watch_reference_raw: str,
+    correlation_type: str,
+    source_display_name: str,
+    lead_published_at: str | None,
+    official_first_observed_at: str | None,
+    lead_time_days: float | None,
+    source_url: str,
+) -> str:
+    """Follow-up alert once a Layer B lead correlates with an official
+    Watch (Phase 12/Phase 7). correlation_type distinguishes an
+    EXACT_REFERENCE_MATCH ("CONFIRMED") from a FAMILY_MATCH — a family
+    match must be labeled as such, never presented as an exact-reference
+    confirmation."""
+    label = "CONFIRMED" if correlation_type == "EXACT_REFERENCE_MATCH" else "FAMILY_MATCH — NOT EXACT"
+    lines = [
+        f"EARLY WARNING FOLLOW-UP — {label}",
+        "",
+        f"{(manufacturer or 'UNKNOWN').upper()}" + (f" / {brand}" if brand and brand != manufacturer else ""),
+        f"Lead reference(s): {', '.join(lead_reference_candidates) if lead_reference_candidates else 'UNKNOWN'}",
+        f"Official reference: {watch_reference_raw}",
+        f"Original source: {source_display_name}",
+        f"Lead published: {lead_published_at or 'UNKNOWN'}",
+        f"Official first observed: {official_first_observed_at or 'UNKNOWN'}",
+        f"Approximate lead time: {lead_time_days} days" if lead_time_days is not None else "Approximate lead time: UNKNOWN",
+        "",
+        "Evidence (original lead):",
+        source_url,
+    ]
+    if correlation_type != "EXACT_REFERENCE_MATCH":
+        lines.append("")
+        lines.append(
+            "Note: family-level match only (colorway/suffix not confirmed identical). "
+            "Requires human verification before treating as the same reference."
+        )
+    return "\n".join(lines)

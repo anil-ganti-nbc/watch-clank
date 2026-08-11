@@ -71,3 +71,10 @@ temp/
 
 # Local AI-tool config, not project content
 .claude/
+
+# Windows-only Control Centre GUI + packaging (Sprint 6 policy: local-only,
+# never pushed — see HANDOFF.md). Everything under local_windows/ is
+# Windows-machine-specific GUI source, PyInstaller config, and build output.
+local_windows/
+*.spec
+WatchClank*.exe

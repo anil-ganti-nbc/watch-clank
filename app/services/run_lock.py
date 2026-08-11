@@ -108,7 +108,22 @@ class RunLockService:
                 )
         if recovered:
             self.session.commit()
+            self._notify_health(
+                f"WATCH CLANK — OPS\nStale RUNNING run(s) recovered for '{self.collector_id}': "
+                f"{recovered}. Threshold: {self.settings.stale_run_threshold_minutes} min. "
+                "A process likely crashed or was killed mid-run — check that the collector is "
+                "otherwise healthy on its next scheduled run."
+            )
         return recovered
+
+    def _notify_health(self, text: str) -> None:
+        """Best-effort ops alert — never allowed to affect lock/recovery
+        outcomes. A Discord failure here is swallowed by DiscordNotifier
+        itself; this wrapper exists only to keep import-time cost out of
+        the (much more common) no-recovery path."""
+        from app.services.discord_notify import DiscordNotifier
+
+        DiscordNotifier(self.settings).send_health_alert(text)
 
     def _read_lock_file(self) -> dict[str, Any] | None:
         if not self.lock_path.exists():

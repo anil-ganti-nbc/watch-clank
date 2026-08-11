@@ -12,6 +12,8 @@ $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 $Targets = @(
     (Join-Path $ScriptDir "install_windows_task.ps1"),
     (Join-Path $ScriptDir "install_windows_experimental_tasks.ps1"),
+    (Join-Path $ScriptDir "install_windows_casioblog_task.ps1"),
+    (Join-Path $ScriptDir "lib_log_rotate.ps1"),
     (Join-Path $ScriptDir "run_scheduled.ps1"),
     (Join-Path $ScriptDir "run_scheduled_experimental.ps1"),
     (Join-Path $ScriptDir "status_windows_task.ps1"),

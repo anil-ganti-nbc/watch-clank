@@ -16,10 +16,23 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.time import ensure_utc
 from app.models import CollectorRun, SourceObservation, SpecialistLead, Watch
+from app.services.discord_notify import DiscordNotifier
+from app.services.editorial import format_correlation_followup_alert, format_early_warning_alert
 from app.services.run_lock import RunLockService
 from app.services.source_registry import get_source_profile
 
 logger = get_logger(__name__)
+
+
+def _reference_family(reference: str) -> str:
+    """Deterministic family root of a hyphenated reference: strip the final
+    hyphen-separated segment. "GWR-B3000-1A" -> "GWR-B3000". References with
+    no hyphen have no distinct family root and return unchanged (so they can
+    only ever produce an exact match, never a spurious family match)."""
+    upper = reference.upper()
+    if "-" not in upper:
+        return upper
+    return upper.rsplit("-", 1)[0]
 
 
 class SpecialistLeadService:
@@ -91,11 +104,22 @@ class SpecialistLeadService:
     def correlate_pending_leads(self, *, manufacturer: str | None = None) -> list[dict]:
         """Conservative, deterministic correlation: for every UNCONFIRMED
         lead with at least one reference candidate, look for an existing
-        Watch whose reference_raw or reference_canonical exactly matches
-        (case-insensitive) — same manufacturer if the lead states one. No
-        fuzzy matching, no partial-string matching. Sets correlated_watch_id,
-        official_first_observed_at (earliest SourceObservation for that
-        watch, falling back to the watch's own created_at), and
+        Watch whose reference matches. Two match kinds, both deterministic
+        (never a similarity score):
+
+        - EXACT_REFERENCE_MATCH: reference_raw or reference_canonical
+          equals a candidate exactly (case-insensitive).
+        - FAMILY_MATCH: a candidate equals the watch's "family root" —
+          the reference with its final hyphen-separated colorway segment
+          stripped, e.g. official "GWR-B3000-1A" has family root
+          "GWR-B3000". Only tried if no exact match was found. This must
+          never be presented as an exact-reference confirmation — see
+          correlation_type on the stored lead and
+          format_early_warning_alert's CONFIRMED/FAMILY_MATCH follow-up.
+
+        Sets correlated_watch_id, correlation_type, official_first_observed_at
+        (earliest SourceObservation for that watch, falling back to the
+        watch's own created_at), and
         lead_time_days = official_first_observed_at - lead.published_at.
         """
         results: list[dict] = []
@@ -110,11 +134,24 @@ class SpecialistLeadService:
             watch_query = self.session.query(Watch)
             if lead.manufacturer:
                 watch_query = watch_query.filter(Watch.manufacturer == lead.manufacturer)
+            watches = watch_query.all()
+
             matched_watch = None
-            for watch in watch_query.all():
+            correlation_type = None
+            for watch in watches:
                 if watch.reference_raw.upper() in candidates or watch.reference_canonical.upper() in candidates:
                     matched_watch = watch
+                    correlation_type = "EXACT_REFERENCE_MATCH"
                     break
+            if matched_watch is None:
+                for watch in watches:
+                    if (
+                        _reference_family(watch.reference_raw) in candidates
+                        or _reference_family(watch.reference_canonical) in candidates
+                    ):
+                        matched_watch = watch
+                        correlation_type = "FAMILY_MATCH"
+                        break
             if matched_watch is None:
                 continue
 
@@ -130,6 +167,7 @@ class SpecialistLeadService:
             lead.correlated_at = datetime.now(UTC)
             lead.official_first_observed_at = official_at
             lead.verification_status = "CORRELATED_WITH_OFFICIAL"
+            lead.correlation_type = correlation_type
 
             lead_time_days = None
             lead_published = ensure_utc(lead.published_at)
@@ -141,11 +179,94 @@ class SpecialistLeadService:
                 "specialist_lead_correlated",
                 lead_id=lead.id,
                 watch_id=matched_watch.id,
+                correlation_type=correlation_type,
                 lead_time_days=lead_time_days,
             )
-            results.append({"lead_id": lead.id, "watch_id": matched_watch.id, "lead_time_days": lead_time_days})
+            results.append(
+                {
+                    "lead_id": lead.id,
+                    "watch_id": matched_watch.id,
+                    "correlation_type": correlation_type,
+                    "lead_time_days": lead_time_days,
+                }
+            )
 
         return results
+
+    def notify_new_lead(self, lead: SpecialistLead, *, notifier: DiscordNotifier | None = None) -> bool:
+        """Send the EARLY WARNING — UNCONFIRMED alert for one freshly
+        created lead, if editorial notifications are enabled, the lead
+        clears the confidence floor, and it hasn't already been sent
+        (notified_at dedup — a repeat pipeline run never re-notifies for
+        the same lead, since ingest_candidate itself dedups by source_url
+        and this checks notified_at on top of that as a second guard).
+        Discord failures are swallowed by DiscordNotifier; this never
+        raises and never blocks lead persistence."""
+        settings = get_settings()
+        if not settings.editorial_notifications_enabled:
+            return False
+        if lead.notified_at is not None:
+            return False
+        if lead.confidence < settings.discord_specialist_min_confidence:
+            return False
+
+        notifier = notifier or DiscordNotifier(settings)
+        if not notifier.editorial_enabled:
+            return False
+
+        profile = get_source_profile(lead.source_id)
+        text = format_early_warning_alert(
+            manufacturer=lead.manufacturer,
+            brand=lead.brand,
+            reference_candidates=lead.reference_candidates or [],
+            lead_type=lead.lead_type,
+            source_display_name=profile.display_name,
+            source_type=lead.source_type,
+            source_authority_tier=lead.source_authority_tier,
+            title=lead.title,
+            claim_text=lead.claim_text,
+            source_url=lead.source_url,
+            published_at=lead.published_at.isoformat() if lead.published_at else None,
+            discovered_at=lead.discovered_at.isoformat() if lead.discovered_at else "",
+            confidence=lead.confidence,
+        )
+        sent = notifier.send_editorial_alert(text)
+        if sent:
+            lead.notified_at = datetime.now(UTC)
+        return sent
+
+    def notify_correlation(self, lead: SpecialistLead, *, notifier: DiscordNotifier | None = None) -> bool:
+        """Send the follow-up CONFIRMED/FAMILY_MATCH alert immediately
+        after correlate_pending_leads() correlates a lead. Naturally
+        deduped: correlate_pending_leads only ever queries UNCONFIRMED
+        leads, so a lead can be correlated (and therefore notified here)
+        at most once."""
+        settings = get_settings()
+        if not settings.editorial_notifications_enabled:
+            return False
+        notifier = notifier or DiscordNotifier(settings)
+        if not notifier.editorial_enabled or lead.correlated_watch_id is None:
+            return False
+
+        watch = self.session.get(Watch, lead.correlated_watch_id)
+        if watch is None:
+            return False
+        profile = get_source_profile(lead.source_id)
+        text = format_correlation_followup_alert(
+            manufacturer=lead.manufacturer,
+            brand=lead.brand,
+            lead_reference_candidates=lead.reference_candidates or [],
+            watch_reference_raw=watch.reference_raw,
+            correlation_type=lead.correlation_type or "FAMILY_MATCH",
+            source_display_name=profile.display_name,
+            lead_published_at=lead.published_at.isoformat() if lead.published_at else None,
+            official_first_observed_at=(
+                lead.official_first_observed_at.isoformat() if lead.official_first_observed_at else None
+            ),
+            lead_time_days=lead.lead_time_days,
+            source_url=lead.source_url,
+        )
+        return notifier.send_editorial_alert(text)
 
 
 def run_casioblog_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20) -> CollectorRun:
@@ -190,6 +311,7 @@ def run_casioblog_pipeline(session: Session, *, feed_xml: bytes | None = None, m
                 status = "FAILED"
             else:
                 svc = SpecialistLeadService(session)
+                notifier = DiscordNotifier(settings)
                 for item in parsed.items:
                     outcome = svc.ingest_candidate(
                         source_id="casioblog",
@@ -209,7 +331,13 @@ def run_casioblog_pipeline(session: Session, *, feed_xml: bytes | None = None, m
                     )
                     if outcome["created"]:
                         new_leads += 1
-                svc.correlate_pending_leads(manufacturer="Casio")
+                        new_lead = session.get(SpecialistLead, outcome["lead_id"])
+                        svc.notify_new_lead(new_lead, notifier=notifier)
+                correlated = svc.correlate_pending_leads(manufacturer="Casio")
+                for c in correlated:
+                    correlated_lead = session.get(SpecialistLead, c["lead_id"])
+                    svc.notify_correlation(correlated_lead, notifier=notifier)
+                session.commit()
                 status = "SUCCESS" if (parsed.items and new_leads) or not parsed.items else "SUCCESS"
                 if not parsed.items:
                     status = "ZERO_ITEMS"

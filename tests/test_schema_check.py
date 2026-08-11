@@ -52,8 +52,8 @@ def test_db_at_older_revision_does_not_match(tmp_path: Path):
     """Direct reproduction of the real outage class: code expects the
     current migration head, database is pinned at an older revision
     (originally reproduced with 002_ops_statuses vs 003_release_leads;
-    updated to 004_specialist_leads as the code's head advanced — the
-    outage class under test is unchanged)."""
+    updated to 005_specialist_lead_correlation_type as the code's head
+    advanced — the outage class under test is unchanged)."""
     db_path = tmp_path / "stale.db"
     config = _alembic_config(db_path)
     command.upgrade(config, "002_ops_statuses")
@@ -62,7 +62,7 @@ def test_db_at_older_revision_does_not_match(tmp_path: Path):
     status = check_schema(engine, alembic_ini_path=str(ROOT / "alembic.ini"))
     assert not status.matches
     assert status.actual_version == "002_ops_statuses"
-    assert status.expected_head == "004_specialist_leads"
+    assert status.expected_head == "005_specialist_lead_correlation_type"
 
 
 def test_run_pipeline_refuses_on_schema_mismatch(tmp_path, monkeypatch):
@@ -87,3 +87,36 @@ def test_run_pipeline_refuses_on_schema_mismatch(tmp_path, monkeypatch):
 
     exit_code = run_pipeline_module.run_live_or_scheduled(max_items=1, scheduled=True)
     assert exit_code == run_pipeline_module.EXIT_SCHEMA_MISMATCH
+
+
+def test_run_pipeline_sends_health_alert_on_schema_mismatch(tmp_path, monkeypatch):
+    """Sprint 6: schema mismatch is exactly the actionable failure class the
+    health webhook exists for — verify it actually fires when configured."""
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+
+    db_path = tmp_path / "stale_for_alert.db"
+    config = _alembic_config(db_path)
+    command.upgrade(config, "002_ops_statuses")
+
+    import app.db.session as session_module
+
+    fresh_settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        discord_health_webhook_url="https://discord.example/health",
+    )
+    monkeypatch.setattr(session_module, "_settings", fresh_settings)
+    monkeypatch.setattr(session_module, "_engine", None)
+    monkeypatch.setattr(session_module, "_SessionLocal", None)
+
+    import scripts.run_pipeline as run_pipeline_module
+
+    monkeypatch.setattr(run_pipeline_module, "get_settings", lambda: fresh_settings)
+
+    calls = []
+    with patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()):
+        exit_code = run_pipeline_module.run_live_or_scheduled(max_items=1, scheduled=True)
+
+    assert exit_code == run_pipeline_module.EXIT_SCHEMA_MISMATCH
+    assert calls == ["https://discord.example/health"]

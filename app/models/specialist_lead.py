@@ -52,6 +52,13 @@ LEAD_TYPES = frozenset(
 
 VERIFICATION_STATUSES = frozenset({"UNCONFIRMED", "CORRELATED_WITH_OFFICIAL", "REJECTED"})
 
+# Phase 7 (Sprint 6): how a correlated lead matched an official Watch.
+# EXACT_REFERENCE_MATCH = full reference string matched, e.g. "GWR-B3000-1A".
+# FAMILY_MATCH = only the family root matched (e.g. lead "GWR-B3000" against
+# official "GWR-B3000-1A") — deterministic, never a similarity score, and
+# must never be presented as an exact-reference confirmation.
+CORRELATION_TYPES = frozenset({"EXACT_REFERENCE_MATCH", "FAMILY_MATCH"})
+
 
 class SpecialistLead(Base):
     """One discovered piece of early-warning evidence from a non-official
@@ -75,6 +82,10 @@ class SpecialistLead(Base):
         CheckConstraint(
             "confidence >= 0 AND confidence <= 100",
             name="ck_specialist_lead_confidence_range",
+        ),
+        CheckConstraint(
+            "correlation_type IS NULL OR correlation_type IN ('EXACT_REFERENCE_MATCH','FAMILY_MATCH')",
+            name="ck_specialist_lead_correlation_type",
         ),
     )
 
@@ -115,9 +126,14 @@ class SpecialistLead(Base):
     correlated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     official_first_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lead_time_days: Mapped[float | None] = mapped_column(Float, nullable=True)
+    correlation_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     ingestion_method: Mapped[str] = mapped_column(String(16), nullable=False, default="collector")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Discord dedup (Sprint 6 Phase 4): set once an alert is actually sent so
+    # a repeat pipeline run never re-notifies for the same lead.
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

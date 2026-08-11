@@ -50,6 +50,17 @@ class Settings(BaseSettings):
     # Deliberately low for the experimental lane per Sprint 2: we want to see
     # plausible opportunities during tuning, not filter them out.
     discord_experimental_min_score: float = Field(default=0.0)
+    # Minimum SpecialistLead.confidence (0-100) to send a Layer B
+    # early-warning Discord alert. Sprint 6.
+    discord_specialist_min_confidence: float = Field(default=40.0)
+
+    # Sprint 6 cloud handoff: once a cloud deployment is the authoritative
+    # editorial sender, set this to false on Windows so the same event/lead
+    # never gets alerted twice from two independent SQLite databases. Health
+    # alerts are unaffected — every host may still report its own ops
+    # problems. Defaults true so a single-host deployment (the only kind
+    # that exists today) keeps working unchanged.
+    editorial_notifications_enabled: bool = Field(default=True)
 
     @property
     def project_root(self) -> Path:

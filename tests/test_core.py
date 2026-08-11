@@ -1,6 +1,7 @@
 """Offline behavioral test suite for Watch Clank Stage 1."""
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -288,6 +289,45 @@ def test_stale_run_recovery(db_session: Session, tmp_settings: Settings):
     db_session.refresh(old)
     assert old.status == "FAILED"
     assert (old.summary_metadata or {}).get("stale_recovery") is True
+
+
+def test_stale_run_recovery_sends_health_alert(db_session: Session):
+    """Sprint 6: a stale-run recovery is exactly the kind of actionable ops
+    problem the health webhook should receive."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.services.run_lock import RunLockService
+
+    settings = Settings(discord_health_webhook_url="https://discord.example/health")
+    old = CollectorRun(
+        collector_id="casio_japan", collector_version="0.1.0", status="RUNNING",
+        started_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    db_session.add(old)
+    db_session.commit()
+
+    calls = []
+    with patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()):
+        lock = RunLockService(db_session, settings)
+        lock.recover_stale_runs()
+
+    assert calls == ["https://discord.example/health"]
+
+
+def test_stale_run_recovery_no_alert_when_nothing_recovered(db_session: Session, tmp_settings: Settings):
+    """No health spam: a clean recover_stale_runs() call (nothing to
+    recover) must not touch Discord at all."""
+    from unittest.mock import patch
+
+    from app.services.run_lock import RunLockService
+
+    with patch("httpx.post") as mock_post:
+        lock = RunLockService(db_session, tmp_settings)
+        lock.recover_stale_runs()
+
+    mock_post.assert_not_called()
 
 
 def test_run_lock_is_scoped_to_collector_id(db_session: Session, tmp_settings: Settings):
@@ -1971,8 +2011,8 @@ def test_specialist_lead_correlates_conservatively_with_official_watch(db_sessio
 
 
 def test_specialist_lead_never_fuzzy_matches(db_session: Session):
-    """A lead mentioning a reference that only partially resembles an
-    official watch must NOT correlate — exact match only."""
+    """A lead mentioning a reference with no relation (not exact, not a
+    shared family root) to an official watch must NOT correlate."""
     from app.models import Watch
     from app.services.specialist_leads import SpecialistLeadService
 
@@ -1982,12 +2022,86 @@ def test_specialist_lead_never_fuzzy_matches(db_session: Session):
 
     svc = SpecialistLeadService(db_session)
     svc.ingest_candidate(
-        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Rumored GA-2100 successor",
-        source_url="https://casioblog.com/en/rumor-ga2100-successor", published_at=None,
-        reference_candidates=["GA-2100"], claim_text=None, manufacturer="Casio",
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Rumored GA-110 successor",
+        source_url="https://casioblog.com/en/rumor-ga110-successor", published_at=None,
+        reference_candidates=["GA-110"], claim_text=None, manufacturer="Casio",
     )
     results = svc.correlate_pending_leads(manufacturer="Casio")
-    assert results == []  # "GA-2100" != "GA-2100-1A1JF" or "GA-2100-1A1" — no match
+    assert results == []  # "GA-110" shares neither exact nor family root with "GA-2100-1A1JF"
+
+
+def test_specialist_lead_family_match_is_labeled_not_exact(db_session: Session):
+    """Phase 7: a lead naming only the family root (e.g. "GWR-B3000")
+    against an official full reference (e.g. "GWR-B3000-1A") must
+    correlate as FAMILY_MATCH, distinct from an exact match, and must
+    never be reported as CORRELATION_TYPE == EXACT_REFERENCE_MATCH."""
+    from app.models import SpecialistLead, Watch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GWR-B3000-1A", reference_canonical="GWR-B3000-1A")
+    db_session.add(watch)
+    db_session.commit()
+
+    svc = SpecialistLeadService(db_session)
+    svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="[Rumors] G-SHOCK GWR-B3000",
+        source_url="https://casioblog.com/en/rumor-gwr-b3000", published_at=None,
+        reference_candidates=["GWR-B3000"], claim_text=None, manufacturer="Casio",
+    )
+    results = svc.correlate_pending_leads(manufacturer="Casio")
+    assert len(results) == 1
+    assert results[0]["correlation_type"] == "FAMILY_MATCH"
+
+    lead = db_session.scalars(select(SpecialistLead)).first()
+    assert lead.correlation_type == "FAMILY_MATCH"
+    assert lead.correlated_watch_id == watch.id
+
+
+def test_specialist_lead_exact_match_preferred_over_family(db_session: Session):
+    """When both an exact-reference watch and a family-only watch exist,
+    correlation must prefer the exact match and label it accordingly."""
+    from app.models import SpecialistLead, Watch
+    from app.services.specialist_leads import SpecialistLeadService
+
+    exact = Watch(manufacturer="Casio", brand="Casio", reference_raw="GWR-B3000", reference_canonical="GWR-B3000")
+    family_only = Watch(manufacturer="Casio", brand="Casio", reference_raw="GWR-B3000-1A", reference_canonical="GWR-B3000-1A")
+    db_session.add_all([exact, family_only])
+    db_session.commit()
+
+    svc = SpecialistLeadService(db_session)
+    svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="GWR-B3000 leak",
+        source_url="https://casioblog.com/en/rumor-gwr-b3000-exact", published_at=None,
+        reference_candidates=["GWR-B3000"], claim_text=None, manufacturer="Casio",
+    )
+    results = svc.correlate_pending_leads(manufacturer="Casio")
+    assert len(results) == 1
+    assert results[0]["correlation_type"] == "EXACT_REFERENCE_MATCH"
+    assert results[0]["watch_id"] == exact.id
+
+    lead = db_session.scalars(select(SpecialistLead)).first()
+    assert lead.correlation_type == "EXACT_REFERENCE_MATCH"
+
+
+def test_correlation_followup_alert_labels_family_match_distinctly():
+    from app.services.editorial import format_correlation_followup_alert
+
+    exact_text = format_correlation_followup_alert(
+        manufacturer="Casio", brand="G-Shock", lead_reference_candidates=["GWR-B3000-1A"],
+        watch_reference_raw="GWR-B3000-1A", correlation_type="EXACT_REFERENCE_MATCH",
+        source_display_name="CASIOBLOG", lead_published_at="2026-04-10", official_first_observed_at="2026-04-14",
+        lead_time_days=4.0, source_url="https://casioblog.com/en/rumor-gwr-b3000",
+    )
+    family_text = format_correlation_followup_alert(
+        manufacturer="Casio", brand="G-Shock", lead_reference_candidates=["GWR-B3000"],
+        watch_reference_raw="GWR-B3000-1A", correlation_type="FAMILY_MATCH",
+        source_display_name="CASIOBLOG", lead_published_at="2026-04-10", official_first_observed_at="2026-04-14",
+        lead_time_days=4.0, source_url="https://casioblog.com/en/rumor-gwr-b3000",
+    )
+    assert "CONFIRMED" in exact_text
+    assert "FAMILY_MATCH" not in exact_text.split("\n")[0]
+    assert "FAMILY_MATCH — NOT EXACT" in family_text
+    assert "Requires human verification" in family_text
 
 
 def test_casioblog_pipeline_baseline_then_repeat_creates_no_duplicates(db_session: Session, tmp_settings: Settings, monkeypatch):
@@ -2027,6 +2141,242 @@ def test_casioblog_pipeline_failed_fetch_creates_no_leads(db_session: Session, t
 
     assert run.status in ("FAILED", "BLOCKED")
     assert db_session.scalars(select(SpecialistLead)).first() is None
+
+
+# --- Sprint 6: health snapshot + DB backup ----------------------------------
+
+
+def test_health_snapshot_reports_never_run_and_healthy_sources(db_session: Session, tmp_settings: Settings):
+    from datetime import UTC, datetime
+
+    from app.services.health import get_health_snapshot
+
+    run = CollectorRun(
+        collector_id="citizen_news", collector_version="0.1.0", status="SUCCESS",
+        started_at=datetime.now(UTC), completed_at=datetime.now(UTC), discovered_count=3,
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    snap = get_health_snapshot(db_session, tmp_settings)
+    by_id = {s.collector_id: s for s in snap.sources}
+    assert by_id["citizen_news"].state == "HEALTHY"
+    assert by_id["citizen_news"].last_item_count == 3
+    assert by_id["casio_multi"].state == "NEVER_RUN"
+
+
+def test_health_snapshot_marks_all_recent_failed_as_failed(db_session: Session, tmp_settings: Settings):
+    from datetime import UTC, datetime
+
+    from app.services.health import get_health_snapshot
+
+    run = CollectorRun(
+        collector_id="seiko_jp_news", collector_version="0.1.0", status="FAILED",
+        started_at=datetime.now(UTC), completed_at=datetime.now(UTC),
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    snap = get_health_snapshot(db_session, tmp_settings)
+    by_id = {s.collector_id: s for s in snap.sources}
+    assert by_id["seiko_jp_news"].state == "FAILED"
+
+
+def test_health_snapshot_flags_heartbeat_overdue(db_session: Session, tmp_settings: Settings):
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.health import get_health_snapshot
+
+    # casioblog_rss expected cadence is 45 min; a "success" 10 hours ago
+    # is well past the 3x-cadence overdue window.
+    run = CollectorRun(
+        collector_id="casioblog_rss", collector_version="0.1.0", status="SUCCESS",
+        started_at=datetime.now(UTC) - timedelta(hours=10), completed_at=datetime.now(UTC) - timedelta(hours=10),
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    snap = get_health_snapshot(db_session, tmp_settings)
+    by_id = {s.collector_id: s for s in snap.sources}
+    assert by_id["casioblog_rss"].heartbeat_overdue is True
+    assert by_id["casioblog_rss"].state == "WARNING"
+
+
+def test_db_backup_creates_restorable_copy(tmp_path: Path, monkeypatch):
+    from app.core.config import Settings
+
+    db_path = tmp_path / "data" / "watch_clank.db"
+    db_path.parent.mkdir(parents=True)
+    src_conn = sqlite3.connect(str(db_path))
+    src_conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+    src_conn.execute("INSERT INTO t (v) VALUES ('hello')")
+    src_conn.commit()
+    src_conn.close()
+
+    settings = Settings(database_url=f"sqlite:///{db_path}")
+
+    import scripts.db_backup as db_backup_mod
+
+    monkeypatch.setattr(db_backup_mod, "get_settings", lambda: settings)
+
+    dest = db_backup_mod.backup_database(keep=14)
+    assert dest.exists()
+    dest_conn = sqlite3.connect(str(dest))
+    rows = dest_conn.execute("SELECT v FROM t").fetchall()
+    dest_conn.close()
+    assert rows == [("hello",)]
+
+
+def test_db_backup_retention_prunes_oldest(tmp_path: Path, monkeypatch):
+    from app.core.config import Settings
+
+    db_path = tmp_path / "data" / "watch_clank.db"
+    db_path.parent.mkdir(parents=True)
+    sqlite3.connect(str(db_path)).close()
+
+    settings = Settings(database_url=f"sqlite:///{db_path}")
+
+    import scripts.db_backup as db_backup_mod
+
+    monkeypatch.setattr(db_backup_mod, "get_settings", lambda: settings)
+
+    for _ in range(5):
+        db_backup_mod.backup_database(keep=3)
+
+    backups = sorted((db_path.parent / "backups").glob("*.db"))
+    assert len(backups) == 3  # oldest two pruned, never the live DB itself
+    assert db_path.exists()
+
+
+# --- Sprint 6: specialist-lead Discord wiring + dedup ----------------------
+
+
+def test_notify_new_lead_sends_and_sets_notified_at(db_session: Session):
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead
+    from app.services.discord_notify import DiscordNotifier
+    from app.services.specialist_leads import SpecialistLeadService
+
+    settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    svc = SpecialistLeadService(db_session)
+    outcome = svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Rumored GWR-B3000",
+        source_url="https://casioblog.com/en/rumor-gwr-b3000", published_at=None,
+        reference_candidates=["GWR-B3000"], claim_text=None, manufacturer="Casio", confidence=60.0,
+    )
+    lead = db_session.get(SpecialistLead, outcome["lead_id"])
+
+    calls = []
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=settings),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        sent = svc.notify_new_lead(lead, notifier=DiscordNotifier(settings))
+
+    assert sent is True
+    assert calls == ["https://discord.example/editorial"]
+    assert lead.notified_at is not None
+
+
+def test_notify_new_lead_does_not_resend_once_notified(db_session: Session):
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead
+    from app.services.discord_notify import DiscordNotifier
+    from app.services.specialist_leads import SpecialistLeadService
+
+    settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    svc = SpecialistLeadService(db_session)
+    outcome = svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="Rumored GWR-B3000",
+        source_url="https://casioblog.com/en/rumor-gwr-b3000-2", published_at=None,
+        reference_candidates=["GWR-B3000"], claim_text=None, manufacturer="Casio", confidence=60.0,
+    )
+    lead = db_session.get(SpecialistLead, outcome["lead_id"])
+
+    calls = []
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=settings),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        notifier = DiscordNotifier(settings)
+        first = svc.notify_new_lead(lead, notifier=notifier)
+        second = svc.notify_new_lead(lead, notifier=notifier)  # simulates a repeat pipeline run
+
+    assert first is True
+    assert second is False  # notified_at dedup
+    assert calls == ["https://discord.example/editorial"]  # only sent once
+
+
+def test_notify_new_lead_respects_confidence_floor_and_authority_flag(db_session: Session):
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead
+    from app.services.discord_notify import DiscordNotifier
+    from app.services.specialist_leads import SpecialistLeadService
+
+    svc = SpecialistLeadService(db_session)
+    low_confidence = svc.ingest_candidate(
+        source_id="casioblog", lead_type="LEAKED_IMAGE", title="Low-confidence rumor",
+        source_url="https://casioblog.com/en/low-confidence", published_at=None,
+        reference_candidates=[], claim_text=None, manufacturer="Casio", confidence=10.0,
+    )
+    lead = db_session.get(SpecialistLead, low_confidence["lead_id"])
+
+    below_threshold = Settings(
+        discord_editorial_webhook_url="https://discord.example/editorial",
+        discord_specialist_min_confidence=40.0,
+    )
+    with patch("app.services.specialist_leads.get_settings", return_value=below_threshold):
+        assert svc.notify_new_lead(lead, notifier=DiscordNotifier(below_threshold)) is False
+
+    disabled = Settings(
+        discord_editorial_webhook_url="https://discord.example/editorial",
+        editorial_notifications_enabled=False,
+    )
+    with patch("app.services.specialist_leads.get_settings", return_value=disabled):
+        assert svc.notify_new_lead(lead, notifier=DiscordNotifier(disabled)) is False
+
+
+def test_notify_correlation_sends_family_match_followup(db_session: Session):
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead, Watch
+    from app.services.discord_notify import DiscordNotifier
+    from app.services.specialist_leads import SpecialistLeadService
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GWR-B3000-1A", reference_canonical="GWR-B3000-1A")
+    db_session.add(watch)
+    db_session.commit()
+
+    settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    svc = SpecialistLeadService(db_session)
+    outcome = svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="[Rumors] GWR-B3000",
+        source_url="https://casioblog.com/en/rumor-gwr-b3000-followup", published_at=None,
+        reference_candidates=["GWR-B3000"], claim_text=None, manufacturer="Casio", confidence=60.0,
+    )
+    svc.correlate_pending_leads(manufacturer="Casio")
+    lead = db_session.get(SpecialistLead, outcome["lead_id"])
+    assert lead.correlation_type == "FAMILY_MATCH"
+
+    captured = {}
+
+    def _fake_post(url, **kw):
+        captured["body"] = kw["json"]["content"]
+        return type("R", (), {"status_code": 204, "text": ""})()
+
+    with patch("httpx.post", side_effect=_fake_post):
+        sent = svc.notify_correlation(lead, notifier=DiscordNotifier(settings))
+
+    assert sent is True
+    assert "FAMILY_MATCH — NOT EXACT" in captured["body"]
+    assert "CONFIRMED" not in captured["body"].split("\n")[0].replace("FAMILY_MATCH — NOT EXACT", "")
 
 
 def test_early_warning_alert_is_structurally_distinct_from_official():

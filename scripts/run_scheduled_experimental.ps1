@@ -17,10 +17,11 @@
 #   .\scripts\run_scheduled_experimental.ps1 -Lane seiko-news
 #   .\scripts\run_scheduled_experimental.ps1 -Lane citizen-products
 #   .\scripts\run_scheduled_experimental.ps1 -Lane seiko-products
+#   .\scripts\run_scheduled_experimental.ps1 -Lane casioblog
 
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "seiko-products")]
+    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "seiko-products", "casioblog")]
     [string]$Lane
 )
 
@@ -31,6 +32,7 @@ $LaneArgs = @{
     "seiko-news"        = @("--experimental-brand", "seiko")
     "citizen-products"  = @("--experimental-product", "citizen")
     "seiko-products"    = @("--experimental-product", "seiko")
+    "casioblog"         = @("--experimental-specialist", "casioblog")
 }
 $PipelineArgs = $LaneArgs[$Lane]
 
@@ -57,6 +59,10 @@ function Write-WrapperLog {
 if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 }
+
+. (Join-Path $ScriptDir "lib_log_rotate.ps1")
+Invoke-LogRotate -Path $WrapperLog
+Invoke-LogRotate -Path $PythonLog
 
 Write-WrapperLog "START pid=$PID repo=$RepoRoot lane=$Lane"
 Write-WrapperLog "DB_PATH=$SqlitePath"
