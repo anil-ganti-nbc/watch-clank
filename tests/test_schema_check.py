@@ -9,11 +9,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 
+from alembic import command
 from app.db.schema_check import check_schema
 
 ROOT = Path(__file__).resolve().parents[1]

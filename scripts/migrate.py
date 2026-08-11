@@ -18,9 +18,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from alembic import command
 from alembic.config import Config
 
+from alembic import command
 from app.db.schema_check import check_schema
 from app.db.session import get_engine
 
