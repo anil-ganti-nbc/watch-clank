@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. EIGHT Windows-scheduled tasks total (Casio + 4 experimental brand/product lanes + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live), silently baselined with zero editorial noise, then a real repeat run confirmed zero unexplained churn. Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; re-verified working against the new DB in Sprint 7 without a rebuild). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
+**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), now with correct editorial-freshness semantics (Sprint 8 bugfix). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. EIGHT Windows-scheduled tasks total (Casio + 4 experimental brand/product lanes + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live). Every specialist_leads row now carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED) so discovery novelty and editorial freshness are never conflated again — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`. Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; rebuilt in Sprint 8 for the freshness fix). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,78 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-11 (Sprint 8) — Fix: Epoch 1 stale material shown as fresh newsroom intelligence
+
+**Starting point verified:** HEAD `07e189f`, clean tree, 142/142 tests passing,
+Ruff clean, schema `006_operational_epochs`, DB integrity ok, 8 Windows
+tasks Ready/Enabled, no locks/stale RUNNING rows.
+
+**Incident (full writeup: `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`):** after
+Sprint 7's Epoch 1 baseline, the GUI's Recent Intelligence tab showed
+specialist-lead articles from March through August as if they were
+breaking news. Traced one real item end to end (a G-Central article about
+a UFC fighter's G-Shock, published 2026-07-26, discovered during the
+2026-08-11 baseline run): every layer up through persistence worked
+correctly — real parsed timestamp, correctly `is_baseline=True`, zero
+`Event` rows created (baseline suppression from Sprint 7 worked exactly as
+designed). The defect was two compounding gaps: (1) no concept of
+"editorial freshness" existed anywhere downstream of `is_baseline`, and
+(2) `local_windows/control_centre/data_access.py::get_recent_leads()`
+ordered purely by `discovered_at` with **no filter at all**, and displayed
+`discovered_at` in the "Time" column as if it were the article's own
+timestamp. All 50 real specialist leads in the DB were confirmed
+`is_baseline=True` — this was not an epoch/baseline defect, Sprint 7's
+mechanism worked correctly; the gap was entirely downstream of it.
+
+**Fix — new "editorial freshness" concept, deliberately separate from
+"discovery novelty":** `SpecialistLead.editorial_freshness` (migration
+007) with five states — `FRESH`, `STALE_PUBLICATION`, `BASELINE`,
+`UNKNOWN_TIMESTAMP`, `MANUAL_UNDATED` — plus `freshness_reason` (human-
+readable) and `freshness_evaluated_at`. New `app/services/freshness.py::
+classify_lead_freshness()`: baseline leads always classify `BASELINE`
+regardless of publication age; specialist/blog sources use
+`published_at` against a new configurable
+`specialist_freshness_window_hours` (default 72h); `RETAILER_EARLY_LISTING`
+sources (none active yet) fall back to `discovered_at` since they have no
+publication-time concept; manual ingestion with no date gets the honest
+`MANUAL_UNDATED` label rather than being conflated with a parser failure.
+Official-catalogue/product-transition Events were deliberately **not**
+touched — they already had correct semantics (only created after a
+healthy baseline, via existing `is_baseline_active()` guards from Sprint 7)
+and don't carry an independent publication timestamp the way a blog
+article does. `notify_new_lead` now refuses to alert anything that isn't
+`FRESH`. Existing 50 leads deterministically backfilled by the migration
+itself (self-contained classification logic, not importing app code, so
+the migration's behavior can't silently drift if `freshness.py` changes
+later).
+
+**Live validation on the real production DB:** before fix, all 50 leads
+sat in the GUI's default view unfiltered. Applied migration 007 (DB was
+quiescent, no locks/RUNNING rows — no need to disable the 8 scheduled
+tasks for this fast, ~50-row backfill). After: **50/50 correctly
+reclassified `BASELINE`, 0 `FRESH`.** GUI Recent Intelligence
+screenshotted live showing "Historical evidence suppressed: 50" with an
+empty current-intelligence table — the historical evidence itself was
+never deleted, just correctly excluded from the "current news" surface.
+Triggered a real GCentral pass afterward: 0 new leads (correct dedup), 0
+new events, DB integrity ok, all 8 tasks still Ready/Enabled.
+
+**GUI/EXE:** `data_access.py` (query fix + `get_historical_leads_count()`)
+and `main.py` (published_at display instead of discovered_at, suppressed-
+count label) both changed — **EXE was rebuilt** per policy (source
+consumed by the packaged binary changed) and the rebuilt binary was
+launched and screenshotted showing the same "Historical evidence
+suppressed: 50" result, proving the fix is actually in the package, not
+just the source tree.
+
+**Test result:** 151 passed (up from 142 — 9 new tests: the 7 brief-mandated
+regression scenarios plus a GUI-query-parity test using the real live
+G-Central fixture, which confirmed all 15 of its real March-August items
+correctly classify `STALE_PUBLICATION`, none `FRESH`). Ruff clean.
+
+**Deliberately out of scope this sprint (per explicit instruction):** no
+new sources, no Epoch 2, no cloud work, no GUI redesign.
 
 ## 2026-08-11 (Sprint 7) — Epoch 1 reset: archive, fresh DB, baseline, G-Central + Plus9Time
 
