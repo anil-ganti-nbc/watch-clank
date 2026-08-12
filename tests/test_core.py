@@ -1396,6 +1396,28 @@ def test_discord_notifier_separates_editorial_and_health_channels():
     assert calls == ["https://discord.example/editorial", "https://discord.example/health"]
 
 
+def test_discord_notifier_editorial_authority_flag_suppresses_only_editorial():
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.services.discord_notify import DiscordNotifier
+
+    settings = Settings(
+        discord_editorial_webhook_url="https://discord.example/editorial",
+        discord_health_webhook_url="https://discord.example/health",
+        editorial_notifications_enabled=False,
+    )
+    notifier = DiscordNotifier(settings)
+    calls = []
+    with patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()):
+        assert notifier.editorial_enabled is False
+        assert notifier.send_editorial_alert("editorial content") is False
+        assert notifier.health_enabled is True
+        assert notifier.send_health_alert("health content") is True
+
+    assert calls == ["https://discord.example/health"]
+
+
 def test_product_character_extraction_is_conservative():
     from app.services.pipeline import PipelineService
 

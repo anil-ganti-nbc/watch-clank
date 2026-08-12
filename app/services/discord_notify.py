@@ -31,7 +31,11 @@ class DiscordNotifier:
 
     @property
     def editorial_enabled(self) -> bool:
-        return bool(self.settings.discord_editorial_webhook_url)
+        # This is the single-host editorial authority boundary. When Hetzner
+        # becomes authoritative, Windows sets the flag false and every
+        # official and specialist editorial call site becomes a safe no-op.
+        # Health/ops delivery deliberately remains host-local.
+        return self.settings.editorial_notifications_enabled and bool(self.settings.discord_editorial_webhook_url)
 
     @property
     def health_enabled(self) -> bool:
