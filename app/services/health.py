@@ -35,6 +35,10 @@ KNOWN_COLLECTORS = [
     "casioblog_rss",
     "gcentral_rss",
     "plus9time_rss",
+    "monochrome_rss",
+    "deployant_rss",
+    "fratello_rss",
+    "watchtime_rss",
     "timex_products",
     "timex_news",
 ]
@@ -57,6 +61,10 @@ EXPECTED_CADENCE_MINUTES = {
     "casioblog_rss": 45,
     "gcentral_rss": 45,
     "plus9time_rss": 360,
+    "monochrome_rss": 45,
+    "deployant_rss": 90,
+    "fratello_rss": 45,
+    "watchtime_rss": 90,
     "timex_news": 90,
     "timex_products": 360,
 }

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL Monochrome specialist lane every 45 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -2242,6 +2242,58 @@ def test_plus9time_pipeline_baseline_then_repeat_creates_no_duplicates(db_sessio
     assert all(lead.source_id == "plus9time" for lead in leads)
 
 
+def test_monochrome_hcc009j1_field_miss_fixture_extracts_exact_reference():
+    """Permanent regression fixture for the 2026-08-12 HCC009J1 miss.
+
+    Monochrome's public RSS was the earliest observable specialist signal
+    found in the autopsy. The fixture intentionally preserves only the RSS
+    fields this collector is allowed to retain, never an article body.
+    """
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    result = parse_specialist_publication_feed((FIXTURES / "monochrome_hcc009j1_feed.xml").read_bytes())
+
+    assert result.success
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.brand == "Seiko"
+    assert item.reference_candidates == ["HCC009J1"]
+    assert item.is_limited_edition is True
+    assert item.is_collaboration is True
+    assert item.published_at == "2026-08-12T03:00:27+00:00"
+
+
+def test_monochrome_source_scoped_baseline_is_silent_then_repeat_is_deduped(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    from unittest.mock import patch
+
+    from app.core import config as config_mod
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_monochrome_pipeline
+
+    monkeypatch.setattr(config_mod, "get_settings", lambda: tmp_settings)
+    xml = (FIXTURES / "monochrome_hcc009j1_feed.xml").read_bytes()
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=tmp_settings),
+        patch("app.services.discord_notify.DiscordNotifier.send_editorial_alert") as send_alert,
+    ):
+        baseline = run_monochrome_pipeline(db_session, feed_xml=xml, force_baseline=True)
+        repeat = run_monochrome_pipeline(db_session, feed_xml=xml)
+
+    lead = db_session.scalars(select(SpecialistLead)).one()
+    assert baseline.status == "SUCCESS"
+    assert baseline.is_baseline is True
+    assert baseline.summary_metadata["new_leads"] == 1
+    assert lead.source_id == "monochrome"
+    assert lead.reference_candidates == ["HCC009J1"]
+    assert lead.is_baseline is True
+    assert lead.editorial_freshness == "BASELINE"
+    assert repeat.status == "SUCCESS"
+    assert repeat.summary_metadata["new_leads"] == 0
+    send_alert.assert_not_called()
+
+
 def test_gcentral_pipeline_failed_fetch_creates_no_leads(db_session: Session, tmp_settings: Settings):
     from unittest.mock import patch
 

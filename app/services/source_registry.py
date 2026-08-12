@@ -87,6 +87,37 @@ SOURCE_REGISTRY: dict[str, SourceProfile] = {
         account_or_domain="plus9time.com",
         display_name="Plus9Time",
     ),
+    # Sprint 14 additions. These are public, bounded RSS feeds from watch
+    # publications; they remain Layer B evidence and can never become an
+    # official ReleaseLead/Event merely by being ingested.
+    "monochrome": SourceProfile(
+        source_id="monochrome",
+        source_type="SPECIALIST_PUBLICATION",
+        tier=2,
+        account_or_domain="monochrome-watches.com",
+        display_name="Monochrome Watches",
+    ),
+    "deployant": SourceProfile(
+        source_id="deployant",
+        source_type="SPECIALIST_PUBLICATION",
+        tier=3,
+        account_or_domain="deployant.com",
+        display_name="Deployant",
+    ),
+    "fratello": SourceProfile(
+        source_id="fratello",
+        source_type="SPECIALIST_PUBLICATION",
+        tier=2,
+        account_or_domain="fratellowatches.com",
+        display_name="Fratello",
+    ),
+    "watchtime": SourceProfile(
+        source_id="watchtime",
+        source_type="SPECIALIST_PUBLICATION",
+        tier=2,
+        account_or_domain="watchtime.com",
+        display_name="WatchTime",
+    ),
 }
 
 

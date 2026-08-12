@@ -195,7 +195,7 @@ def run_experimental_product(brand: str, max_items: int | None = None, *, force_
         return EXIT_FAILED
 
 
-def run_experimental_specialist(source: str, max_items: int = 20) -> int:
+def run_experimental_specialist(source: str, max_items: int = 20, *, force_baseline: bool = False) -> int:
     """EXPERIMENTAL Layer B lane: specialist/early-warning source
     collectors (casioblog, gcentral, plus9time). Own lock file +
     collector_id per source, own collector_runs rows, writes only to
@@ -203,22 +203,36 @@ def run_experimental_specialist(source: str, max_items: int = 20) -> int:
     directly. See app/services/specialist_leads.py."""
     from app.services.specialist_leads import (
         run_casioblog_pipeline,
+        run_deployant_pipeline,
+        run_fratello_pipeline,
         run_gcentral_pipeline,
+        run_monochrome_pipeline,
         run_plus9time_pipeline,
+        run_watchtime_pipeline,
     )
 
     runners = {
         "casioblog": run_casioblog_pipeline,
         "gcentral": run_gcentral_pipeline,
         "plus9time": run_plus9time_pipeline,
+        "monochrome": run_monochrome_pipeline,
+        "deployant": run_deployant_pipeline,
+        "fratello": run_fratello_pipeline,
+        "watchtime": run_watchtime_pipeline,
     }
 
     settings = get_settings()
-    print(f"database_url={settings.resolved_database_url} source={source}")
+    print(f"database_url={settings.resolved_database_url} source={source} force_baseline={force_baseline}")
     with session_scope() as session:
         try:
             if source in runners:
-                run = runners[source](session)
+                # Pre-Sprint-14 specialist runners predate source-scoped
+                # baselines. New publication runners accept the flag; keep
+                # established lanes on their exact existing call contract.
+                if source in {"casioblog", "gcentral", "plus9time"}:
+                    run = runners[source](session)
+                else:
+                    run = runners[source](session, force_baseline=force_baseline)
             else:
                 print(f"FATAL: unknown specialist source {source!r}")
                 return EXIT_FATAL
@@ -287,7 +301,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--experimental-specialist",
-        choices=["casioblog", "gcentral", "plus9time"],
+        choices=["casioblog", "gcentral", "plus9time", "monochrome", "deployant", "fratello", "watchtime"],
         default=None,
         help="Run an EXPERIMENTAL Layer B (early-warning) specialist-source lane",
     )
@@ -323,14 +337,14 @@ def main() -> None:
         help="Sprint 9: source-scoped silent baseline for a brand joining an already-baselined "
         "epoch (e.g. Timex joining Epoch 1) -- creates watches/observations/leads normally but "
         "suppresses Event creation and Discord alerts for this run only. Only meaningful with "
-        "--experimental-brand/--experimental-product.",
+        "--experimental-brand/--experimental-product or Sprint 14 publication specialists.",
     )
     args = parser.parse_args()
 
     if args.ingest_manual_lead:
         sys.exit(ingest_manual_lead(args))
     if args.experimental_specialist:
-        sys.exit(run_experimental_specialist(args.experimental_specialist, args.max_items or 20))
+        sys.exit(run_experimental_specialist(args.experimental_specialist, args.max_items or 20, force_baseline=args.force_baseline))
     if args.experimental_brand:
         sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10, force_baseline=args.force_baseline))
     if args.experimental_product:

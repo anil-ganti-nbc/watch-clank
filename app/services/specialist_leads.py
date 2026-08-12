@@ -57,6 +57,7 @@ class SpecialistLeadService:
         confidence: float = 30.0,
         ingestion_method: str = "collector",
         notes: str | None = None,
+        force_baseline: bool = False,
     ) -> dict:
         """Create (or silently skip, if already seen) one SpecialistLead.
         Dedup key is source_url — reprocessing the same feed/post is a
@@ -74,7 +75,10 @@ class SpecialistLeadService:
                 pub_dt = None
 
         active_epoch = get_active_epoch(self.session)
-        is_baseline = bool(active_epoch and is_baseline_active(self.session))
+        # A new source joining an already-live epoch is quietly backfilled
+        # without reopening the global baseline.  The flag is deliberately
+        # scoped to this ingestion call, matching official-lane semantics.
+        is_baseline = bool(force_baseline or (active_epoch and is_baseline_active(self.session)))
         now = datetime.now(UTC)
         discovered_at = now
         freshness = classify_lead_freshness(
@@ -594,3 +598,139 @@ def run_plus9time_pipeline(session: Session, *, feed_xml: bytes | None = None, m
         raise
     finally:
         lock.release()
+
+
+def run_publication_pipeline(
+    session: Session,
+    *,
+    source_id: str,
+    feed_xml: bytes | None = None,
+    max_items: int = 20,
+    force_baseline: bool = False,
+) -> CollectorRun:
+    """Run one approved general-publication RSS lane.
+
+    This intentionally sits beside, rather than rewrites, the older
+    source-specific pipelines above. The four new sources share a bounded
+    RSS and exact-reference contract, while retaining a unique collector id,
+    lock, run row, and source-scoped baseline flag.
+    """
+    from app.collectors.specialist_publications import (
+        PUBLICATION_SOURCES,
+        SpecialistPublicationCollector,
+    )
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    source = PUBLICATION_SOURCES[source_id]
+    settings = get_settings()
+    lock_path = settings.resolved_lock_path.parent / f"{source.collector_id}.run.lock"
+    lock = RunLockService(session, settings, collector_id=source.collector_id, lock_path=lock_path)
+    lock_result = lock.acquire()
+    if not lock_result.acquired:
+        started = datetime.now(UTC)
+        skip_run = CollectorRun(
+            collector_id=source.collector_id,
+            collector_version=SpecialistPublicationCollector.collector_version,
+            started_at=started,
+            completed_at=started,
+            status="SKIPPED_OVERLAP",
+            summary_metadata={"reason": lock_result.reason, "active_run_id": lock_result.active_run_id},
+        )
+        session.add(skip_run)
+        session.commit()
+        return skip_run
+
+    started = datetime.now(UTC)
+    active_epoch = get_active_epoch(session)
+    run = CollectorRun(
+        collector_id=source.collector_id,
+        collector_version=SpecialistPublicationCollector.collector_version,
+        started_at=started,
+        status="RUNNING",
+        epoch_id=active_epoch.id if active_epoch else None,
+        is_baseline=bool(force_baseline or (active_epoch and is_baseline_active(session))),
+    )
+    session.add(run)
+    session.commit()
+    lock.update_run_id(run.id)
+
+    try:
+        result = SpecialistPublicationCollector(source_id).run(feed_xml=feed_xml)
+        status = result.metadata.get("component_status") or "FAILED"
+        new_leads = 0
+        if status == "SUCCESS":
+            parsed = parse_specialist_publication_feed(result.fetched[0].payload, max_items=max_items)
+            if not parsed.success:
+                status = "FAILED"
+            else:
+                service = SpecialistLeadService(session)
+                notifier = DiscordNotifier(settings)
+                manufacturers: set[str] = set()
+                for item in parsed.items:
+                    lead_type = (
+                        "POSSIBLE_LIMITED_EDITION" if item.is_limited_edition
+                        else "POSSIBLE_COLLABORATION" if item.is_collaboration
+                        else "POSSIBLE_NEW_REFERENCE" if item.reference_candidates
+                        else "LEAKED_IMAGE"
+                    )
+                    outcome = service.ingest_candidate(
+                        source_id=source_id,
+                        lead_type=lead_type,
+                        title=item.title,
+                        source_url=item.url,
+                        published_at=item.published_at,
+                        reference_candidates=item.reference_candidates,
+                        claim_text=item.claim_text,
+                        manufacturer=item.brand,
+                        brand=item.brand,
+                        confidence=35.0 + (20.0 if item.reference_candidates else 0.0),
+                        force_baseline=force_baseline,
+                    )
+                    if outcome["created"]:
+                        new_leads += 1
+                        manufacturers.add(item.brand)
+                        lead = session.get(SpecialistLead, outcome["lead_id"])
+                        service.notify_new_lead(lead, notifier=notifier)
+                for manufacturer in manufacturers:
+                    for correlation in service.correlate_pending_leads(manufacturer=manufacturer):
+                        lead = session.get(SpecialistLead, correlation["lead_id"])
+                        service.notify_correlation(lead, notifier=notifier)
+                session.commit()
+                status = "SUCCESS" if parsed.items else "ZERO_ITEMS"
+
+        completed = datetime.now(UTC)
+        run.completed_at = completed
+        run.status = status
+        run.discovered_count = new_leads
+        run.parsed_count = new_leads
+        run.duration_ms = int((completed - started).total_seconds() * 1000)
+        run.summary_metadata = {"new_leads": new_leads, "component_status": status, "force_baseline": force_baseline}
+        session.commit()
+        logger.info("publication_pipeline_completed", source_id=source_id, run_id=run.id, status=run.status, new_leads=new_leads)
+        return run
+    except Exception as exc:
+        session.rollback()
+        run.status = "FAILED"
+        run.completed_at = datetime.now(UTC)
+        run.summary_metadata = {"fatal_error": str(exc), "force_baseline": force_baseline}
+        session.add(run)
+        session.commit()
+        raise
+    finally:
+        lock.release()
+
+
+def run_monochrome_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20, force_baseline: bool = False) -> CollectorRun:
+    return run_publication_pipeline(session, source_id="monochrome", feed_xml=feed_xml, max_items=max_items, force_baseline=force_baseline)
+
+
+def run_deployant_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20, force_baseline: bool = False) -> CollectorRun:
+    return run_publication_pipeline(session, source_id="deployant", feed_xml=feed_xml, max_items=max_items, force_baseline=force_baseline)
+
+
+def run_fratello_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20, force_baseline: bool = False) -> CollectorRun:
+    return run_publication_pipeline(session, source_id="fratello", feed_xml=feed_xml, max_items=max_items, force_baseline=force_baseline)
+
+
+def run_watchtime_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20, force_baseline: bool = False) -> CollectorRun:
+    return run_publication_pipeline(session, source_id="watchtime", feed_xml=feed_xml, max_items=max_items, force_baseline=force_baseline)

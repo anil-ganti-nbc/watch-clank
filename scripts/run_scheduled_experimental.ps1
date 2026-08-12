@@ -26,7 +26,7 @@
 
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "citizen-de-products", "seiko-products", "casioblog", "gcentral", "plus9time", "timex-news", "timex-products")]
+    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "citizen-de-products", "seiko-products", "casioblog", "gcentral", "plus9time", "monochrome", "deployant", "fratello", "watchtime", "timex-news", "timex-products")]
     [string]$Lane
 )
 
@@ -41,6 +41,10 @@ $LaneArgs = @{
     "casioblog"         = @("--experimental-specialist", "casioblog")
     "gcentral"          = @("--experimental-specialist", "gcentral")
     "plus9time"         = @("--experimental-specialist", "plus9time")
+    "monochrome"        = @("--experimental-specialist", "monochrome")
+    "deployant"         = @("--experimental-specialist", "deployant")
+    "fratello"          = @("--experimental-specialist", "fratello")
+    "watchtime"         = @("--experimental-specialist", "watchtime")
     "timex-news"        = @("--experimental-brand", "timex")
     "timex-products"    = @("--experimental-product", "timex")
 }

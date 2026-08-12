@@ -32,6 +32,14 @@ script — you must copy, edit the paths, and enable them yourself.
   early-warning, 45 min (mirrors Windows task `WatchClank-GCentral`).
 - `watch-clank-plus9time.service` / `.timer` — EXPERIMENTAL specialist
   early-warning, 6h (mirrors Windows task `WatchClank-Plus9Time`).
+- `watch-clank-monochrome.service` / `.timer` — EXPERIMENTAL specialist
+  early-warning, 45 min (public RSS; mirrors `WatchClank-Monochrome`).
+- `watch-clank-deployant.service` / `.timer` — EXPERIMENTAL specialist
+  early-warning, 90 min (public RSS; mirrors `WatchClank-Deployant`).
+- `watch-clank-fratello.service` / `.timer` — EXPERIMENTAL specialist
+  early-warning, 45 min (public RSS; mirrors `WatchClank-Fratello`).
+- `watch-clank-watchtime.service` / `.timer` — EXPERIMENTAL specialist
+  early-warning, 90 min (public RSS; mirrors `WatchClank-WatchTime`).
 - `watch-clank-timex-news.service` / `.timer` — EXPERIMENTAL, 90 min
   (mirrors Windows task `WatchClank-TimexNews`). Sprint 11 hardened the
   underlying SKU extraction and reference resolution — see
@@ -39,7 +47,7 @@ script — you must copy, edit the paths, and enable them yourself.
 - `watch-clank-timex-products.service` / `.timer` — EXPERIMENTAL, 6h
   (mirrors Windows task `WatchClank-TimexProducts`).
 
-Each of the ten experimental units is fully independent: distinct
+Each experimental unit is fully independent: distinct
 `collector_id`, distinct lock file (see app/services/run_lock.py), distinct
 `collector_runs` rows. Disabling or stopping any one has zero effect on the
 others or on the Casio production lane.
@@ -68,6 +76,10 @@ sudo systemctl enable --now watch-clank-seiko-products.timer
 sudo systemctl enable --now watch-clank-casioblog.timer
 sudo systemctl enable --now watch-clank-gcentral.timer
 sudo systemctl enable --now watch-clank-plus9time.timer
+sudo systemctl enable --now watch-clank-monochrome.timer
+sudo systemctl enable --now watch-clank-deployant.timer
+sudo systemctl enable --now watch-clank-fratello.timer
+sudo systemctl enable --now watch-clank-watchtime.timer
 sudo systemctl enable --now watch-clank-timex-news.timer
 sudo systemctl enable --now watch-clank-timex-products.timer
 ```
@@ -95,6 +107,10 @@ cd /opt/watch-clank
 .venv/bin/python -m scripts.run_pipeline --experimental-specialist casioblog --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-specialist gcentral --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-specialist plus9time --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-specialist monochrome --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-specialist deployant --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-specialist fratello --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-specialist watchtime --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-brand timex --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-product timex --force-baseline
 ```
