@@ -18,6 +18,11 @@ script — you must copy, edit the paths, and enable them yourself.
   2026-08-11) — see app/collectors/citizen_products.py for the discovery
   mechanism and its documented breadth-over-depth tradeoff (no availability
   signal from this path, only from the smaller per-product-page lane).
+- `watch-clank-citizen-de-products.service` / `.timer` — EXPERIMENTAL,
+  12h sitemap-delta monitor. The initial source-scoped baseline reads the
+  bounded official German product sitemap (maximum 600 URLs); subsequent
+  runs fetch only URLs not already observed, preserving source load while
+  retaining first-party EUR price and explicit availability evidence.
 - `watch-clank-seiko-products.service` / `.timer` — EXPERIMENTAL, 6h.
   Paginates seikousa.com's public Shopify `products.json` (225 watches
   confirmed live 2026-08-11 — the full catalogue, not a sample).
@@ -34,7 +39,7 @@ script — you must copy, edit the paths, and enable them yourself.
 - `watch-clank-timex-products.service` / `.timer` — EXPERIMENTAL, 6h
   (mirrors Windows task `WatchClank-TimexProducts`).
 
-Each of the nine experimental units is fully independent: distinct
+Each of the ten experimental units is fully independent: distinct
 `collector_id`, distinct lock file (see app/services/run_lock.py), distinct
 `collector_runs` rows. Disabling or stopping any one has zero effect on the
 others or on the Casio production lane.
@@ -58,6 +63,7 @@ sudo systemctl enable --now watch-clank.timer
 sudo systemctl enable --now watch-clank-citizen-news.timer
 sudo systemctl enable --now watch-clank-seiko-news.timer
 sudo systemctl enable --now watch-clank-citizen-products.timer
+sudo systemctl enable --now watch-clank-citizen-de-products.timer
 sudo systemctl enable --now watch-clank-seiko-products.timer
 sudo systemctl enable --now watch-clank-casioblog.timer
 sudo systemctl enable --now watch-clank-gcentral.timer
@@ -84,6 +90,7 @@ cd /opt/watch-clank
 .venv/bin/python -m scripts.run_pipeline --experimental-brand citizen --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-brand seiko --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-product citizen --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-product citizen_de --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-product seiko --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-specialist casioblog --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-specialist gcentral --force-baseline

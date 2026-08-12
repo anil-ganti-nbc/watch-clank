@@ -1473,6 +1473,38 @@ def test_citizen_product_parser_malformed_html_fails_closed():
     assert result.error
 
 
+def test_citizen_de_product_parser_uses_first_party_jsonld():
+    from app.parsers.citizen_de_products import parse_citizen_de_product_html
+
+    result = parse_citizen_de_product_html(
+        (FIXTURES / "citizen_de_product_nj0230.html").read_bytes(),
+        source_url="https://de.citizenwatch.eu/de/p/nj0230-59l/",
+    )
+    assert result.success
+    watch = result.watches[0]
+    assert watch.reference_raw == "NJ0230-59L"
+    assert watch.price == 329.0 and watch.currency == "EUR"
+    assert watch.availability_status == "AVAILABLE"
+
+
+def test_citizen_de_sitemap_discovery_is_bounded_and_skips_known_urls():
+    from app.collectors.citizen_de_products import CitizenGermanyProductsCollector
+
+    sitemap = (FIXTURES / "citizen_de_products_sitemap.xml").read_bytes()
+    collector = CitizenGermanyProductsCollector()
+    items = collector.discover_from_sitemap_xml(sitemap)
+    assert [item.reference_hint for item in items] == ["NJ0230-59L", "NJ0238-57E"]
+
+    result = collector.run(
+        sitemap_payload=sitemap,
+        known_product_urls={"https://de.citizenwatch.eu/de/p/nj0230-59l/"},
+        max_items=0,
+    )
+    assert result.metadata["candidate_count"] == 2
+    assert result.metadata["known_url_count"] == 1
+    assert result.metadata["component_status"] == "ZERO_ITEMS"
+
+
 def _process_citizen_product_fixture(pipeline, run_id, fixture_name: str, url: str = "https://citizenwatch.com/us/en/product/AT8294-59E"):
     from app.collectors.base import FetchResult
     from app.parsers.citizen_products import parse_citizen_product_html
@@ -3149,6 +3181,43 @@ def test_timex_products_pipeline_baseline_then_repeat_creates_no_duplicates(db_s
     watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Timex")).all()
     assert len(watches) == run1.new_watch_count
     assert all(w.brand == "Timex" for w in watches)
+
+
+def test_citizen_de_products_force_baseline_then_repeat_is_silent(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """A newly onboarded regional source stores its catalogue silently and
+    then performs a zero-item sitemap-delta repeat without duplicate rows."""
+    from app.collectors.base import FetchResult
+    from app.models import Event, SourceObservation
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    product = (FIXTURES / "citizen_de_product_nj0230.html").read_bytes()
+    sitemap = (FIXTURES / "citizen_de_products_sitemap.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.citizen_de_products.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="text/html", payload=product),
+    )
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+
+    baseline = pipeline.run_product_observation_pipeline(
+        "citizen_de", offline_fixture=sitemap, force_baseline=True
+    )
+    before_count = db_session.query(SourceObservation).filter_by(collector_id="citizen_de_products").count()
+    repeat = pipeline.run_product_observation_pipeline("citizen_de", offline_fixture=sitemap)
+
+    assert baseline.status == "SUCCESS"
+    assert baseline.new_watch_count == 1
+    assert db_session.query(Event).count() == 0
+    assert before_count == 2
+    assert repeat.status == "ZERO_ITEMS"
+    assert repeat.new_watch_count == 0
+    assert db_session.query(SourceObservation).filter_by(collector_id="citizen_de_products").count() == before_count
 
 
 def test_timex_news_pipeline_baseline_then_repeat_creates_no_duplicate_leads(db_session: Session, tmp_settings: Settings):

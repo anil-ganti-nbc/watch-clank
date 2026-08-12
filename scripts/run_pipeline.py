@@ -172,8 +172,8 @@ def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: b
         return EXIT_FAILED
 
 
-def run_experimental_product(brand: str, max_items: int = 300, *, force_baseline: bool = False) -> int:
-    """EXPERIMENTAL lane: Citizen/Seiko/Timex product/catalogue observation.
+def run_experimental_product(brand: str, max_items: int | None = None, *, force_baseline: bool = False) -> int:
+    """EXPERIMENTAL lane: Citizen (US/DE), Seiko, or Timex catalogue observation.
     Same isolation as run_experimental_brand above — own lock file +
     collector_id, own collector_runs rows, cannot touch Casio state.
 
@@ -281,9 +281,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--experimental-product",
-        choices=["citizen", "seiko", "timex"],
+        choices=["citizen", "citizen_de", "seiko", "timex"],
         default=None,
-        help="Run the EXPERIMENTAL Citizen/Seiko product/catalogue-observation lane instead of Casio",
+        help="Run an EXPERIMENTAL product/catalogue-observation lane instead of Casio",
     )
     parser.add_argument(
         "--experimental-specialist",
@@ -315,7 +315,7 @@ def main() -> None:
     parser.add_argument("--lead-confidence", type=float, default=35.0)
     parser.add_argument(
         "--max-items", type=int, default=None,
-        help="Override per-mode default (Casio modes default 10; --experimental-product defaults 300 to cover the full discovered catalogue)",
+        help="Override per-mode default (Casio modes default 10; product lanes use their documented per-source limits)",
     )
     parser.add_argument(
         "--force-baseline",

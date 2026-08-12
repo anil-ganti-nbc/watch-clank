@@ -16,6 +16,7 @@
 #   .\scripts\run_scheduled_experimental.ps1 -Lane citizen-news
 #   .\scripts\run_scheduled_experimental.ps1 -Lane seiko-news
 #   .\scripts\run_scheduled_experimental.ps1 -Lane citizen-products
+#   .\scripts\run_scheduled_experimental.ps1 -Lane citizen-de-products
 #   .\scripts\run_scheduled_experimental.ps1 -Lane seiko-products
 #   .\scripts\run_scheduled_experimental.ps1 -Lane casioblog
 #   .\scripts\run_scheduled_experimental.ps1 -Lane gcentral
@@ -25,7 +26,7 @@
 
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "seiko-products", "casioblog", "gcentral", "plus9time", "timex-news", "timex-products")]
+    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "citizen-de-products", "seiko-products", "casioblog", "gcentral", "plus9time", "timex-news", "timex-products")]
     [string]$Lane
 )
 
@@ -35,6 +36,7 @@ $LaneArgs = @{
     "citizen-news"      = @("--experimental-brand", "citizen")
     "seiko-news"        = @("--experimental-brand", "seiko")
     "citizen-products"  = @("--experimental-product", "citizen")
+    "citizen-de-products" = @("--experimental-product", "citizen_de")
     "seiko-products"    = @("--experimental-product", "seiko")
     "casioblog"         = @("--experimental-specialist", "casioblog")
     "gcentral"          = @("--experimental-specialist", "gcentral")

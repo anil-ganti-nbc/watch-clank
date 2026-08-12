@@ -1805,7 +1805,7 @@ class PipelineService:
         self,
         brand: str,
         *,
-        max_items: int | None = 300,
+        max_items: int | None = None,
         offline_fixture: object = None,
         emit_events: bool = True,
         force_baseline: bool = False,
@@ -1823,6 +1823,16 @@ class PipelineService:
         brand joining an already-baselined epoch -- see _epoch_fields.
         """
         if not self._PRODUCT_REGISTRY:
+            from app.collectors.citizen_de_products import (
+                COLLECTOR_ID as CITIZEN_DE_PROD_ID,
+            )
+            from app.collectors.citizen_de_products import (
+                COLLECTOR_VERSION as CITIZEN_DE_PROD_VER,
+            )
+            from app.collectors.citizen_de_products import (
+                REGION as CITIZEN_DE_PROD_REGION,
+            )
+            from app.collectors.citizen_de_products import CitizenGermanyProductsCollector
             from app.collectors.citizen_products import (
                 COLLECTOR_ID as CITIZEN_PROD_ID,
             )
@@ -1859,6 +1869,7 @@ class PipelineService:
             from app.collectors.timex_products import (
                 TimexProductsCollector,
             )
+            from app.parsers.citizen_de_products import parse_citizen_de_product_html
             from app.parsers.citizen_products import parse_citizen_search_hit
             from app.parsers.seiko_products import parse_seiko_product_json
             from app.parsers.timex_products import parse_timex_product_json
@@ -1872,6 +1883,17 @@ class PipelineService:
                         "parse_fn": parse_citizen_search_hit,
                         "default_region": CITIZEN_PROD_REGION,
                         "offline_kwarg": "search_pages",
+                        "default_max_items": 300,
+                    },
+                    "citizen_de": {
+                        "collector_cls": CitizenGermanyProductsCollector,
+                        "collector_id": CITIZEN_DE_PROD_ID,
+                        "collector_version": CITIZEN_DE_PROD_VER,
+                        "parse_fn": parse_citizen_de_product_html,
+                        "default_region": CITIZEN_DE_PROD_REGION,
+                        "offline_kwarg": "sitemap_payload",
+                        "default_max_items": 100,
+                        "known_urls_from_observations": True,
                     },
                     "seiko": {
                         "collector_cls": SeikoProductsCollector,
@@ -1880,6 +1902,7 @@ class PipelineService:
                         "parse_fn": parse_seiko_product_json,
                         "default_region": SEIKO_PROD_REGION,
                         "offline_kwarg": "listing_pages",
+                        "default_max_items": 300,
                     },
                     "timex": {
                         "collector_cls": TimexProductsCollector,
@@ -1888,6 +1911,7 @@ class PipelineService:
                         "parse_fn": parse_timex_product_json,
                         "default_region": TIMEX_PROD_REGION,
                         "offline_kwarg": "listing_pages",
+                        "default_max_items": 300,
                     },
                 }
             )
@@ -1930,9 +1954,22 @@ class PipelineService:
 
         try:
             collector = cfg["collector_cls"]()
-            run_kwargs = {"max_items": max_items}
+            effective_max_items = (
+                max_items
+                if max_items is not None
+                else (None if force_baseline else cfg.get("default_max_items", 300))
+            )
+            run_kwargs = {"max_items": effective_max_items}
             if offline_fixture is not None:
                 run_kwargs[cfg["offline_kwarg"]] = offline_fixture
+            if cfg.get("known_urls_from_observations"):
+                run_kwargs["known_product_urls"] = {
+                    source_url
+                    for (source_url,) in self.session.query(SourceObservation.source_url)
+                    .filter(SourceObservation.collector_id == cfg["collector_id"])
+                    .distinct()
+                    .all()
+                }
             result = collector.run(**run_kwargs)
             status = result.metadata.get("component_status") or "FAILED"
             self._update_component_state(cfg["collector_id"], status, len(result.discovered))

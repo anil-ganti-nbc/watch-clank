@@ -1,5 +1,6 @@
-# Install or update the four EXPERIMENTAL Watch Clank scheduled tasks
-# (citizen_news, seiko_jp_news, citizen_products, seiko_products) alongside
+# Install or update the five EXPERIMENTAL Watch Clank scheduled tasks
+# (citizen_news, seiko_jp_news, citizen_products, citizen_de_products,
+# seiko_products) alongside
 # the existing WatchClank-CasioJapan task. Same interactive-logon model, no
 # stored credentials. Each task is independently named/registered so any one
 # can be disabled without affecting the others or Casio.
@@ -21,6 +22,7 @@ $Lanes = @(
     @{ Name = "citizen-news";     Task = "WatchClank-CitizenNews";     Interval = 90 },
     @{ Name = "seiko-news";       Task = "WatchClank-SeikoNews";       Interval = 90 },
     @{ Name = "citizen-products"; Task = "WatchClank-CitizenProducts"; Interval = 360 },
+    @{ Name = "citizen-de-products"; Task = "WatchClank-CitizenGermanyProducts"; Interval = 720 },
     @{ Name = "seiko-products";   Task = "WatchClank-SeikoProducts";   Interval = 360 }
 )
 
@@ -131,7 +133,7 @@ if ($AfterCount -le $BeforeCount) {
 
 Write-Host ""
 if ($AllOk) {
-    Write-Host "SUCCESS: all four experimental tasks registered and citizen-news verified live."
+    Write-Host "SUCCESS: all five experimental tasks registered and citizen-news verified live."
     exit 0
 } else {
     Write-Host "One or more steps failed - see output above."
