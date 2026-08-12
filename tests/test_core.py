@@ -3220,6 +3220,49 @@ def test_citizen_de_products_force_baseline_then_repeat_is_silent(
     assert db_session.query(SourceObservation).filter_by(collector_id="citizen_de_products").count() == before_count
 
 
+def test_citizen_de_first_normal_listing_of_known_us_reference_emits_new_region(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """Controlled post-baseline-style proof: an already known US Citizen
+    reference first listed by the official German lane is regional evidence,
+    never a cross-currency price change."""
+    from app.collectors.base import FetchResult
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Citizen", brand="Citizen", reference_raw="NJ0230-59L",
+        reference_canonical="NJ0230-59L",
+    )
+    db_session.add(watch)
+    db_session.flush()
+    db_session.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="citizen_products", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="US", source_url="https://example.test/us/nj0230",
+            price=525.0, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+        )
+    )
+    db_session.commit()
+    product = (FIXTURES / "citizen_de_product_nj0230.html").read_bytes()
+    sitemap = (FIXTURES / "citizen_de_products_sitemap.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.citizen_de_products.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="text/html", payload=product),
+    )
+
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline(
+        "citizen_de", offline_fixture=sitemap
+    )
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REGION")).all()
+    assert run.status == "SUCCESS"
+    assert run.new_watch_count == 0
+    assert len(events) == 1
+    assert events[0].extra["region"] == "DE"
+    assert db_session.scalar(select(Event).where(Event.event_type == "PRICE_CHANGE")) is None
+
+
 def test_timex_news_pipeline_baseline_then_repeat_creates_no_duplicate_leads(db_session: Session, tmp_settings: Settings):
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
