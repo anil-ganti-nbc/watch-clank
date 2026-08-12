@@ -240,6 +240,19 @@ class SpecialistLeadService:
             return False
         if lead.confidence < settings.discord_specialist_min_confidence:
             return False
+        # Preserve every independent article for provenance, but do not send
+        # four identical early-warning alerts when several publications name
+        # the same exact reference. This is intentionally a compact,
+        # deterministic exact-string check, not story clustering.
+        references = {ref.upper() for ref in lead.reference_candidates or []}
+        if references:
+            already_alerted = self.session.query(SpecialistLead).filter(
+                SpecialistLead.id != lead.id,
+                SpecialistLead.notified_at.is_not(None),
+                SpecialistLead.editorial_freshness == "FRESH",
+            ).all()
+            if any(references.intersection({ref.upper() for ref in other.reference_candidates or []}) for other in already_alerted):
+                return False
 
         notifier = notifier or DiscordNotifier(settings)
         if not notifier.editorial_enabled:

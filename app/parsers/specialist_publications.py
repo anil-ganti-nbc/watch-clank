@@ -24,8 +24,8 @@ _BRAND_TERMS = (
 )
 _REFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
     # Require a digit, preventing ordinary title words from becoming a model.
-    "Casio": re.compile(r"\b((?:GA|GW|GM|GMW|GBD|GBDH|GWR|GBA|GMA|GMD|GME|GSH|GST|EFK|EF|OCW|PRG|PRW|MRG|MTG|BGA|MSG)[-]?(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,24})\b", re.IGNORECASE),
-    "Seiko": re.compile(r"\b((?:S[A-Z]{2,3}[0-9]{3,4}|H(?:CC|BC)[A-Z0-9]{5}))\b", re.IGNORECASE),
+    "Casio": re.compile(r"\b((?:GA|GW|GM|GMW|GBD|GBDH|GBX|GWR|GBA|GMA|GMD|GME|GSH|GST|EFK|EF|OCW|PRG|PRW|MRG|MTG|BGA|MSG)[-]?(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,24})\b", re.IGNORECASE),
+    "Seiko": re.compile(r"\b((?:S[A-Z]{2,3}[0-9]{3,4}|H(?:CC|BC|DB)[A-Z0-9]{3,5}))\b", re.IGNORECASE),
     "Citizen": re.compile(r"\b([A-Z]{2}[0-9]{4}-[0-9A-Z]{2,4})\b", re.IGNORECASE),
     "Timex": re.compile(r"\b(TW[A-Z0-9]{6,})\b", re.IGNORECASE),
 }

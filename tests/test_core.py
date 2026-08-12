@@ -2263,13 +2263,31 @@ def test_monochrome_hcc009j1_field_miss_fixture_extracts_exact_reference():
     assert item.published_at == "2026-08-12T03:00:27+00:00"
 
 
+def test_new_publication_source_fixtures_preserve_real_metadata_and_exact_reference_when_present():
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    expected = {
+        "deployant_gbx_h5600ki_feed.xml": ("Casio", ["GBX-H5600KI"]),
+        "fratello_hcc009j1_feed.xml": ("Seiko", ["HCC009J1"]),
+        # The observed WatchTime RSS headline has no model reference. Keeping
+        # it empty is intentional: no parser may invent a reference.
+        "watchtime_seiko_edo_murasaki_feed.xml": ("Seiko", []),
+    }
+    for filename, (brand, references) in expected.items():
+        result = parse_specialist_publication_feed((FIXTURES / filename).read_bytes())
+        assert result.success
+        assert len(result.items) == 1
+        assert result.items[0].brand == brand
+        assert result.items[0].reference_candidates == references
+
+
 def test_monochrome_source_scoped_baseline_is_silent_then_repeat_is_deduped(
     db_session: Session, tmp_settings: Settings, monkeypatch
 ):
     from unittest.mock import patch
 
     from app.core import config as config_mod
-    from app.models import SpecialistLead
+    from app.models import Event, SpecialistLead
     from app.services.specialist_leads import run_monochrome_pipeline
 
     monkeypatch.setattr(config_mod, "get_settings", lambda: tmp_settings)
@@ -2289,9 +2307,42 @@ def test_monochrome_source_scoped_baseline_is_silent_then_repeat_is_deduped(
     assert lead.reference_candidates == ["HCC009J1"]
     assert lead.is_baseline is True
     assert lead.editorial_freshness == "BASELINE"
+    assert db_session.query(Event).count() == 0  # Layer B must not fabricate an official Event.
     assert repeat.status == "SUCCESS"
     assert repeat.summary_metadata["new_leads"] == 0
     send_alert.assert_not_called()
+
+
+def test_specialist_cross_source_exact_reference_preserves_leads_but_alerts_once(db_session: Session):
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead
+    from app.services.discord_notify import DiscordNotifier
+    from app.services.specialist_leads import SpecialistLeadService
+
+    settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    service = SpecialistLeadService(db_session)
+    first = service.ingest_candidate(
+        source_id="monochrome", lead_type="POSSIBLE_NEW_REFERENCE", title="HCC009J1",
+        source_url="https://monochrome.example/hcc", published_at=datetime.now(UTC).isoformat(),
+        reference_candidates=["HCC009J1"], claim_text=None, manufacturer="Seiko", confidence=60.0,
+    )
+    second = service.ingest_candidate(
+        source_id="fratello", lead_type="POSSIBLE_NEW_REFERENCE", title="HCC009J1 too",
+        source_url="https://fratello.example/hcc", published_at=datetime.now(UTC).isoformat(),
+        reference_candidates=["HCC009J1"], claim_text=None, manufacturer="Seiko", confidence=60.0,
+    )
+    calls = []
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=settings),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        assert service.notify_new_lead(db_session.get(SpecialistLead, first["lead_id"]), notifier=DiscordNotifier(settings)) is True
+        assert service.notify_new_lead(db_session.get(SpecialistLead, second["lead_id"]), notifier=DiscordNotifier(settings)) is False
+    assert len(db_session.query(SpecialistLead).all()) == 2
+    assert calls == ["https://discord.example/editorial"]
 
 
 def test_gcentral_pipeline_failed_fetch_creates_no_leads(db_session: Session, tmp_settings: Settings):
