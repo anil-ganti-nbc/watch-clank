@@ -3049,6 +3049,291 @@ def test_timex_news_baseline_leads_classify_baseline_not_fresh(db_session: Sessi
     assert db_session.scalars(select(Event)).first() is None  # baseline suppression held
 
 
+# --- Sprint 10: Timex historical-freshness hardening -------------------------
+# See ai/handoff/TIMEX_FRESHNESS_AUDIT.md. Real gap found: Sprint 8's freshness
+# fix only covered SpecialistLead (Layer B). Layer A news (ReleaseLead ->
+# Event via _record_watch_event) had NO publication-age gate at all -- a
+# genuinely old official article, first discovered late, would fire a real
+# NEW_REFERENCE event purely from discovery novelty. Fixed source-scoped
+# (Timex only, via _ISO_TIMESTAMP_NEWS_SOURCES) since Casio/Citizen/Seiko's
+# announcement_date is free text ("July 15, 2026", "23 July 2026") that a
+# strict ISO parse safely and predictably fails on, leaving them untouched.
+
+
+def test_real_historical_timex_article_does_not_become_current_news(db_session: Session, tmp_settings: Settings):
+    """Phase 4: a REAL historical Timex Atom entry (from the live fixture,
+    "Todd Snyder x Timex Marlin Mesh", published 2026-07-28 -- well outside
+    the 72h window from any 2026-08-12+ test run) first discovered AFTER
+    baseline (not during it) must create real Watch/ReleaseLead evidence
+    but must NEVER create a NEW_REFERENCE Event. This is the exact
+    "Reagan-era Timex article" class of bug this sprint hardens against.
+    Fails under the old discovery-time-is-news semantics (no gate existed
+    at all), passes under the fix."""
+    import xml.etree.ElementTree as ET
+
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event, ReleaseLead
+    from app.parsers.timex_news import parse_timex_news_entry
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)  # epoch is LIVE -- baseline already over
+
+    xml_bytes = (FIXTURES / "timex_blog_feed.atom").read_bytes()
+    root = ET.fromstring(xml_bytes)
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    real_old_entry = next(
+        e for e in root.findall("a:entry", ns)
+        if e.find("a:title", ns).text.startswith("Todd Snyder x Timex")
+    )
+    assert real_old_entry.find("a:published", ns).text == "2026-07-28T07:00:07-04:00"  # real, from the live capture
+
+    import json
+
+    # The real content has no extractable SKU (an honest, already-documented
+    # parser characteristic -- marketing copy rarely spells out part numbers,
+    # see app/parsers/timex_news.py's MODEL_RE docstring). Title/published/
+    # URL below are all real, from the live capture; a SKU sentence is
+    # appended so this test actually exercises _record_watch_event's new
+    # staleness gate (with no reference at all, no watch/event path would
+    # be reached, which wouldn't prove anything about this fix).
+    entry_dict = {
+        "title": real_old_entry.find("a:title", ns).text,
+        "published": real_old_entry.find("a:published", ns).text,
+        "content": (real_old_entry.find("a:content", ns).text or "") + " Featuring the TW2R79300 model.",
+    }
+    payload = json.dumps(entry_dict).encode("utf-8")
+    fr = FetchResult(
+        url="https://timex.com/blogs/the-timex-blog/todd-snyder-x-timex-mesh-marlin-a-sleek-take-on-a-vintage-classic",
+        success=True, status_code=200, content_type="application/json", payload=payload,
+    )
+    run = CollectorRun(collector_id="timex_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, collector_id="timex_news", manufacturer="Timex", brand="Timex",
+        parse_fn=parse_timex_news_entry, merge_key_prefix="timex", default_region="US", emit_events=True,
+    )
+
+    assert out["success"] is True
+    assert out["new_lead"] is True  # stored as real evidence
+    assert db_session.scalars(select(ReleaseLead)).first() is not None  # historical evidence preserved
+    assert out["watch_events"][0]["event_type"] is None
+    assert out["watch_events"][0]["reason"] == "stale_publication"
+    assert db_session.scalars(select(Event)).first() is None  # NEVER current news
+
+
+def test_fresh_timex_article_still_creates_event(db_session: Session, tmp_settings: Settings):
+    """Proof the gate doesn't over-suppress: a Timex article published
+    within the freshness window, discovered after baseline, must still
+    fire a normal NEW_REFERENCE event."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.parsers.timex_news import parse_timex_news_entry
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    import json
+
+    recent_pub = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    entry_dict = {"title": "Brand New Timex Launch", "published": recent_pub, "content": "<p>Featuring the TW2R79301 model.</p>"}
+    fr = FetchResult(
+        url="https://timex.com/blogs/the-timex-blog/brand-new-launch",
+        success=True, status_code=200, content_type="application/json",
+        payload=json.dumps(entry_dict).encode("utf-8"),
+    )
+    run = CollectorRun(collector_id="timex_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, collector_id="timex_news", manufacturer="Timex", brand="Timex",
+        parse_fn=parse_timex_news_entry, merge_key_prefix="timex", default_region="US", emit_events=True,
+    )
+
+    assert out["watch_events"][0]["event_type"] == "NEW_REFERENCE"
+    assert db_session.scalars(select(Event)).first() is not None
+
+
+def test_timex_article_with_null_publication_timestamp_does_not_become_news(db_session: Session, tmp_settings: Settings):
+    """Phase 2: a Timex entry with a missing/invalid publication timestamp
+    must NOT be assumed fresh -- UNKNOWN is not the same as CURRENT."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.parsers.timex_news import parse_timex_news_entry
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    import json
+
+    entry_dict = {"title": "Undated Timex Post", "published": None, "content": "<p>Featuring the TW2R79302 model.</p>"}
+    fr = FetchResult(
+        url="https://timex.com/blogs/the-timex-blog/undated-post",
+        success=True, status_code=200, content_type="application/json",
+        payload=json.dumps(entry_dict).encode("utf-8"),
+    )
+    run = CollectorRun(collector_id="timex_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, collector_id="timex_news", manufacturer="Timex", brand="Timex",
+        parse_fn=parse_timex_news_entry, merge_key_prefix="timex", default_region="US", emit_events=True,
+    )
+
+    assert out["watch_events"][0]["event_type"] is None
+    assert out["watch_events"][0]["reason"] == "unknown_publication_timestamp"
+    assert db_session.scalars(select(Event)).first() is None
+
+
+def test_future_rediscovery_of_old_timex_article_produces_no_alert(db_session: Session, tmp_settings: Settings):
+    """Phase 5: simulate the exact production scenario this sprint exists
+    to prevent. Epoch 1 baseline is long over; a canonical URL genuinely
+    NEW to Clank (never seen before, so this is real discovery novelty,
+    not a dedup case) surfaces with a publication date that predates the
+    freshness window by months. New DB evidence may be created; zero
+    current editorial intelligence; zero alert eligibility."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event, ReleaseLead
+    from app.parsers.timex_news import parse_timex_news_entry
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    import json
+
+    ancient_pub = (datetime.now(UTC) - timedelta(days=400)).isoformat()  # over a year old
+    entry_dict = {
+        "title": "Timex MK1 Vintage Reissue Announcement",
+        "published": ancient_pub,
+        "content": "<p>Featuring the TW2R79303 model, never in the reachable feed window until now.</p>",
+    }
+    fr = FetchResult(
+        url="https://timex.com/blogs/the-timex-blog/mk1-vintage-reissue-ancient",
+        success=True, status_code=200, content_type="application/json",
+        payload=json.dumps(entry_dict).encode("utf-8"),
+    )
+    run = CollectorRun(collector_id="timex_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, collector_id="timex_news", manufacturer="Timex", brand="Timex",
+        parse_fn=parse_timex_news_entry, merge_key_prefix="timex", default_region="US", emit_events=True,
+    )
+
+    assert out["new_lead"] is True
+    assert db_session.scalars(select(ReleaseLead)).first() is not None  # new DB evidence created
+    assert out["watch_events"][0]["event_type"] is None
+    assert out["watch_events"][0]["reason"] == "stale_publication"
+    assert db_session.scalars(select(Event)).first() is None  # zero current intelligence, zero alert eligibility
+
+
+def test_casio_and_citizen_official_news_unaffected_by_timex_hardening(db_session: Session, tmp_settings: Settings):
+    """Phase 7 regression proof: Casio/Citizen/Seiko's free-text
+    announcement_date strings are NOT in _ISO_TIMESTAMP_NEWS_SOURCES, so
+    they must fire NEW_REFERENCE exactly as before -- completely
+    unaffected by the Timex-specific hardening, regardless of how old
+    their (unparseable) date string might look."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.parsers.citizen_news import parse_citizen_news_html
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    fr = FetchResult(
+        url="https://www.citizenwatch-global.com/news/2026/20260610/index.html",
+        success=True, status_code=200, content_type="text/html", payload=detail_html,
+    )
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, discovered_meta={"source_region": "GLOBAL"},
+        collector_id="citizen_news", manufacturer="Citizen", brand="Citizen",
+        parse_fn=parse_citizen_news_html, merge_key_prefix="citizen",
+        default_region="GLOBAL", emit_events=True,
+    )
+    assert out["watch_events"][0]["event_type"] == "NEW_REFERENCE"  # unaffected
+    assert db_session.scalars(select(Event)).first() is not None
+
+
+def test_old_timex_product_restock_still_fires_current_event(db_session: Session, tmp_settings: Settings):
+    """Phase 3: publication-age gating must NEVER leak into the product/
+    catalogue transition path -- _record_product_transition is untouched
+    by this hardening. A years-old Timex watch that restocks today must
+    still produce a current RESTOCK/SOLD_OUT event."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    watch = Watch(manufacturer="Timex", brand="Timex", reference_raw="TW2R79300", reference_canonical="TW2R79300")
+    db_session.add(watch)
+    db_session.flush()
+    old_obs = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="0.1.0",
+        parser_id="t", parser_version="0", region="US", source_url="https://x/old",
+        availability_status="SOLD_OUT", observed_at=datetime.now(UTC) - timedelta(days=900),  # ~2.5 years old
+        overall_confidence=90.0,
+    )
+    db_session.add(old_obs)
+    db_session.commit()
+
+    new_obs = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="0.1.0",
+        parser_id="t", parser_version="0", region="US", source_url="https://x/new",
+        availability_status="AVAILABLE", observed_at=datetime.now(UTC), overall_confidence=90.0,
+    )
+    db_session.add(new_obs)
+    db_session.flush()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    result = pipeline._record_product_transition(watch=watch, new_obs=new_obs, is_new_watch=False)
+    assert result["event_type"] == "RESTOCK"
+    assert db_session.scalars(select(Event)).first() is not None
+
+
 # --- Sprint 6: health snapshot + DB backup ----------------------------------
 
 

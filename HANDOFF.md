@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), now with FOUR official brands (Sprint 9 added Timex) and correct editorial-freshness semantics (Sprint 8 bugfix). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. TEN Windows-scheduled tasks total (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED) so discovery novelty and editorial freshness are never conflated — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`. Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; rebuilt in Sprint 9 for the Timex/health.py changes). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
+**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), FOUR official brands (Casio/Citizen/Seiko/Timex, Sprint 9), with editorial-freshness semantics hardened at BOTH the Layer B specialist layer (Sprint 8) and the Layer A official-news layer (Sprint 10, Timex-scoped). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. TEN Windows-scheduled tasks total (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED); official Timex news additionally has a dedicated publication-age gate at the Event-creation layer (`_ISO_TIMESTAMP_NEWS_SOURCES`, Sprint 10) since `ReleaseLead` itself carries no freshness column — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md` and `ai/handoff/TIMEX_FRESHNESS_AUDIT.md`. Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; last rebuilt Sprint 9 — Sprint 10 required no rebuild, see its checkpoint for why). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,76 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-12 (Sprint 10) — Timex historical-freshness hardening
+
+**Starting point verified:** HEAD `0ccf8b5`, clean tree, 166/166 tests
+passing, Ruff clean, Epoch 1 LIVE, 10 Windows tasks Ready/Enabled, no
+locks/stale RUNNING rows.
+
+**Real gap found (audited, not assumed):** Sprint 8's freshness fix
+(`SpecialistLead.editorial_freshness`) only covers Layer B specialist
+sources. `ReleaseLead` (Layer A official news, including `timex_news`)
+has no freshness column at all, and `_record_watch_event` — the method
+that turns a `ReleaseLead` into a `NEW_REFERENCE`/`NEW_REGION` `Event` —
+had zero publication-age gate. Only `is_baseline_active()`/`force_baseline`
+suppressed it, which is epoch-scoped, not article-age-scoped. A genuinely
+old official article, first discovered after baseline, would have fired a
+real Event purely from discovery novelty. Full trace and live feed audit
+in `ai/handoff/TIMEX_FRESHNESS_AUDIT.md`.
+
+**Audit findings (live, 2026-08-12):** `timex_news`'s Atom feed currently
+exposes 30 entries (2026-06-01 through 2026-08-11), confirmed to have no
+real pagination (`?page=N` returns identical results regardless of N) —
+so an already-rolled-off article cannot currently be rediscovered through
+this endpoint; Phase 5's regression test simulates the scenario anyway,
+per the brief's explicit instruction, since it's the class of bug being
+hardened against, not a claim about today's specific feed shape. 0 NULL
+`published_at` observed across all 30 live entries.
+
+**Fix:** new `_ISO_TIMESTAMP_NEWS_SOURCES = frozenset({"timex_news"})` and
+`_stale_official_announcement()` in `app/services/pipeline.py`, wired into
+`_record_watch_event` only. Deliberately source-scoped: Casio ("July 15,
+2026"), Citizen ("23 July 2026", sometimes "2 July2026" with no space),
+and Seiko ("January 07, 2026") all store free-text `announcement_date`
+strings, confirmed live to safely and predictably fail a strict
+`datetime.fromisoformat()` parse — so they're structurally unaffected by
+this hardening, not merely "expected to be." `_record_product_transition`
+(RESTOCK/SOLD_OUT/PRICE_CHANGE/AVAILABILITY_CHANGE) and the catalogue
+NEW_REFERENCE path were not touched at all — product/catalogue freshness
+semantics remain exactly as before.
+
+**Live proof, not just tests:** re-ran `timex_news` with `max_items=30`
+(Sprint 9's baseline used the default 15) against the real production DB.
+13 more real articles, genuinely new to Clank, surfaced (published
+2026-06-01 through 2026-07-03) — **this is the exact bug-class scenario,
+caught live, not simulated.** Result: 13 new `ReleaseLead` rows stored as
+real historical evidence, 0 new Events. `scripts/status.py`'s `Latest
+official event` timestamp did not move.
+
+**Regression:** 6 new tests (real-historical-entry proof using the actual
+"Todd Snyder x Timex Marlin Mesh" fixture entry, fresh-article proof,
+NULL-timestamp proof, future-rediscovery simulation, Casio/Citizen
+unaffected proof, product-transition unaffected proof). Test count 166 →
+172. Ruff clean. Full existing suite (Casio/Citizen/Seiko/CASIOBLOG/
+G-Central/Plus9Time/product-transitions) unaffected by construction —
+`_record_product_transition` and every non-Timex `_record_watch_event`
+call site are untouched code paths.
+
+**GUI/EXE: no rebuild.** Verified `local_windows/control_centre/
+data_access.py` imports only `app.core.config`, `app.db.session`,
+`app.models`, `app.services.health` — never `app.services.pipeline`
+(where this sprint's only code change lives). `runner.py`'s RUN NOW
+buttons shell out to the live venv Python as a subprocess (always current
+source, never bundled/frozen). The existing Sprint 9 EXE was launched
+unmodified and confirmed correct against the current live DB (2020
+watches, unmoved `Latest official event`, all 10 sources healthy) —
+proof the "no rebuild needed" claim is verified, not assumed.
+
+**No schema/migration change** this sprint — the fix lives entirely in
+application logic, no new columns needed since `ReleaseLead`/`Event`
+already carry everything used (`announcement_date`, and the decision is
+made at creation time, not stored as a new state).
 
 ## 2026-08-12 (Sprint 9) — Timex as fourth official brand
 

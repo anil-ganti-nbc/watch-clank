@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -52,6 +52,19 @@ _NORMALIZERS = {
     "Timex": normalize_timex_reference,
 }
 
+# Sprint 10 hardening (ai/handoff/TIMEX_FRESHNESS_AUDIT.md): official news
+# sources whose announcement_date is a genuine, machine-parseable ISO-8601
+# timestamp -- as opposed to Casio ("July 15, 2026"), Citizen ("23 July
+# 2026", sometimes even "2 July2026" with no space), and Seiko ("January
+# 07, 2026"), all confirmed live as free-text strings that a strict
+# ISO parse will safely and predictably fail on. Only sources in this set
+# are eligible for the publication-freshness gate in _record_watch_event
+# below -- this is what keeps the hardening scoped to Timex (which can
+# genuinely provide a reliable "how old is this article" signal) without
+# any risk of silently suppressing a real Casio/Citizen/Seiko NEW_REFERENCE
+# event because their date strings don't parse as ISO-8601.
+_ISO_TIMESTAMP_NEWS_SOURCES = frozenset({"timex_news"})
+
 
 class PipelineService:
     def __init__(self, session: Session, storage: SnapshotStorageService | None = None) -> None:
@@ -78,6 +91,43 @@ class PipelineService:
             "epoch_id": epoch.id if epoch else None,
             "is_baseline": force_baseline or bool(epoch and is_baseline_active(self.session)),
         }
+
+    def _stale_official_announcement(self, lead) -> str | None:
+        """Sprint 10 hardening: returns a suppression reason if `lead`
+        (a ReleaseLead) is from a source in _ISO_TIMESTAMP_NEWS_SOURCES
+        and its announcement_date is either unparseable/missing or older
+        than the configured freshness window. Returns None (no
+        suppression) for every other source -- see the module-level
+        constant's docstring for why this is deliberately source-scoped.
+
+        Deliberately conservative in the direction that matters: a source
+        NOT in the allowlist is completely unaffected regardless of what
+        its announcement_date string looks like (Casio/Citizen/Seiko keep
+        their exact pre-existing behavior). Only within the allowlist does
+        "can't parse this timestamp" become "treat as not current" -- per
+        this sprint's explicit instruction: NULL/invalid publication
+        timestamp on an ISO-timestamp source is NOT assumed fresh.
+        """
+        if lead.source_id not in _ISO_TIMESTAMP_NEWS_SOURCES:
+            return None
+
+        pub_dt = None
+        if lead.announcement_date:
+            try:
+                pub_dt = datetime.fromisoformat(lead.announcement_date)
+            except ValueError:
+                pub_dt = None
+
+        if pub_dt is None:
+            return "unknown_publication_timestamp"
+
+        from app.core.time import ensure_utc
+
+        window_hours = get_settings().specialist_freshness_window_hours
+        age = datetime.now(UTC) - ensure_utc(pub_dt)
+        if age > timedelta(hours=window_hours):
+            return "stale_publication"
+        return None
 
     def _ledger(
         self,
@@ -941,6 +991,17 @@ class PipelineService:
             return {"event_type": None, "reason": "epoch_baseline_active"}
 
         prior_regions = self._prior_regions_for_watch(watch.id, exclude_lead_id=lead.id)
+
+        if is_new_watch or (region and prior_regions and region not in prior_regions):
+            # Hardening (Sprint 10): a NEW_REFERENCE/NEW_REGION event must
+            # reflect genuinely current news, not an old official article
+            # discovered late (e.g. Timex's large historical blog archive
+            # becoming newly reachable). Same principle as Sprint 8's
+            # SpecialistLead fix, applied here to the first-party news path
+            # that creates Events directly -- see _ISO_TIMESTAMP_NEWS_SOURCES.
+            stale_reason = self._stale_official_announcement(lead)
+            if stale_reason:
+                return {"event_type": None, "reason": stale_reason}
 
         if is_new_watch:
             event_type = "NEW_REFERENCE"
