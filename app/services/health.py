@@ -32,6 +32,10 @@ KNOWN_COLLECTORS = [
     "seiko_jp_news",
     "seiko_products",
     "casioblog_rss",
+    "gcentral_rss",
+    "plus9time_rss",
+    "timex_products",
+    "timex_news",
 ]
 
 SUCCESS_STATUSES = {"SUCCESS", "PARTIAL", "ZERO_ITEMS"}
@@ -49,6 +53,10 @@ EXPECTED_CADENCE_MINUTES = {
     "seiko_jp_news": 90,
     "seiko_products": 360,
     "casioblog_rss": 45,
+    "gcentral_rss": 45,
+    "plus9time_rss": 360,
+    "timex_news": 90,
+    "timex_products": 360,
 }
 
 

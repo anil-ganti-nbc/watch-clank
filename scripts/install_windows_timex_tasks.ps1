@@ -1,19 +1,25 @@
-# Install or update the EXPERIMENTAL WatchClank-GCentral and
-# WatchClank-Plus9Time scheduled tasks (Sprint 7 source expansion).
-# Own tasks, own locks, own collector_ids -- independently disableable from
-# each other, CASIOBLOG, and Casio production.
+# Install or update the EXPERIMENTAL WatchClank-TimexNews and
+# WatchClank-TimexProducts scheduled tasks (Sprint 9: Timex as fourth
+# official brand). Own tasks, own locks, own collector_ids -- independently
+# disableable from Casio/Citizen/Seiko and from each other.
 #
 # Cadence:
-#   G-Central: 45 min (same reasoning as CASIOBLOG -- cheap WordPress RSS,
-#   real ~hourly updatePeriod, several posts/week).
-#   Plus9Time: 360 min (6h) -- real posting cadence observed during Sprint 7
-#   research is roughly weekly, not hourly; a 45min check would be pure
-#   waste against a source that rarely changes. 6h matches the existing
-#   product-observation cadence and is still frequent enough to catch same-
-#   day posts.
+#   News (timex_news, Shopify Atom blog feed): 90 min -- matches the
+#   existing citizen_news/seiko_jp_news cadence for a first-party official
+#   news source of comparable cost.
+#   Products (timex_products, Shopify products.json, ~1445 real watches
+#   across 6-7 pages): 360 min (6h) -- matches the existing
+#   citizen_products/seiko_products cadence for a catalogue collector of
+#   comparable scale/cost.
+#
+# NOTE: this task deliberately does NOT pass --force-baseline. The initial
+# silent Timex population (source-scoped baseline joining the already-live
+# Epoch 1) was a one-time manual operation -- see HANDOFF.md's Sprint 9
+# checkpoint. Ongoing scheduled runs use normal (non-baseline) semantics,
+# exactly like every other source.
 #
 # Usage:
-#   .\scripts\install_windows_gcentral_plus9time_tasks.ps1
+#   .\scripts\install_windows_timex_tasks.ps1
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -25,11 +31,11 @@ $SqlitePath = Join-Path $RepoRoot "data\watch_clank.db"
 $CurrentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 $Lanes = @(
-    @{ Name = "gcentral";  Task = "WatchClank-GCentral";  Interval = 45 },
-    @{ Name = "plus9time"; Task = "WatchClank-Plus9Time"; Interval = 360 }
+    @{ Name = "timex-news";     Task = "WatchClank-TimexNews";     Interval = 90 },
+    @{ Name = "timex-products"; Task = "WatchClank-TimexProducts"; Interval = 360 }
 )
 
-Write-Host "=== Watch Clank G-Central / Plus9Time task installer ==="
+Write-Host "=== Watch Clank Timex task installer ==="
 Write-Host "Repository: $RepoRoot"
 Write-Host "Identity:   $CurrentIdentity"
 Write-Host ""
@@ -105,14 +111,14 @@ foreach ($Lane in $Lanes) {
 }
 
 Write-Host ""
-Write-Host "=== Verification: trigger gcentral once and confirm a new collector_runs row ==="
+Write-Host "=== Verification: trigger timex-news once and confirm a new collector_runs row ==="
 $BeforeCount = [int](& $VenvPython -c "from sqlalchemy import create_engine, text; e=create_engine(r'$env:DATABASE_URL'); c=e.connect(); print(c.execute(text('SELECT COUNT(*) FROM collector_runs')).scalar())" 2>&1)
-Start-ScheduledTask -TaskName "WatchClank-GCentral"
+Start-ScheduledTask -TaskName "WatchClank-TimexNews"
 
 $Deadline = (Get-Date).AddMinutes(2)
 do {
     Start-Sleep -Seconds 5
-    $State = (Get-ScheduledTask -TaskName "WatchClank-GCentral").State
+    $State = (Get-ScheduledTask -TaskName "WatchClank-TimexNews").State
     Write-Host "  state=$State"
     if ($State -ne "Running") { break }
 } while ((Get-Date) -lt $Deadline)
@@ -122,13 +128,13 @@ $AfterCount = [int](& $VenvPython -c "from sqlalchemy import create_engine, text
 Write-Host "collector_runs: before=$BeforeCount after=$AfterCount"
 
 if ($AfterCount -le $BeforeCount) {
-    Write-Host "FAILURE: no new collector_runs row after triggering WatchClank-GCentral."
+    Write-Host "FAILURE: no new collector_runs row after triggering WatchClank-TimexNews."
     $AllOk = $false
 }
 
 Write-Host ""
 if ($AllOk) {
-    Write-Host "SUCCESS: WatchClank-GCentral and WatchClank-Plus9Time registered; GCentral verified live."
+    Write-Host "SUCCESS: WatchClank-TimexNews and WatchClank-TimexProducts registered; TimexNews verified live."
     exit 0
 } else {
     Write-Host "One or more steps failed - see output above."

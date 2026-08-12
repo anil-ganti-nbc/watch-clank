@@ -67,7 +67,7 @@ foreach ($Lane in $Lanes) {
 
     $Action = New-ScheduledTaskAction `
         -Execute "powershell.exe" `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunScript`" -Lane $($Lane.Name)" `
+        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RunScript`" -Lane $($Lane.Name)" `
         -WorkingDirectory $RepoRoot
 
     $Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `

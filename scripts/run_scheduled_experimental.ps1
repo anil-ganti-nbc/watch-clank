@@ -20,10 +20,12 @@
 #   .\scripts\run_scheduled_experimental.ps1 -Lane casioblog
 #   .\scripts\run_scheduled_experimental.ps1 -Lane gcentral
 #   .\scripts\run_scheduled_experimental.ps1 -Lane plus9time
+#   .\scripts\run_scheduled_experimental.ps1 -Lane timex-news
+#   .\scripts\run_scheduled_experimental.ps1 -Lane timex-products
 
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "seiko-products", "casioblog", "gcentral", "plus9time")]
+    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "seiko-products", "casioblog", "gcentral", "plus9time", "timex-news", "timex-products")]
     [string]$Lane
 )
 
@@ -37,6 +39,8 @@ $LaneArgs = @{
     "casioblog"         = @("--experimental-specialist", "casioblog")
     "gcentral"          = @("--experimental-specialist", "gcentral")
     "plus9time"         = @("--experimental-specialist", "plus9time")
+    "timex-news"        = @("--experimental-brand", "timex")
+    "timex-products"    = @("--experimental-product", "timex")
 }
 $PipelineArgs = $LaneArgs[$Lane]
 

@@ -53,7 +53,7 @@ $env:DATABASE_URL = "sqlite:///$($SqlitePath -replace '\\', '/')"
 
 $Action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunScript`" -Lane casioblog" `
+    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RunScript`" -Lane casioblog" `
     -WorkingDirectory $RepoRoot
 
 $Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `

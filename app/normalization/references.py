@@ -244,6 +244,42 @@ def normalize_seiko_reference(
     )
 
 
+def normalize_timex_reference(
+    reference_raw: str,
+    *,
+    manufacturer: str = "Timex",
+    brand_hint: str | None = None,
+    collection_hint: str | None = None,
+) -> NormalizedReference:
+    """Normalize a Timex reference conservatively.
+
+    Timex SKUs (e.g. "TW6A01000VQ") have no hyphen and no validated
+    suffix-stripping rule (the trailing letters can encode strap/case
+    color variants). Same conservative policy as Citizen/Seiko: canonical
+    == raw until brand-specific evidence justifies otherwise. Uniqueness
+    is scoped by (manufacturer, brand, reference_canonical) regardless
+    (see app/models/watch.py), so this format never collides with Casio/
+    Citizen/Seiko references even though it shares no prefix convention
+    with any of them.
+    """
+    raw = (reference_raw or "").strip()
+    if not raw:
+        raise ValueError("reference_raw must not be empty")
+    brand = brand_hint or "Timex"
+    base = re.sub(r"[^a-z0-9]", "", raw.lower())
+    brand_slug = re.sub(r"[^a-z0-9]", "", brand.lower())
+    family_key = f"timex_{brand_slug}_{base}"
+    return NormalizedReference(
+        reference_raw=raw,
+        reference_canonical=raw,
+        family_candidate_key=family_key,
+        manufacturer=manufacturer,
+        brand=brand,
+        collection=collection_hint,
+        warnings=["no suffix normalization applied: no validated Timex suffix rules yet"],
+    )
+
+
 def safe_overall_confidence(field_confidence: dict[str, float] | None) -> float:
     """Compute overall confidence safely; never divide by zero.
 

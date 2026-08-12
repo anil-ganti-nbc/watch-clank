@@ -32,6 +32,7 @@ from app.normalization.references import (
     normalize_casio_reference,
     normalize_citizen_reference,
     normalize_seiko_reference,
+    normalize_timex_reference,
     safe_overall_confidence,
 )
 from app.parsers.casio_japan import PARSER_VERSION, parse_casio_product_html
@@ -48,6 +49,7 @@ _NORMALIZERS = {
     "Casio": normalize_casio_reference,
     "Citizen": normalize_citizen_reference,
     "Seiko": normalize_seiko_reference,
+    "Timex": normalize_timex_reference,
 }
 
 
@@ -56,16 +58,25 @@ class PipelineService:
         self.session = session
         self.storage = storage or SnapshotStorageService()
 
-    def _epoch_fields(self) -> dict:
+    def _epoch_fields(self, *, force_baseline: bool = False) -> dict:
         """epoch_id/is_baseline kwargs for a new CollectorRun -- see
         app/services/epoch.py. Every real (non-skip) CollectorRun creation
-        site should spread this in so baseline runs are auditable."""
+        site should spread this in so baseline runs are auditable.
+
+        force_baseline (Sprint 9): a SOURCE-SCOPED silent baseline for a
+        brand joining an already-running (already-baselined) epoch -- e.g.
+        Timex joining Epoch 1 after Casio/Citizen/Seiko already went live.
+        Deliberately independent of the epoch's own baseline_started_at/
+        baseline_completed_at window (which cannot be reopened once
+        completed, and reopening it would incorrectly baseline every other
+        source's concurrent scheduled runs too, not just the new one).
+        """
         from app.services.epoch import get_active_epoch, is_baseline_active
 
         epoch = get_active_epoch(self.session)
         return {
             "epoch_id": epoch.id if epoch else None,
-            "is_baseline": bool(epoch and is_baseline_active(self.session)),
+            "is_baseline": force_baseline or bool(epoch and is_baseline_active(self.session)),
         }
 
     def _ledger(
@@ -238,6 +249,7 @@ class PipelineService:
         emit_events: bool = False,
         notify: bool = False,
         experimental: bool = False,
+        force_baseline: bool = False,
     ) -> dict[str, Any]:
         """Process one fetched item (product/catalogue page) under a single
         transaction boundary.
@@ -388,7 +400,7 @@ class PipelineService:
 
             region = default_region
             overall = safe_overall_confidence(pw.field_confidence)
-            epoch_fields = self._epoch_fields()
+            epoch_fields = self._epoch_fields(force_baseline=force_baseline)
             obs = SourceObservation(
                 watch_id=watch.id,
                 fetch_id=fetch.id,
@@ -432,6 +444,7 @@ class PipelineService:
                     is_new_watch=is_new,
                     notify=notify,
                     experimental=experimental,
+                    force_baseline=force_baseline,
                 )
 
             self.session.commit()
@@ -753,7 +766,8 @@ class PipelineService:
         return {"is_limited_edition": is_limited or None, "is_collaboration": is_collab or None, "unusual_material": material}
 
     def _record_product_transition(
-        self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False, experimental: bool = False
+        self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False,
+        experimental: bool = False, force_baseline: bool = False,
     ) -> dict:
         """Classify and persist a deterministic PRICE_CHANGE/AVAILABILITY_
         CHANGE/SOLD_OUT/RESTOCK event by comparing new_obs against the most
@@ -782,6 +796,11 @@ class PipelineService:
         )
         from app.services.epoch import is_baseline_active
 
+        if force_baseline:
+            # Sprint 9: source-scoped silent baseline (e.g. Timex joining an
+            # already-baselined epoch) -- independent of the epoch's own
+            # baseline window, see _epoch_fields' docstring.
+            return {"event_type": None, "reason": "source_scoped_baseline"}
         if is_baseline_active(self.session):
             # Epoch 1 (or any epoch's) baseline: the Watch/SourceObservation
             # rows already got created by the caller -- that's real discovery
@@ -894,7 +913,8 @@ class PipelineService:
         return {"event_type": scored.event_type, "event_id": event.id, "score": scored.score, "confidence": scored.confidence}
 
     def _record_watch_event(
-        self, *, watch: Watch, is_new_watch: bool, lead, region: str | None, notify: bool = False, experimental: bool = False
+        self, *, watch: Watch, is_new_watch: bool, lead, region: str | None, notify: bool = False,
+        experimental: bool = False, force_baseline: bool = False,
     ) -> dict:
         """Classify and persist a deterministic Event for a resolved watch.
 
@@ -913,6 +933,8 @@ class PipelineService:
         from app.services.editorial import format_alert
         from app.services.epoch import is_baseline_active
 
+        if force_baseline:
+            return {"event_type": None, "reason": "source_scoped_baseline"}
         if is_baseline_active(self.session):
             # See the matching guard in _record_product_transition: baseline
             # discovery of a watch/region is known-existing-state, not news.
@@ -1016,6 +1038,7 @@ class PipelineService:
         emit_events: bool = False,
         notify: bool = False,
         experimental: bool = False,
+        force_baseline: bool = False,
     ) -> dict:
         """Persist a news announcement as release lead (+ optional watches).
 
@@ -1182,6 +1205,7 @@ class PipelineService:
                         region=lead.source_region,
                         notify=notify,
                         experimental=experimental,
+                        force_baseline=force_baseline,
                     )
                 )
         lead.watch_ids = watch_ids
@@ -1391,12 +1415,16 @@ class PipelineService:
         max_items: int | None = 10,
         index_html: bytes | None = None,
         emit_events: bool = True,
+        force_baseline: bool = False,
     ) -> CollectorRun:
         """Run an experimental single-brand news-discovery pipeline.
 
-        brand: "citizen" or "seiko". Casio is intentionally not supported
-        here — its production path is run_multi_source_pipeline/
+        brand: "citizen", "seiko", or "timex". Casio is intentionally not
+        supported here — its production path is run_multi_source_pipeline/
         run_casio_pipeline and must not be duplicated or bypassed.
+
+        force_baseline (Sprint 9): source-scoped silent baseline for a
+        brand joining an already-baselined epoch -- see _epoch_fields.
         """
         if not self._BRAND_REGISTRY:
             from app.collectors.citizen_news import (
@@ -1417,8 +1445,18 @@ class PipelineService:
             from app.collectors.seiko_news import (
                 SeikoNewsCollector,
             )
+            from app.collectors.timex_news import (
+                COLLECTOR_ID as TIMEX_NEWS_ID,
+            )
+            from app.collectors.timex_news import (
+                COLLECTOR_VERSION as TIMEX_NEWS_VER,
+            )
+            from app.collectors.timex_news import (
+                TimexNewsCollector,
+            )
             from app.parsers.citizen_news import parse_citizen_news_html
             from app.parsers.seiko_news import parse_seiko_news_html
+            from app.parsers.timex_news import parse_timex_news_entry
 
             self._BRAND_REGISTRY.update(
                 {
@@ -1439,6 +1477,15 @@ class PipelineService:
                         "manufacturer": "Seiko",
                         "brand": "Seiko",
                         "default_region": "JP",
+                    },
+                    "timex": {
+                        "collector_cls": TimexNewsCollector,
+                        "collector_id": TIMEX_NEWS_ID,
+                        "collector_version": TIMEX_NEWS_VER,
+                        "parse_fn": parse_timex_news_entry,
+                        "manufacturer": "Timex",
+                        "brand": "Timex",
+                        "default_region": "US",
                     },
                 }
             )
@@ -1478,7 +1525,7 @@ class PipelineService:
             collector_version=cfg["collector_version"],
             started_at=started,
             status="RUNNING",
-            **self._epoch_fields(),
+            **self._epoch_fields(force_baseline=force_baseline),
         )
         self.session.add(run)
         self.session.commit()
@@ -1511,6 +1558,7 @@ class PipelineService:
                     emit_events=emit_events,
                     notify=emit_events,
                     experimental=True,
+                    force_baseline=force_baseline,
                 )
                 if out["success"]:
                     parsed += 1
@@ -1572,15 +1620,19 @@ class PipelineService:
         max_items: int | None = 300,
         offline_fixture: object = None,
         emit_events: bool = True,
+        force_baseline: bool = False,
     ) -> CollectorRun:
         """Run an experimental single-brand product/catalogue observation
-        pipeline. brand: "citizen" or "seiko". Casio's product path stays
-        run_casio_pipeline/run_multi_source_pipeline's catalog enrichment —
-        not duplicated here.
+        pipeline. brand: "citizen", "seiko", or "timex". Casio's product
+        path stays run_casio_pipeline/run_multi_source_pipeline's catalog
+        enrichment — not duplicated here.
 
         offline_fixture is passed through to the collector's own offline
-        kwarg (collection_html for Citizen, listing_json for Seiko) — see
-        each collector's run() signature.
+        kwarg (collection_html for Citizen, listing_pages for Seiko/Timex)
+        — see each collector's run() signature.
+
+        force_baseline (Sprint 9): source-scoped silent baseline for a
+        brand joining an already-baselined epoch -- see _epoch_fields.
         """
         if not self._PRODUCT_REGISTRY:
             from app.collectors.citizen_products import (
@@ -1607,8 +1659,21 @@ class PipelineService:
             from app.collectors.seiko_products import (
                 SeikoProductsCollector,
             )
+            from app.collectors.timex_products import (
+                COLLECTOR_ID as TIMEX_PROD_ID,
+            )
+            from app.collectors.timex_products import (
+                COLLECTOR_VERSION as TIMEX_PROD_VER,
+            )
+            from app.collectors.timex_products import (
+                REGION as TIMEX_PROD_REGION,
+            )
+            from app.collectors.timex_products import (
+                TimexProductsCollector,
+            )
             from app.parsers.citizen_products import parse_citizen_search_hit
             from app.parsers.seiko_products import parse_seiko_product_json
+            from app.parsers.timex_products import parse_timex_product_json
 
             self._PRODUCT_REGISTRY.update(
                 {
@@ -1626,6 +1691,14 @@ class PipelineService:
                         "collector_version": SEIKO_PROD_VER,
                         "parse_fn": parse_seiko_product_json,
                         "default_region": SEIKO_PROD_REGION,
+                        "offline_kwarg": "listing_pages",
+                    },
+                    "timex": {
+                        "collector_cls": TimexProductsCollector,
+                        "collector_id": TIMEX_PROD_ID,
+                        "collector_version": TIMEX_PROD_VER,
+                        "parse_fn": parse_timex_product_json,
+                        "default_region": TIMEX_PROD_REGION,
                         "offline_kwarg": "listing_pages",
                     },
                 }
@@ -1661,7 +1734,7 @@ class PipelineService:
             collector_version=cfg["collector_version"],
             started_at=started,
             status="RUNNING",
-            **self._epoch_fields(),
+            **self._epoch_fields(force_baseline=force_baseline),
         )
         self.session.add(run)
         self.session.commit()
@@ -1692,6 +1765,7 @@ class PipelineService:
                     emit_events=emit_events,
                     notify=emit_events,
                     experimental=True,
+                    force_baseline=force_baseline,
                 )
                 if out["success"]:
                     parsed += 1

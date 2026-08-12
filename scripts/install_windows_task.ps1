@@ -122,7 +122,7 @@ Write-Host "collector_runs before trigger: $BeforeCount"
 # 5. Register the task (idempotent)
 $Action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunScript`"" `
+    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RunScript`"" `
     -WorkingDirectory $RepoRoot
 
 # Repeat every 90 minutes for ~10 years (Task Scheduler-compatible finite duration)
@@ -164,7 +164,7 @@ Write-Host "Task name:      $TaskName"
 Write-Host "State:          $($Task.State)"
 Write-Host "Enabled:        $($Task.Settings.Enabled)"
 Write-Host "Next run:       $($Info.NextRunTime)"
-Write-Host "Action:         powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$RunScript`""
+Write-Host "Action:         powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RunScript`""
 Write-Host "Working dir:    $RepoRoot"
 Write-Host "Identity:       $CurrentIdentity"
 Write-Host "Logon type:     Interactive (while logged on)"

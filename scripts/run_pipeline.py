@@ -148,17 +148,20 @@ def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
         return EXIT_FAILED
 
 
-def run_experimental_brand(brand: str, max_items: int = 10) -> int:
-    """EXPERIMENTAL lane: Citizen/Seiko news discovery. Isolated overlap
+def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: bool = False) -> int:
+    """EXPERIMENTAL lane: Citizen/Seiko/Timex news discovery. Isolated overlap
     protection (own lock file + collector_id, see RunLockService), own
     collector_runs rows — cannot interact with the Casio production run
-    started by run_live_or_scheduled above. Not part of --scheduled."""
+    started by run_live_or_scheduled above. Not part of --scheduled.
+
+    force_baseline (Sprint 9): source-scoped silent baseline for a brand
+    joining an already-baselined epoch -- see PipelineService._epoch_fields."""
     settings = get_settings()
-    print(f"database_url={settings.resolved_database_url} brand={brand}")
+    print(f"database_url={settings.resolved_database_url} brand={brand} force_baseline={force_baseline}")
     with session_scope() as session:
         pipeline = PipelineService(session)
         try:
-            run = pipeline.run_brand_news_pipeline(brand, max_items=max_items)
+            run = pipeline.run_brand_news_pipeline(brand, max_items=max_items, force_baseline=force_baseline)
         except Exception as exc:
             logger.exception("experimental_brand_run_fatal", brand=brand, error=str(exc))
             print(f"FATAL: {exc}")
@@ -169,16 +172,19 @@ def run_experimental_brand(brand: str, max_items: int = 10) -> int:
         return EXIT_FAILED
 
 
-def run_experimental_product(brand: str, max_items: int = 300) -> int:
-    """EXPERIMENTAL lane: Citizen/Seiko product/catalogue observation.
+def run_experimental_product(brand: str, max_items: int = 300, *, force_baseline: bool = False) -> int:
+    """EXPERIMENTAL lane: Citizen/Seiko/Timex product/catalogue observation.
     Same isolation as run_experimental_brand above — own lock file +
-    collector_id, own collector_runs rows, cannot touch Casio state."""
+    collector_id, own collector_runs rows, cannot touch Casio state.
+
+    force_baseline (Sprint 9): source-scoped silent baseline -- see
+    run_experimental_brand's docstring."""
     settings = get_settings()
-    print(f"database_url={settings.resolved_database_url} brand={brand}")
+    print(f"database_url={settings.resolved_database_url} brand={brand} force_baseline={force_baseline}")
     with session_scope() as session:
         pipeline = PipelineService(session)
         try:
-            run = pipeline.run_product_observation_pipeline(brand, max_items=max_items)
+            run = pipeline.run_product_observation_pipeline(brand, max_items=max_items, force_baseline=force_baseline)
         except Exception as exc:
             logger.exception("experimental_product_run_fatal", brand=brand, error=str(exc))
             print(f"FATAL: {exc}")
@@ -269,13 +275,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--experimental-brand",
-        choices=["citizen", "seiko"],
+        choices=["citizen", "seiko", "timex"],
         default=None,
         help="Run the EXPERIMENTAL Citizen/Seiko news-discovery lane instead of Casio",
     )
     parser.add_argument(
         "--experimental-product",
-        choices=["citizen", "seiko"],
+        choices=["citizen", "seiko", "timex"],
         default=None,
         help="Run the EXPERIMENTAL Citizen/Seiko product/catalogue-observation lane instead of Casio",
     )
@@ -311,6 +317,14 @@ def main() -> None:
         "--max-items", type=int, default=None,
         help="Override per-mode default (Casio modes default 10; --experimental-product defaults 300 to cover the full discovered catalogue)",
     )
+    parser.add_argument(
+        "--force-baseline",
+        action="store_true",
+        help="Sprint 9: source-scoped silent baseline for a brand joining an already-baselined "
+        "epoch (e.g. Timex joining Epoch 1) -- creates watches/observations/leads normally but "
+        "suppresses Event creation and Discord alerts for this run only. Only meaningful with "
+        "--experimental-brand/--experimental-product.",
+    )
     args = parser.parse_args()
 
     if args.ingest_manual_lead:
@@ -318,10 +332,10 @@ def main() -> None:
     if args.experimental_specialist:
         sys.exit(run_experimental_specialist(args.experimental_specialist, args.max_items or 20))
     if args.experimental_brand:
-        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10))
+        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10, force_baseline=args.force_baseline))
     if args.experimental_product:
         kwargs = {} if args.max_items is None else {"max_items": args.max_items}
-        sys.exit(run_experimental_product(args.experimental_product, **kwargs))
+        sys.exit(run_experimental_product(args.experimental_product, force_baseline=args.force_baseline, **kwargs))
     if args.fixture_mode:
         sys.exit(run_fixture_mode(args.max_items or 10))  # preserves prior argparse-default behavior (10, not the function's own 5)
     if args.live or args.scheduled:

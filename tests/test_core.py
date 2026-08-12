@@ -2785,6 +2785,270 @@ def test_get_recent_leads_query_filter_matches_service_classification(db_session
     assert recent == []
 
 
+# --- Sprint 9: Timex fourth official brand -----------------------------------
+
+
+def test_timex_product_parser_real_capture():
+    import json
+
+    from app.parsers.timex_products import parse_timex_product_json
+
+    data = json.load((FIXTURES / "timex_products_page1.json").open(encoding="utf-8"))
+    watch_products = [p for p in data["products"] if p.get("product_type") == "Watch"]
+    assert watch_products  # real fixture must contain at least one real watch
+
+    for p in watch_products[:5]:
+        result = parse_timex_product_json(p, source_url="https://www.timex.com/products/x")
+        assert result.success
+        w = result.watches[0]
+        assert w.manufacturer == "Timex"
+        assert w.brand == "Timex"
+        assert w.reference_raw  # real SKU, e.g. "TW6A01000VQ"
+        assert w.currency in (None, "USD")
+
+
+def test_timex_product_parser_rejects_non_watch_product_type():
+    from app.parsers.timex_products import parse_timex_product_json
+
+    strap = {"product_type": "Strap", "variants": [{"sku": "X1", "price": "10.00", "available": True}]}
+    result = parse_timex_product_json(strap)
+    assert result.success is False
+    assert "not a watch product" in result.error
+
+
+def test_timex_product_parser_handles_missing_price():
+    from app.parsers.timex_products import parse_timex_product_json
+
+    product = {
+        "product_type": "Watch", "title": "Test Watch",
+        "variants": [{"sku": "TW0000000", "price": None, "available": True}],
+    }
+    result = parse_timex_product_json(product)
+    assert result.success
+    assert result.watches[0].price is None
+    assert result.watches[0].currency is None
+    assert "no_price_in_source" in result.watches[0].parser_warnings
+
+
+def test_timex_products_collector_paginates_and_terminates_on_empty_page():
+    from app.collectors.timex_products import TimexProductsCollector
+
+    page1 = (FIXTURES / "timex_products_page1.json").read_bytes()
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+    result = TimexProductsCollector().run(listing_pages=[page1, empty])
+    assert result.metadata["component_status"] == "SUCCESS"
+    assert len(result.discovered) > 0
+    # Every discovered item must be product_type == Watch (straps/giftsets filtered)
+    for item in result.discovered:
+        assert item.metadata["product_json"]["product_type"] == "Watch"
+
+
+def test_timex_products_collector_dedupes_by_sku_across_pages():
+    from app.collectors.timex_products import TimexProductsCollector
+
+    page1 = (FIXTURES / "timex_products_page1.json").read_bytes()
+    result = TimexProductsCollector().run(listing_pages=[page1, page1])  # same page "twice"
+    refs = [i.reference_hint for i in result.discovered]
+    assert len(refs) == len(set(refs))  # no duplicate SKUs despite repeated page
+
+
+def test_timex_news_parser_real_capture():
+    import json
+    import xml.etree.ElementTree as ET
+
+    from app.parsers.timex_news import parse_timex_news_entry
+
+    xml_bytes = (FIXTURES / "timex_blog_feed.atom").read_bytes()
+    root = ET.fromstring(xml_bytes)
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    entries = root.findall("a:entry", ns)
+    assert len(entries) == 8
+
+    entry = entries[0]
+    entry_dict = {
+        "title": entry.find("a:title", ns).text,
+        "published": entry.find("a:published", ns).text,
+        "content": entry.find("a:content", ns).text,
+    }
+    result = parse_timex_news_entry(json.dumps(entry_dict).encode("utf-8"), source_url="https://timex.com/blogs/x")
+    assert result.success
+    assert result.title
+    assert result.publication_date
+    assert len(result.body_excerpt or "") <= 400  # no full article body copied
+
+
+def test_timex_news_parser_malformed_json_fails_closed():
+    from app.parsers.timex_news import parse_timex_news_entry
+
+    result = parse_timex_news_entry(b"not json")
+    assert result.success is False
+    assert result.error
+
+
+def test_timex_news_collector_parses_real_feed():
+    from app.collectors.timex_news import TimexNewsCollector
+
+    xml_bytes = (FIXTURES / "timex_blog_feed.atom").read_bytes()
+    result = TimexNewsCollector().run(index_html=xml_bytes)
+    assert result.metadata["component_status"] == "SUCCESS"
+    assert len(result.discovered) == 8
+    assert all(i.url.startswith("https://timex.com/") for i in result.discovered)
+
+
+def test_normalize_timex_reference_is_conservative_passthrough():
+    from app.normalization.references import normalize_timex_reference
+
+    result = normalize_timex_reference("TW6A01000VQ")
+    assert result.reference_raw == "TW6A01000VQ"
+    assert result.reference_canonical == "TW6A01000VQ"  # canonical == raw, no suffix stripping
+    assert result.manufacturer == "Timex"
+    assert result.brand == "Timex"
+
+
+def test_timex_reference_identity_does_not_collide_with_other_brands(db_session: Session):
+    """Uniqueness is scoped by (manufacturer, brand, reference_canonical) --
+    a Timex watch and a differently-branded watch may safely share a raw
+    reference string with no collision (defensive proof, not because this
+    is expected in practice)."""
+    w1 = Watch(manufacturer="Timex", brand="Timex", reference_raw="SHARED123", reference_canonical="SHARED123")
+    w2 = Watch(manufacturer="Casio", brand="Casio", reference_raw="SHARED123", reference_canonical="SHARED123")
+    db_session.add_all([w1, w2])
+    db_session.commit()  # must not raise IntegrityError
+    assert w1.id != w2.id
+
+
+def test_timex_products_pipeline_baseline_then_repeat_creates_no_duplicates(db_session: Session, tmp_settings: Settings):
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    page1 = (FIXTURES / "timex_products_page1.json").read_bytes()
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+
+    run1 = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+    run2 = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert run1.status == "SUCCESS"
+    assert run1.new_watch_count > 0
+    assert run2.status == "SUCCESS"
+    assert run2.new_watch_count == 0  # repeat -> no duplicates
+
+    watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Timex")).all()
+    assert len(watches) == run1.new_watch_count
+    assert all(w.brand == "Timex" for w in watches)
+
+
+def test_timex_news_pipeline_baseline_then_repeat_creates_no_duplicate_leads(db_session: Session, tmp_settings: Settings):
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    xml_bytes = (FIXTURES / "timex_blog_feed.atom").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+
+    run1 = pipeline.run_brand_news_pipeline("timex", index_html=xml_bytes)
+    run2 = pipeline.run_brand_news_pipeline("timex", index_html=xml_bytes)
+
+    assert run1.status == "SUCCESS"
+    assert run1.summary_metadata["new_leads"] == 8
+    assert run2.status == "SUCCESS"
+    assert run2.summary_metadata["new_leads"] == 0
+
+
+def test_timex_products_baseline_suppresses_events(db_session: Session, tmp_settings: Settings):
+    """Source-scoped silent baseline: the FIRST Timex population must
+    create real watches but zero Events while an epoch's baseline is
+    active -- same semantics already proven for Casio/Citizen/Seiko."""
+    from app.models import Event
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    page1 = (FIXTURES / "timex_products_page1.json").read_bytes()
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert run.new_watch_count > 0
+    assert db_session.scalars(select(Event)).first() is None
+
+    watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Timex")).all()
+    assert len(watches) == run.new_watch_count
+
+
+def test_force_baseline_is_source_scoped_not_global(db_session: Session, tmp_settings: Settings):
+    """Sprint 9's core requirement: Timex joining an epoch whose baseline
+    ALREADY COMPLETED (the real scenario -- Casio/Citizen/Seiko already
+    live) must be silently baselined via force_baseline=True WITHOUT
+    reopening the epoch's global baseline window. Proof: a citizen_news
+    announcement processed in the same session, same completed-baseline
+    epoch, WITHOUT force_baseline, must still create a normal Event --
+    it must NOT be silently suppressed just because Timex's run happened
+    to pass force_baseline=True."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.parsers.citizen_news import parse_citizen_news_html
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)  # epoch is LIVE, exactly like the real Sprint 9 scenario
+
+    page1 = (FIXTURES / "timex_products_page1.json").read_bytes()
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+
+    timex_run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty], force_baseline=True)
+    assert timex_run.new_watch_count > 0
+    assert db_session.scalars(select(Event)).first() is None  # Timex silently baselined
+
+    # Now a normal (non-Timex, non-force_baseline) news announcement in the
+    # SAME live epoch must behave completely normally -- NEW_REFERENCE fires.
+    detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+    fr = FetchResult(
+        url="https://www.citizenwatch-global.com/news/2026/20260610/index.html",
+        success=True, status_code=200, content_type="text/html", payload=detail_html,
+    )
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, discovered_meta={"source_region": "GLOBAL"},
+        collector_id="citizen_news", manufacturer="Citizen", brand="Citizen",
+        parse_fn=parse_citizen_news_html, merge_key_prefix="citizen",
+        default_region="GLOBAL", emit_events=True,
+    )
+    assert out["watch_events"][0]["event_type"] == "NEW_REFERENCE"  # NOT suppressed
+    assert db_session.scalars(select(Event)).first() is not None
+
+
+def test_timex_news_baseline_leads_classify_baseline_not_fresh(db_session: Session, tmp_settings: Settings):
+    """The old August/July Timex blog entries discovered during a source-
+    scoped Timex baseline must be stored as ReleaseLead evidence but must
+    never be treated as fresh newsroom material (mirrors the Sprint 8
+    fix's semantics for the news/announcement lane, which uses Event
+    suppression rather than SpecialistLead.editorial_freshness -- Timex
+    news is Layer A/official, not Layer B/specialist)."""
+    from app.models import Event
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    xml_bytes = (FIXTURES / "timex_blog_feed.atom").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = pipeline.run_brand_news_pipeline("timex", index_html=xml_bytes)
+
+    assert run.summary_metadata["new_leads"] == 8
+    assert db_session.scalars(select(Event)).first() is None  # baseline suppression held
+
+
 # --- Sprint 6: health snapshot + DB backup ----------------------------------
 
 

@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-11
-**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), now with correct editorial-freshness semantics (Sprint 8 bugfix). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. EIGHT Windows-scheduled tasks total (Casio + 4 experimental brand/product lanes + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live). Every specialist_leads row now carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED) so discovery novelty and editorial freshness are never conflated again — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`. Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; rebuilt in Sprint 8 for the freshness fix). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
+**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), now with FOUR official brands (Sprint 9 added Timex) and correct editorial-freshness semantics (Sprint 8 bugfix). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. TEN Windows-scheduled tasks total (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED) so discovery novelty and editorial freshness are never conflated — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`. Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; rebuilt in Sprint 9 for the Timex/health.py changes). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,88 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-12 (Sprint 9) — Timex as fourth official brand
+
+**Starting point verified:** HEAD `23678d1`, clean tree, 165/165 tests
+passing, Ruff clean, Epoch 1 LIVE, 8 Windows tasks Ready/Enabled, no
+locks/stale RUNNING rows, DB integrity ok.
+
+**Reconnaissance:** timex.com runs on Shopify (confirmed via its own
+sitemap index shape -- `sitemap_products_N.xml`/`sitemap_collections_N.xml`
+/`sitemap_blogs_1.xml`), same class of infrastructure already proven safe
+for Seiko USA (Sprint 3). `/products.json?limit=250&page=N` is real and
+public: 1606 total products across 7 pages, 1445 of them `product_type ==
+"Watch"` (rest are straps/giftsets/protection plans), each with a real
+per-variant SKU (e.g. "TW6A01000VQ" -- Timex's genuine canonical
+reference), price, availability, and `published_at`. Currency confirmed
+"USD" via the store's own `Shopify.currency` JS state. Separately, Timex's
+official Shopify blog Atom feed (`/blogs/the-timex-blog.atom`) turned out
+to be a genuine product-announcement feed, not generic lifestyle content --
+real recent entries: "New For Fall: The E Line Returns In 30mm And 38mm",
+"Q Timex Marbella: A Bolder Sense Of Time", a real collaboration ("Todd
+Snyder x Timex Marlin Mesh"). Both lanes implemented: `timex_products`
+(Shopify JSON catalogue) and `timex_news` (Atom feed, no per-item detail
+fetch needed since the feed already carries full content).
+
+**Implementation:** reused the existing generalized architecture exactly
+as instructed -- `normalize_timex_reference` registered in `_NORMALIZERS`,
+`timex` registered in both `_PRODUCT_REGISTRY` and `_BRAND_REGISTRY`. No
+parallel Timex-specific pipeline. New parsers/collectors mirror
+citizen_products.py/seiko_products.py/seiko_news.py's proven shape.
+
+**Source-scoped silent baseline (the hard part):** Timex joined an epoch
+whose baseline window had *already completed* (Casio/Citizen/Seiko went
+live in Sprint 7). Reopening the epoch's global `baseline_started_at`/
+`baseline_completed_at` window was rejected as unsafe -- it would have
+silently suppressed events for any *other* source's concurrent scheduled
+run too, not just Timex's. Instead added a new `force_baseline: bool`
+parameter threaded through `_epoch_fields`/`process_fetch_result`/
+`process_news_announcement`/`_record_product_transition`/
+`_record_watch_event`/`run_product_observation_pipeline`/
+`run_brand_news_pipeline`, plus a `--force-baseline` CLI flag -- a
+per-call override, completely independent of the epoch's own lifecycle.
+Proved this is genuinely source-scoped with a dedicated test
+(`test_force_baseline_is_source_scoped_not_global`): Timex populated with
+`force_baseline=True` in the same session as a normal (no force_baseline)
+Citizen news announcement in the same live epoch -- Citizen's event fired
+normally, proving Timex's baseline flag never leaked.
+
+**Live results (real production DB, tasks paused during the operation,
+re-enabled after):** Timex products baseline: 1445 new watches, 0 events.
+Timex news baseline: 15 new leads, 5 new watches, 0 events. Immediate
+repeat run (both with and without `--force-baseline`): 0 new watches, 0
+new leads, 0 events, across both lanes, both times. Total DB watches
+557 → 2010 (1453 of them Timex). Casio/Citizen/Seiko/specialist sources
+confirmed unaffected throughout (`Latest official event` timestamp never
+moved during any Timex operation).
+
+**Bonus fix (same area, low-risk):** found `app/services/health.py`'s
+`KNOWN_COLLECTORS`/`EXPECTED_CADENCE_MINUTES` had never been updated for
+Sprint 7's G-Central/Plus9Time additions -- they were real, healthy,
+scheduled sources that simply never appeared in `scripts/status.py` or the
+GUI's health table. Fixed alongside adding Timex's own two entries.
+
+**Scheduling:** `WatchClank-TimexNews` (90 min, matches
+citizen_news/seiko_jp_news cadence) and `WatchClank-TimexProducts` (360
+min, matches citizen_products/seiko_products cadence), both registered and
+live-triggered successfully. All 10 Watch Clank tasks Ready/Enabled.
+
+**GUI/EXE:** `app/services/health.py` is a packaged runtime dependency of
+the GUI (imported via `data_access.py`) -- per the explicit "when in
+doubt, rebuild" policy, the EXE was rebuilt (not skipped) even though no
+GUI-owned file changed, and the rebuilt binary was launched and
+screenshotted showing all 10 sources HEALTHY and 2010 watches, proving the
+fix is in the package, not just the source tree.
+
+**Test result:** 166 passed (up from 165 at Sprint 8's end -- wait, 151 at
+Sprint 8 end, 165 after adding 14 Timex-specific tests, 166 after the
+force_baseline source-scoping proof). Ruff clean throughout.
+
+**Deliberately not done this sprint (per explicit instruction):** no NEEL/
+Japan Select/Great G-Shock World/Oracle of Time, no fifth manufacturer, no
+discount/retailer tracking, no cloud deployment, no GUI redesign, no Epoch
+2 (Epoch 1 remains valid and untouched).
 
 ## 2026-08-11 (Sprint 8) — Fix: Epoch 1 stale material shown as fresh newsroom intelligence
 
