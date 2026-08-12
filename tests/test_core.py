@@ -1773,6 +1773,197 @@ def test_citizen_product_availability_transitions_sold_out_then_restock(db_sessi
 
     events = db_session.scalars(select(Event)).all()
     assert sorted(e.event_type for e in events) == ["RESTOCK", "SOLD_OUT"]
+    assert all(e.extra["editorial_eligible"] is False for e in events)
+    assert all("EDITORIAL HIDDEN" in e.extra["editorial_eligibility_reasons"][0] for e in events)
+
+
+def _availability_transition(
+    db_session: Session,
+    tmp_settings: Settings,
+    *,
+    limited_edition: bool | None = None,
+    collection: str | None = None,
+    model_name: str | None = None,
+    prior_status: str = "AVAILABLE",
+    new_status: str = "SOLD_OUT",
+    prior_age_days: float = 90,
+    prior_is_baseline: bool = False,
+    reference: str = "TWTEST001",
+    notify: bool = False,
+):
+    """Create a proved healthy availability pair without any collector I/O."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Timex", brand="Timex", collection=collection, model_name=model_name,
+        limited_edition=limited_edition, reference_raw=reference, reference_canonical=reference,
+    )
+    db_session.add(watch)
+    db_session.flush()
+    now = datetime.now(UTC)
+    prior = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://example.test/prior", price=100.0,
+        currency="USD", availability_status=prior_status, overall_confidence=90.0,
+        observed_at=now - timedelta(days=prior_age_days), is_baseline=prior_is_baseline,
+    )
+    new = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://example.test/new", price=100.0,
+        currency="USD", availability_status=new_status, overall_confidence=90.0, observed_at=now,
+    )
+    db_session.add_all([prior, new])
+    db_session.flush()
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=new, is_new_watch=False, notify=notify, experimental=True
+    )
+    return result, db_session.scalars(select(Event).order_by(Event.id.desc())).first()
+
+
+def test_ordinary_old_sold_out_is_preserved_but_editorially_hidden(db_session: Session, tmp_settings: Settings):
+    result, event = _availability_transition(db_session, tmp_settings)
+
+    assert result["event_type"] == "SOLD_OUT"
+    assert event.event_type == "SOLD_OUT"
+    assert event.extra["editorial_eligible"] is False
+    assert event.extra["alerted"] is False
+    assert any("no confirmed limited" in reason for reason in event.extra["editorial_eligibility_reasons"])
+
+
+def test_recent_ordinary_sold_out_is_still_editorially_hidden(db_session: Session, tmp_settings: Settings):
+    _, event = _availability_transition(db_session, tmp_settings, prior_age_days=1)
+
+    assert event.story_score >= tmp_settings.availability_editorial_min_score
+    assert event.extra["editorial_eligible"] is False
+    assert any("no confirmed limited" in reason for reason in event.extra["editorial_eligibility_reasons"])
+
+
+def test_legacy_availability_rows_stay_out_of_current_intelligence_without_evidence_flag() -> None:
+    from app.services.editorial import event_row_is_editorially_eligible
+
+    assert not event_row_is_editorially_eligible(
+        event_type="SOLD_OUT", story_score=100.0, extra={}, availability_min_score=70.0
+    )
+    assert event_row_is_editorially_eligible(
+        event_type="SOLD_OUT", story_score=80.0, extra={"editorial_eligible": True},
+        availability_min_score=70.0,
+    )
+
+
+def test_ordinary_restock_is_preserved_but_editorially_hidden(db_session: Session, tmp_settings: Settings):
+    result, event = _availability_transition(
+        db_session, tmp_settings, prior_status="SOLD_OUT", new_status="AVAILABLE"
+    )
+
+    assert result["event_type"] == "RESTOCK"
+    assert event.extra["editorial_eligible"] is False
+
+
+def test_unknown_availability_never_classifies_as_sold_out() -> None:
+    from app.services.editorial import classify_price_availability_transition
+
+    event_type, _ = classify_price_availability_transition(
+        prior_price=100.0, prior_currency="USD", prior_availability="AVAILABLE", prior_region="US",
+        prior_source_healthy=True, new_price=100.0, new_currency="USD", new_availability="UNKNOWN",
+        new_region="US", new_source_healthy=True,
+    )
+
+    assert event_type != "SOLD_OUT"
+
+
+def test_initial_unavailable_product_baseline_creates_no_sold_out_event(db_session: Session, tmp_settings: Settings):
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Timex", brand="Timex", reference_raw="TWBASE001", reference_canonical="TWBASE001"
+    )
+    db_session.add(watch)
+    db_session.flush()
+    observation = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://example.test/unavailable", price=100.0,
+        currency="USD", availability_status="SOLD_OUT", overall_confidence=90.0,
+    )
+    db_session.add(observation)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=observation, is_new_watch=True, experimental=True
+    )
+
+    assert result == {"event_type": None, "reason": "baseline_new_watch"}
+    assert db_session.query(Event).count() == 0
+
+
+def test_limited_edition_fast_sell_out_is_editorially_eligible(db_session: Session, tmp_settings: Settings):
+    result, event = _availability_transition(
+        db_session, tmp_settings, limited_edition=True, prior_age_days=2
+    )
+
+    assert result["event_type"] == "SOLD_OUT"
+    assert event.story_score >= tmp_settings.availability_editorial_min_score
+    assert event.extra["editorial_eligible"] is True
+    assert any("limited edition" in reason for reason in event.extra["reasons"])
+    assert any("rapid post-launch" in reason for reason in event.extra["reasons"])
+
+
+def test_collaboration_fast_sell_out_is_editorially_eligible(db_session: Session, tmp_settings: Settings):
+    result, event = _availability_transition(
+        db_session, tmp_settings, model_name="Peanuts x Timex limited release", prior_age_days=2
+    )
+
+    assert result["event_type"] == "SOLD_OUT"
+    assert event.extra["editorial_eligible"] is True
+    assert any("named collaboration" in reason for reason in event.extra["reasons"])
+
+
+def test_recognizable_family_alone_does_not_make_old_sold_out_current(db_session: Session, tmp_settings: Settings):
+    _, event = _availability_transition(db_session, tmp_settings, collection="Tsuyosa")
+
+    assert event.story_score < tmp_settings.availability_editorial_min_score
+    assert event.extra["editorial_eligible"] is False
+    assert any("recognisable product family" in reason for reason in event.extra["reasons"])
+
+
+def test_baseline_availability_is_never_treated_as_recent_launch_evidence(db_session: Session, tmp_settings: Settings):
+    _, event = _availability_transition(
+        db_session, tmp_settings, limited_edition=True, prior_age_days=1, prior_is_baseline=True
+    )
+
+    assert event.extra["editorial_eligible"] is False
+    assert not any("rapid post-launch" in reason for reason in event.extra["reasons"])
+
+
+def test_availability_discord_requires_editorial_eligibility(db_session: Session, tmp_settings: Settings):
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+
+    settings = Settings(
+        database_url=tmp_settings.database_url,
+        discord_editorial_webhook_url="https://discord.example/editorial",
+    )
+    calls = []
+    with (
+        patch("app.services.pipeline.get_settings", return_value=settings),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        # Ordinary historical churn remains persisted but does not reach
+        # Discord, even under experimental mode's otherwise-zero threshold.
+        _, ordinary = _availability_transition(db_session, tmp_settings, notify=True)
+        _, eligible = _availability_transition(
+            db_session, tmp_settings, limited_edition=True, prior_age_days=1,
+            reference="TWTEST002", notify=True,
+        )
+    assert ordinary.extra["editorial_eligible"] is False
+    assert eligible.extra["editorial_eligible"] is True
+    assert calls == ["https://discord.example/editorial"]
 
 
 def test_citizen_product_failed_fetch_cannot_create_sold_out(db_session: Session, tmp_settings: Settings):

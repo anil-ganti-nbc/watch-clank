@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     # See app/services/freshness.py.
     specialist_freshness_window_hours: int = Field(default=72)
 
+    # Availability transitions remain historical evidence by default. A
+    # product sell-out/restock must clear this higher, explicit editorial bar
+    # before it can appear in Current Intelligence or use editorial Discord.
+    availability_editorial_min_score: float = Field(default=70.0)
+    availability_recent_launch_window_days: int = Field(default=30)
+
     @property
     def project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]

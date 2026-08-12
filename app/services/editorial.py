@@ -31,7 +31,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-SCORING_RULE_VERSION = "0.2.0"
+SCORING_RULE_VERSION = "0.3.0"
+AVAILABILITY_EVENT_TYPES = frozenset({"SOLD_OUT", "RESTOCK"})
 
 # Families with strong public recognisability. Conservative, editable list —
 # extend only with families that have demonstrated audience recognition, not
@@ -94,6 +95,9 @@ class EventEvidence:
     prior_currency: str | None = None
     price_delta_pct: float | None = None  # signed, e.g. -20.0 = 20% cheaper
     availability_status: str | None = None
+    # Set only from a first AVAILABLE product observation that was not part of
+    # an epoch/source baseline. ``None`` means launch timing is unknown.
+    days_since_first_nonbaseline_availability: float | None = None
 
     # Product-character evidence (Phase 5 recall tuning). Only set these when
     # the source text genuinely supports them — do not infer.
@@ -109,6 +113,7 @@ class ScoredEvent:
     score: float
     confidence: str  # HIGH / MEDIUM / LOW
     reasons: list[str]
+    has_editorial_character: bool = False
     scoring_rule_version: str = SCORING_RULE_VERSION
 
 
@@ -248,6 +253,17 @@ def score_event(evidence: EventEvidence) -> ScoredEvent:
         score += 15.0
         reasons.append("+15 availability status changed")
 
+    if (
+        evidence.event_type in AVAILABILITY_EVENT_TYPES
+        and evidence.days_since_first_nonbaseline_availability is not None
+    ):
+        score += 35.0
+        reasons.append(
+            "+35 rapid post-launch availability transition "
+            f"({evidence.days_since_first_nonbaseline_availability:.1f} days after first "
+            "non-baseline AVAILABLE observation)"
+        )
+
     if evidence.is_first_party:
         score += 10.0
         reasons.append("+10 first-party/official evidence")
@@ -294,7 +310,57 @@ def score_event(evidence: EventEvidence) -> ScoredEvent:
         score=score,
         confidence=confidence,
         reasons=reasons,
+        has_editorial_character=bool(
+            evidence.is_limited_edition
+            or evidence.is_collaboration
+            or _is_recognizable(evidence.collection)
+        ),
     )
+
+
+def editorial_eligibility(
+    scored: ScoredEvent, *, availability_min_score: float
+) -> tuple[bool, list[str]]:
+    """Return whether an Event belongs in editorial surfaces.
+
+    All non-availability event types keep their existing semantics.  For a
+    SOLD_OUT/RESTOCK, score is still persisted for historical analysis but
+    must have confirmed editorial character and clear an intentionally higher
+    threshold before it is current news.
+    The result is stored by PipelineService and can also re-evaluate older
+    rows deterministically when an older event has no stored flag yet.
+    """
+    if scored.event_type not in AVAILABILITY_EVENT_TYPES:
+        return True, ["EDITORIAL ELIGIBLE: non-availability event retains existing policy"]
+    if not scored.has_editorial_character:
+        return False, [
+            "EDITORIAL HIDDEN: no confirmed limited, collaboration, or recognisable-family evidence"
+        ]
+    if scored.score >= availability_min_score:
+        return True, [
+            "EDITORIAL ELIGIBLE: availability event reached "
+            f"{availability_min_score:.0f}/100 threshold ({scored.score:.0f}/100)"
+        ]
+    return False, [
+        "EDITORIAL HIDDEN: availability state transition preserved, but "
+        f"{scored.score:.0f}/100 is below the {availability_min_score:.0f}/100 editorial threshold"
+    ]
+
+
+def event_row_is_editorially_eligible(
+    *, event_type: str, story_score: float | None, extra: dict | None, availability_min_score: float
+) -> bool:
+    """Read-side compatibility for historical Event rows.
+
+    New events persist ``editorial_eligible`` in ``extra``. Older rows
+    predate that flag, so availability rows stay out of the live intelligence
+    view rather than guessing editorial character from a score alone.
+    """
+    if event_type not in AVAILABILITY_EVENT_TYPES:
+        return True
+    if extra and "editorial_eligible" in extra:
+        return bool(extra["editorial_eligible"])
+    return False
 
 
 def format_alert(

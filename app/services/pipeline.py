@@ -872,6 +872,53 @@ class PipelineService:
             material = m.group(1).lower()
         return {"is_limited_edition": is_limited or None, "is_collaboration": is_collab or None, "unusual_material": material}
 
+    def _availability_event_character(self, watch: Watch) -> dict:
+        """Use only persisted product facts for availability relevance.
+
+        Product pages do not have a separate collaboration field.  A stored
+        product/collection name may explicitly say ``x`` or
+        ``collaboration``; that is deterministic textual evidence, not a
+        demand prediction.  Limited edition is the parser-backed Watch field.
+        """
+        import re
+
+        label = f"{watch.collection or ''} {watch.model_name or ''}"
+        return {
+            "is_limited_edition": watch.limited_edition is True,
+            "is_collaboration": bool(
+                re.search(r"\bcollaboration\b|\bx\s+[A-Za-z0-9]", label, re.IGNORECASE)
+            ) or None,
+        }
+
+    def _days_since_first_nonbaseline_availability(
+        self, *, watch_id: int, region: str, observed_at: datetime
+    ) -> float | None:
+        """Return age of real post-baseline availability evidence, if known.
+
+        Baseline observations are intentionally excluded: they prove the
+        catalogue state we inherited, not when the product launched.
+        """
+        first_available = (
+            self.session.query(SourceObservation)
+            .filter(
+                SourceObservation.watch_id == watch_id,
+                SourceObservation.region == region,
+                SourceObservation.availability_status == "AVAILABLE",
+                SourceObservation.is_baseline.is_(False),
+            )
+            .order_by(SourceObservation.observed_at.asc(), SourceObservation.id.asc())
+            .first()
+        )
+        if first_available is None:
+            return None
+        age_seconds = (ensure_utc(observed_at) - ensure_utc(first_available.observed_at)).total_seconds()
+        if age_seconds < 0:
+            return None
+        days = round(age_seconds / 86400.0, 2)
+        if days > get_settings().availability_recent_launch_window_days:
+            return None
+        return days
+
     def _record_product_transition(
         self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False,
         experimental: bool = False, force_baseline: bool = False,
@@ -1005,6 +1052,14 @@ class PipelineService:
             prior_price=prior.price,
             prior_currency=prior.currency,
             price_delta_pct=price_delta_pct,
+            days_since_first_nonbaseline_availability=(
+                self._days_since_first_nonbaseline_availability(
+                    watch_id=watch.id, region=new_obs.region, observed_at=new_obs.observed_at
+                )
+                if event_type in {"SOLD_OUT", "RESTOCK"}
+                else None
+            ),
+            **self._availability_event_character(watch),
         )
         scored = score_event(evidence)
 
@@ -1034,7 +1089,12 @@ class PipelineService:
         """Persist a product-state Event after the caller proved its facts."""
         from app.models import Event, EventWatch
         from app.services.discord_notify import DiscordNotifier
-        from app.services.editorial import format_alert
+        from app.services.editorial import editorial_eligibility, format_alert
+
+        settings = get_settings()
+        editorial_eligible, eligibility_reasons = editorial_eligibility(
+            scored, availability_min_score=settings.availability_editorial_min_score
+        )
 
         event = Event(
             event_type=scored.event_type,
@@ -1053,6 +1113,8 @@ class PipelineService:
                 "prior_regions": sorted(prior_regions) if prior_regions else None,
                 "experimental": experimental,
                 "alerted": False,
+                "editorial_eligible": editorial_eligible,
+                "editorial_eligibility_reasons": eligibility_reasons,
             },
         )
         self.session.add(event)
@@ -1067,8 +1129,7 @@ class PipelineService:
             score=scored.score,
         )
 
-        if notify:
-            settings = get_settings()
+        if notify and editorial_eligible:
             notifier = DiscordNotifier(settings)
             threshold = settings.discord_experimental_min_score if experimental else 100.0
             if notifier.editorial_enabled and scored.score >= threshold:
