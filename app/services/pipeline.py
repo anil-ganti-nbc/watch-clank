@@ -834,6 +834,25 @@ class PipelineService:
                 regions.add(lead.source_region)
         return frozenset(regions)
 
+    def _prior_product_regions_for_watch(
+        self, watch_id: int, *, exclude_observation_id: int | None
+    ) -> frozenset[str]:
+        """Regions supported by prior first-party product observations.
+
+        A regional product listing is a different fact from an announcement:
+        one Watch can legitimately accumulate US/USD, DE/EUR, and UK/GBP
+        observations.  This query deliberately excludes the just-created
+        observation so the caller can identify a first listing in its region
+        without ever comparing currencies or markets.
+        """
+        query = self.session.query(SourceObservation.region).filter(
+            SourceObservation.watch_id == watch_id,
+            SourceObservation.region.isnot(None),
+        )
+        if exclude_observation_id is not None:
+            query = query.filter(SourceObservation.id != exclude_observation_id)
+        return frozenset(region for (region,) in query.distinct().all() if region)
+
     def _extract_product_character(self, title: str) -> dict:
         """Conservative keyword extraction from an announcement title only —
         never guesses. Feeds the recall-tuning bonuses in editorial.score_event.
@@ -871,15 +890,14 @@ class PipelineService:
         source_healthy=True to the classifier here (Sprint 3 requirement:
         a failed fetch between two runs must never fabricate a transition).
 
-        Baseline rule: if this is the first observation of this watch in
-        this region, there is nothing to compare against — no event, silent.
+        Baseline rule: a source's initial crawl is silent.  After that first
+        crawl, a known Watch's first official listing in an additional region
+        is a NEW_REGION event, even if its announcement is old: novelty belongs
+        to the observed commercial transition, not to the Watch's birth date.
         """
-        from app.models import Event, EventWatch
-        from app.services.discord_notify import DiscordNotifier
         from app.services.editorial import (
             EventEvidence,
             classify_price_availability_transition,
-            format_alert,
             score_event,
         )
         from app.services.epoch import is_baseline_active
@@ -899,6 +917,48 @@ class PipelineService:
 
         if is_new_watch:
             return {"event_type": None, "reason": "baseline_new_watch"}
+
+        prior_product_regions = self._prior_product_regions_for_watch(
+            watch.id, exclude_observation_id=new_obs.id
+        )
+        prior_announcement_regions = self._prior_regions_for_watch(
+            watch.id, exclude_lead_id=None
+        )
+        prior_regions = prior_product_regions | prior_announcement_regions
+
+        # A separate regional collector must always be force-baselined before
+        # it is scheduled.  Once that is true, first observation in a market
+        # is evidence of a current commercial transition.  The source-level
+        # baseline guards above make an old page discovered during onboarding
+        # silent rather than misrepresenting discovery time as rollout time.
+        if new_obs.region not in prior_product_regions and prior_regions:
+            event_type = "NEW_REGION"
+            evidence = EventEvidence(
+                event_type=event_type,
+                manufacturer=watch.manufacturer,
+                brand=watch.brand,
+                collection=watch.collection,
+                region=new_obs.region,
+                is_first_party=True,
+                prior_regions=prior_regions,
+                reference_raw=watch.reference_raw,
+                price=new_obs.price,
+                currency=new_obs.currency,
+                availability_status=new_obs.availability_status,
+            )
+            return self._persist_product_event(
+                watch=watch,
+                new_obs=new_obs,
+                scored=score_event(evidence),
+                reasons=[
+                    "first successful first-party product observation in a new region; "
+                    "price and currency are regional facts, not a cross-market price change"
+                ],
+                prior_observation=None,
+                notify=notify,
+                experimental=experimental,
+                prior_regions=prior_regions,
+            )
 
         prior = (
             self.session.query(SourceObservation)
@@ -948,6 +1008,34 @@ class PipelineService:
         )
         scored = score_event(evidence)
 
+        return self._persist_product_event(
+            watch=watch,
+            new_obs=new_obs,
+            scored=scored,
+            reasons=reasons,
+            prior_observation=prior,
+            notify=notify,
+            experimental=experimental,
+            prior_regions=None,
+        )
+
+    def _persist_product_event(
+        self,
+        *,
+        watch: Watch,
+        new_obs: SourceObservation,
+        scored,
+        reasons: list[str],
+        prior_observation: SourceObservation | None,
+        notify: bool,
+        experimental: bool,
+        prior_regions: frozenset[str] | None,
+    ) -> dict:
+        """Persist a product-state Event after the caller proved its facts."""
+        from app.models import Event, EventWatch
+        from app.services.discord_notify import DiscordNotifier
+        from app.services.editorial import format_alert
+
         event = Event(
             event_type=scored.event_type,
             title=f"{watch.manufacturer} {watch.reference_raw}: {scored.event_type}",
@@ -959,9 +1047,10 @@ class PipelineService:
             extra={
                 "reasons": scored.reasons + reasons,
                 "confidence_label": scored.confidence,
-                "prior_observation_id": prior.id,
+                "prior_observation_id": prior_observation.id if prior_observation else None,
                 "new_observation_id": new_obs.id,
                 "region": new_obs.region,
+                "prior_regions": sorted(prior_regions) if prior_regions else None,
                 "experimental": experimental,
                 "alerted": False,
             },

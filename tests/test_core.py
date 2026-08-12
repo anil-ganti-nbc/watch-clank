@@ -1540,6 +1540,145 @@ def test_citizen_product_repeat_identical_fetch_creates_no_duplicate_event(db_se
     assert db_session.scalars(select(Event)).first() is None
 
 
+def test_known_citizen_first_product_listing_in_new_region_is_regional_intelligence(
+    db_session: Session, tmp_settings: Settings
+):
+    """Regression for the Tsuyosa regional-commercialisation miss class.
+
+    The same canonical reference is announced globally, then observed on US
+    and UK first-party stores.  It remains one Watch, retains local USD/GBP
+    facts independently, and emits exactly one NEW_REGION event for the new
+    market rather than inventing a cross-currency PRICE_CHANGE.
+    """
+    from app.models import Event, ReleaseLead, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Citizen", brand="Citizen", collection="Tsuyosa",
+        reference_raw="NJ0238-57E", reference_canonical="NJ0238-57E",
+    )
+    db_session.add(watch)
+    db_session.flush()
+    db_session.add(
+        ReleaseLead(
+            manufacturer="Citizen", brand="Citizen", collection="Tsuyosa",
+            announcement_title="TSUYOSA Shore announcement", announcement_date="2026-07-23",
+            announcement_url="https://example.test/global/nj0238", source_id="citizen_news",
+            source_region="GLOBAL", watch_ids=[watch.id],
+        )
+    )
+    us = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_products", collector_version="0.1.0",
+        parser_id="fixture", parser_version="1", region="US", source_url="https://example.test/us/nj0238",
+        price=525.0, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    uk = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_uk_products", collector_version="0.1.0",
+        parser_id="fixture", parser_version="1", region="UK", source_url="https://example.test/uk/nj0238",
+        price=349.0, currency="GBP", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add_all([us, uk])
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=uk, is_new_watch=False
+    )
+    assert result["event_type"] == "NEW_REGION"
+    assert result["score"] >= 70  # official Tsuyosa + first local price
+    assert db_session.scalar(select(Event).where(Event.event_type == "PRICE_CHANGE")) is None
+    event = db_session.scalar(select(Event).where(Event.event_type == "NEW_REGION"))
+    assert event.extra["region"] == "UK"
+    assert set(event.extra["prior_regions"]) == {"GLOBAL", "US"}
+
+    # Repeat observation is routine state, not a duplicate regional lead.
+    uk_repeat = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_uk_products", collector_version="0.1.0",
+        parser_id="fixture", parser_version="1", region="UK", source_url="https://example.test/uk/nj0238",
+        price=349.0, currency="GBP", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(uk_repeat)
+    db_session.flush()
+    repeat = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=uk_repeat, is_new_watch=False
+    )
+    assert repeat["event_type"] is None
+    assert len(db_session.scalars(select(Event)).all()) == 1
+
+
+def test_regional_source_onboarding_is_silent_even_for_old_known_watch(
+    db_session: Session, tmp_settings: Settings
+):
+    """An old regional page first encountered during a source baseline is
+    stored, but cannot claim to be today's rollout."""
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Citizen", brand="Citizen", reference_raw="NJ0230-59L",
+        reference_canonical="NJ0230-59L",
+    )
+    db_session.add(watch)
+    db_session.flush()
+    old_us = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_products", collector_version="0.1.0",
+        parser_id="fixture", parser_version="1", region="US", source_url="https://example.test/us/nj0230",
+        price=525.0, currency="USD", overall_confidence=90.0,
+    )
+    newly_discovered_uk = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_uk_products", collector_version="0.1.0",
+        parser_id="fixture", parser_version="1", region="UK", source_url="https://example.test/uk/nj0230",
+        price=349.0, currency="GBP", overall_confidence=90.0,
+    )
+    db_session.add_all([old_us, newly_discovered_uk])
+    db_session.flush()
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=newly_discovered_uk, is_new_watch=False, force_baseline=True
+    )
+    assert result == {"event_type": None, "reason": "source_scoped_baseline"}
+    assert db_session.scalar(select(Event)) is None
+
+
+def test_same_citizen_reference_across_regions_resolves_one_watch(
+    db_session: Session, tmp_settings: Settings
+):
+    """Identity is intentionally region-independent while observations and
+    currencies remain market-specific."""
+    import json
+
+    from app.collectors.base import FetchResult
+    from app.models import Event, SourceObservation, Watch
+    from app.parsers.citizen_products import parse_citizen_search_hit
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    def process(region: str, price: float, currency: str):
+        payload = json.dumps({"id": "NJ0238-57E", "name": "Tsuyosa Shore", "_hit_price": price, "_hit_currency": currency}).encode()
+        return pipeline.process_fetch_result(
+            FetchResult(url=f"https://example.test/{region}/NJ0238-57E", success=True, status_code=200, content_type="application/json", payload=payload),
+            run_id=run.id, collector_id=f"citizen_{region.lower()}_products", collector_version="0.1.0",
+            parse_fn=parse_citizen_search_hit, default_region=region, emit_events=True,
+        )
+
+    us = process("US", 525.0, "USD")
+    uk = process("UK", 349.0, "GBP")
+    assert us["new_watch"] is True and uk["new_watch"] is False
+    watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Citizen")).all()
+    observations = db_session.scalars(select(SourceObservation).order_by(SourceObservation.id)).all()
+    assert len(watches) == 1
+    assert [(o.region, o.price, o.currency) for o in observations] == [
+        ("US", 525.0, "USD"), ("UK", 349.0, "GBP"),
+    ]
+    assert uk["product_event"]["event_type"] == "NEW_REGION"
+    assert db_session.scalar(select(Event).where(Event.event_type == "PRICE_CHANGE")) is None
+
+
 def test_citizen_product_price_transition_produces_price_change(db_session: Session, tmp_settings: Settings):
     """Sprint 3 example Run 2: same reference, price changed -> PRICE_CHANGE."""
     from app.models import Event

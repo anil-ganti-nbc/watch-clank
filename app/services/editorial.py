@@ -93,6 +93,7 @@ class EventEvidence:
     prior_price: float | None = None
     prior_currency: str | None = None
     price_delta_pct: float | None = None  # signed, e.g. -20.0 = 20% cheaper
+    availability_status: str | None = None
 
     # Product-character evidence (Phase 5 recall tuning). Only set these when
     # the source text genuinely supports them — do not infer.
@@ -210,15 +211,23 @@ def score_event(evidence: EventEvidence) -> ScoredEvent:
         score += 30.0
         reasons.append("+30 new reference not previously observed")
     elif evidence.event_type == "NEW_REGION":
-        score += 15.0
+        score += 30.0
         reasons.append(
-            f"+15 first observed availability in region {evidence.region or 'UNKNOWN'}"
+            f"+30 first observed official listing in region {evidence.region or 'UNKNOWN'}"
             + (
                 f" (previously seen in: {', '.join(sorted(evidence.prior_regions))})"
                 if evidence.prior_regions
                 else ""
             )
         )
+        if evidence.price is not None and evidence.currency:
+            score += 15.0
+            reasons.append(f"+15 first official local price ({evidence.price:g} {evidence.currency})")
+        if evidence.availability_status:
+            score += 5.0
+            reasons.append(
+                f"+5 official local availability state ({evidence.availability_status})"
+            )
     elif evidence.event_type == "PRICE_CHANGE":
         if evidence.price_delta_pct is not None:
             magnitude = abs(evidence.price_delta_pct)
