@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Clank EXPERIMENTAL G-Central specialist early-warning lane
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/watch-clank
+EnvironmentFile=-/opt/watch-clank/.env
+ExecStart=/opt/watch-clank/.venv/bin/python -m scripts.run_pipeline --experimental-specialist gcentral
+SuccessExitStatus=0

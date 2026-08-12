@@ -208,6 +208,44 @@ class PipelineService:
             )
             return existing, False
 
+        if norm.manufacturer == "Timex":
+            # Sprint 11 miss autopsy: Timex news posts only ever leak a SKU
+            # via Shopify CDN image filenames (see app/parsers/timex_news.py
+            # IMAGE_SKU_RE), and those filenames never carry the catalogue's
+            # trailing variant suffix (e.g. "TW2Y71200" vs the catalogue's
+            # "TW2Y71200VQ") -- confirmed on real captured posts. Timex's
+            # own normalize_timex_reference is a deliberate conservative
+            # passthrough (no suffix-stripping, unlike Casio's JDM
+            # allowlist), so an exact-match miss here would otherwise create
+            # a phantom duplicate Watch instead of linking the real one.
+            # Prefix match, scoped to Timex only, and only auto-linked when
+            # it resolves to exactly one existing watch -- ambiguous or zero
+            # matches fall through to normal creation, same conservative
+            # bar as everywhere else in this function.
+            prefix_matches = (
+                self.session.query(Watch)
+                .filter(
+                    Watch.manufacturer == norm.manufacturer,
+                    Watch.brand == norm.brand,
+                    Watch.reference_canonical.like(f"{norm.reference_canonical}%"),
+                )
+                .all()
+            )
+            if len(prefix_matches) == 1:
+                existing = prefix_matches[0]
+                self._ledger(
+                    correlation_id=correlation_id,
+                    run_id=run_id,
+                    entity_type="watch",
+                    entity_id=str(existing.id),
+                    stage="identity_resolution",
+                    action="resolved_existing_by_prefix",
+                    output_ref=norm.reference_canonical,
+                    collector_version=COLLECTOR_VERSION,
+                    parser_version=PARSER_VERSION,
+                )
+                return existing, False
+
         watch = Watch(
             manufacturer=norm.manufacturer,
             brand=norm.brand,

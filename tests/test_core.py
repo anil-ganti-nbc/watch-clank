@@ -2877,6 +2877,80 @@ def test_timex_news_parser_real_capture():
     assert len(result.body_excerpt or "") <= 400  # no full article body copied
 
 
+def test_timex_news_parser_extracts_sku_from_image_filename_real_capture():
+    """Sprint 11 miss autopsy: the real MK1 Chronograph post's SKUs
+    (TW2Y71200/TW2Y71300, the exact SKUs Notebookcheck's own article cited
+    as its sources) never appear as bare text -- only inside Shopify CDN
+    image filenames like ".../14065_TX_TC_26_PFB_TW2Y71200_3_600x600.jpg",
+    where the leading "_" defeats MODEL_RE's \\b. This is the confirmed
+    root cause of a real production miss, not a hypothetical."""
+    import json
+    import xml.etree.ElementTree as ET
+
+    from app.parsers.timex_news import parse_timex_news_entry
+
+    xml_bytes = (FIXTURES / "timex_blog_feed.atom").read_bytes()
+    root = ET.fromstring(xml_bytes)
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    entries = root.findall("a:entry", ns)
+    mk1_entry = next(e for e in entries if e.find("a:title", ns).text.startswith("MK1"))
+    entry_dict = {
+        "title": mk1_entry.find("a:title", ns).text,
+        "published": mk1_entry.find("a:published", ns).text,
+        "content": mk1_entry.find("a:content", ns).text,
+    }
+    result = parse_timex_news_entry(json.dumps(entry_dict).encode("utf-8"), source_url="https://timex.com/blogs/x")
+    assert result.success
+    norms = {r.normalized for r in result.model_references}
+    assert "TW2Y71200" in norms
+    assert "TW2Y71300" in norms
+    image_refs = [r for r in result.model_references if r.location == "image_filename"]
+    assert len(image_refs) == 2
+    assert not result.parser_warnings  # no longer "no_model_reference_extracted"
+
+
+def test_timex_news_parser_extracts_sku_from_image_filename_marlin_mesh_real_capture():
+    """Same confirmed root cause, second real article (Todd Snyder x Timex
+    Marlin Mesh) -- proves the fix is not a one-off special case."""
+    import json
+    import xml.etree.ElementTree as ET
+
+    from app.parsers.timex_news import parse_timex_news_entry
+
+    xml_bytes = (FIXTURES / "timex_blog_feed.atom").read_bytes()
+    root = ET.fromstring(xml_bytes)
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    entries = root.findall("a:entry", ns)
+    marlin_entry = next(e for e in entries if "Marlin Mesh" in e.find("a:title", ns).text)
+    entry_dict = {
+        "title": marlin_entry.find("a:title", ns).text,
+        "published": marlin_entry.find("a:published", ns).text,
+        "content": marlin_entry.find("a:content", ns).text,
+    }
+    result = parse_timex_news_entry(json.dumps(entry_dict).encode("utf-8"), source_url="https://timex.com/blogs/y")
+    assert result.success
+    norms = {r.normalized for r in result.model_references}
+    assert "TW2Y84000" in norms
+    assert not result.parser_warnings
+
+
+def test_timex_news_parser_does_not_match_sku_substrings_mid_word():
+    """IMAGE_SKU_RE must not fire on a TW-shaped substring that isn't
+    actually delimited by _ or / on both sides (avoid false positives)."""
+    import json
+
+    from app.parsers.timex_news import parse_timex_news_entry
+
+    entry = {
+        "title": "Some Article",
+        "published": "2026-08-01T00:00:00-04:00",
+        "content": "<p>xTW2Y71200x has nothing to do with a real filename</p>",
+    }
+    result = parse_timex_news_entry(json.dumps(entry).encode("utf-8"), source_url="https://timex.com/blogs/z")
+    assert result.success
+    assert result.model_references == []
+
+
 def test_timex_news_parser_malformed_json_fails_closed():
     from app.parsers.timex_news import parse_timex_news_entry
 
@@ -3126,6 +3200,66 @@ def test_real_historical_timex_article_does_not_become_current_news(db_session: 
     assert out["watch_events"][0]["event_type"] is None
     assert out["watch_events"][0]["reason"] == "stale_publication"
     assert db_session.scalars(select(Event)).first() is None  # NEVER current news
+
+
+def test_timex_news_image_filename_sku_resolves_to_existing_catalogue_watch_not_duplicate(
+    db_session: Session, tmp_settings: Settings
+):
+    """Sprint 11: real live validation (isolated DB copy) caught this the fix
+    to IMAGE_SKU_RE alone introduced -- Shopify CDN image filenames never
+    carry the catalogue's trailing variant suffix (real: "TW6A00500" in the
+    filename vs the catalogue's real stored "TW6A00500VQ"), so an exact
+    reference_canonical match always misses and a phantom duplicate Watch
+    got created instead of linking the real one. Proven live against a copy
+    of the production DB before this fix; this is the regression test."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Watch
+    from app.parsers.timex_news import parse_timex_news_entry
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    catalogue_watch = Watch(
+        manufacturer="Timex", brand="Timex",
+        reference_raw="TW6A00500VQ", reference_canonical="TW6A00500VQ",
+        family_candidate_key="timex_timex_tw6a00500vq",
+    )
+    db_session.add(catalogue_watch)
+    db_session.commit()
+
+    import json
+
+    recent_pub = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    entry_dict = {
+        "title": "New For Fall: The E Line Returns",
+        "published": recent_pub,
+        "content": '<img src="https://cdn.shopify.com/files/1_TX_TC_26_PFB_TW6A00500_1_600x600.jpg">',
+    }
+    fr = FetchResult(
+        url="https://timex.com/blogs/the-timex-blog/e-line-returns",
+        success=True, status_code=200, content_type="application/json",
+        payload=json.dumps(entry_dict).encode("utf-8"),
+    )
+    run = CollectorRun(collector_id="timex_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, collector_id="timex_news", manufacturer="Timex", brand="Timex",
+        parse_fn=parse_timex_news_entry, merge_key_prefix="timex", default_region="US", emit_events=True,
+    )
+
+    assert out["new_watch"] is False  # must resolve to the existing catalogue watch
+    all_timex_watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Timex")).all()
+    assert len(all_timex_watches) == 1  # no phantom duplicate
+    assert all_timex_watches[0].id == catalogue_watch.id
 
 
 def test_fresh_timex_article_still_creates_event(db_session: Session, tmp_settings: Settings):

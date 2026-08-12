@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL Plus9Time specialist lane every 6 hours
+
+[Timer]
+# Matches the Windows Task Scheduler cadence (WatchClank-Plus9Time, 360 min --
+# see scripts/install_windows_gcentral_plus9time_tasks.ps1).
+OnBootSec=25min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

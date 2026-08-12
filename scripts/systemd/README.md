@@ -21,8 +21,20 @@ script — you must copy, edit the paths, and enable them yourself.
 - `watch-clank-seiko-products.service` / `.timer` — EXPERIMENTAL, 6h.
   Paginates seikousa.com's public Shopify `products.json` (225 watches
   confirmed live 2026-08-11 — the full catalogue, not a sample).
+- `watch-clank-casioblog.service` / `.timer` — EXPERIMENTAL specialist
+  early-warning, 45 min (mirrors Windows task `WatchClank-Casioblog`).
+- `watch-clank-gcentral.service` / `.timer` — EXPERIMENTAL specialist
+  early-warning, 45 min (mirrors Windows task `WatchClank-GCentral`).
+- `watch-clank-plus9time.service` / `.timer` — EXPERIMENTAL specialist
+  early-warning, 6h (mirrors Windows task `WatchClank-Plus9Time`).
+- `watch-clank-timex-news.service` / `.timer` — EXPERIMENTAL, 90 min
+  (mirrors Windows task `WatchClank-TimexNews`). Sprint 11 hardened the
+  underlying SKU extraction and reference resolution — see
+  `ai/handoff/TIMEX_MISS_AUTOPSY.md`.
+- `watch-clank-timex-products.service` / `.timer` — EXPERIMENTAL, 6h
+  (mirrors Windows task `WatchClank-TimexProducts`).
 
-Each of the four experimental units is fully independent: distinct
+Each of the nine experimental units is fully independent: distinct
 `collector_id`, distinct lock file (see app/services/run_lock.py), distinct
 `collector_runs` rows. Disabling or stopping any one has zero effect on the
 others or on the Casio production lane.
@@ -47,9 +59,61 @@ sudo systemctl enable --now watch-clank-citizen-news.timer
 sudo systemctl enable --now watch-clank-seiko-news.timer
 sudo systemctl enable --now watch-clank-citizen-products.timer
 sudo systemctl enable --now watch-clank-seiko-products.timer
+sudo systemctl enable --now watch-clank-casioblog.timer
+sudo systemctl enable --now watch-clank-gcentral.timer
+sudo systemctl enable --now watch-clank-plus9time.timer
+sudo systemctl enable --now watch-clank-timex-news.timer
+sudo systemctl enable --now watch-clank-timex-products.timer
 ```
 
 To disable any one lane independently: `sudo systemctl disable --now watch-clank-<name>.timer`.
+
+## First run on a brand-new host: baseline before scheduling (Sprint 11)
+
+A fresh SQLite DB knows nothing. If you `alembic upgrade head` and then
+immediately enable every timer above, the very first crawl of each source
+will otherwise classify its entire existing catalogue/backlog as "new" —
+exactly the failure this project's `force_baseline` mechanism (Sprint 9)
+exists to prevent. Before enabling the timers, run each source manually
+once with `--force-baseline` (mirrors `install_windows_experimental_tasks.ps1`'s
+own pre-flight baseline step):
+
+```bash
+cd /opt/watch-clank
+.venv/bin/python -m scripts.run_pipeline --scheduled --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-brand citizen --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-brand seiko --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-product citizen --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-product seiko --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-specialist casioblog --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-specialist gcentral --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-specialist plus9time --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-brand timex --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-product timex --force-baseline
+```
+
+Then run every one of the above a second time *without* `--force-baseline`
+and confirm 0 new leads/watches/events on the repeat (repeat-run stability)
+before enabling any timer. Only after that should the `systemctl enable
+--now` block above run. This has not been executed against a real Hetzner
+host in this session — no SSH/host access has been available in any sprint
+since Sprint 5 (disclosed honestly each time) — this section documents
+exactly what must happen, not a claim that it has happened.
+
+## Discord notification authority (Sprint 11 dual-runtime policy)
+
+Discord webhooks are purely `.env`-driven (`discord_editorial_webhook_url`,
+`discord_health_webhook_url` in `app/core/config.py`, both default `None`)
+-- there is no separate "authority" flag to build, because whichever host's
+`.env` actually has a real URL filled in is the one that sends. **Policy:
+Hetzner is the designated future Discord notification authority once a
+real webhook exists; Windows keeps Discord unconfigured (`.env` webhook
+fields left blank) and stays collection + local-GUI-only.** This avoids
+duplicate alert storms once both hosts are eventually populated with real
+webhook URLs, with zero code change required -- just don't fill in the
+Windows `.env`'s webhook fields. No webhook has been configured on either
+host this sprint (none was supplied); this section documents the intended
+policy for whenever one is.
 
 ## Secrets and environment
 

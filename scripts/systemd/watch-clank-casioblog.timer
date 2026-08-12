@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL Casioblog specialist lane every 45 minutes
+
+[Timer]
+# Matches the Windows Task Scheduler cadence (WatchClank-Casioblog, 45 min --
+# see scripts/install_windows_casioblog_task.ps1). Early-warning specialist
+# sources run tighter than official news since being first matters here.
+OnBootSec=7min
+OnUnitActiveSec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

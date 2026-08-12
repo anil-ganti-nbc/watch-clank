@@ -29,10 +29,23 @@ PARSER_ID = "timex_news_atom"
 PARSER_VERSION = "0.1.0"
 
 # Timex SKU pattern, e.g. "TW6A01000", "TW2V73700" -- "TW" + alnum body.
-# Real blog prose rarely spells out the exact SKU (marketing copy uses
-# product/collection names, not part numbers) -- an honest expectation,
-# not a parser bug, same as Plus9Time's mostly-empty extraction (Sprint 7).
+# Real blog prose rarely spells out the exact SKU in running text (marketing
+# copy uses product/collection names, not part numbers) -- an honest
+# expectation, same as Plus9Time's mostly-empty extraction (Sprint 7).
 MODEL_RE = re.compile(r"\b(TW[0-9A-Z]{6,10})\b")
+
+# Sprint 11 miss autopsy (real captured MK1 Chronograph / Todd Snyder Marlin
+# Mesh posts): the SKU MODEL_RE is built for genuinely does appear in every
+# post, but embedded in the Shopify CDN image filename, e.g.
+# ".../14065_TX_TC_26_PFB_TW2Y71200_3_600x600.jpg" -- bounded by "_" on both
+# sides, which defeats MODEL_RE's \b (an underscore is a \w character, so no
+# boundary exists between "_" and "TW..."). The actual shoppable-product
+# widget itself is stripped to a bare "[SHOPPABLE_PRODUCT_BLOCK]" placeholder
+# by Shopify's own Atom feed generation -- there is no href to recover -- so
+# the image filename is the only real, structured signal left in the feed.
+# Anchored on "_"/"/" before and "_"/"." after to match the confirmed real
+# naming convention without loosening SKU matching in running prose text.
+IMAGE_SKU_RE = re.compile(r"[_/](TW[0-9A-Z]{6,10})[_.]")
 
 _TAG_STRIP_RE = re.compile(r"<[^>]+>")
 
@@ -102,6 +115,16 @@ def parse_timex_news_entry(payload: bytes | str, *, source_url: str = "") -> New
         seen_refs.add(norm)
         result.model_references.append(
             ExtractedReference(raw=raw_ref, normalized=norm, location="content_text", confidence=0.75)
+        )
+
+    for m in IMAGE_SKU_RE.finditer(content):
+        raw_ref = m.group(1)
+        norm = raw_ref.upper()
+        if norm in seen_refs:
+            continue
+        seen_refs.add(norm)
+        result.model_references.append(
+            ExtractedReference(raw=raw_ref, normalized=norm, location="image_filename", confidence=0.75)
         )
 
     if not result.model_references:

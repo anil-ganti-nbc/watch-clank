@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
-**Last updated:** 2026-08-11
-**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), FOUR official brands (Casio/Citizen/Seiko/Timex, Sprint 9), with editorial-freshness semantics hardened at BOTH the Layer B specialist layer (Sprint 8) and the Layer A official-news layer (Sprint 10, Timex-scoped). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. TEN Windows-scheduled tasks total (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED); official Timex news additionally has a dedicated publication-age gate at the Event-creation layer (`_ISO_TIMESTAMP_NEWS_SOURCES`, Sprint 10) since `ReleaseLead` itself carries no freshness column — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md` and `ai/handoff/TIMEX_FRESHNESS_AUDIT.md`. Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; last rebuilt Sprint 9 — Sprint 10 required no rebuild, see its checkpoint for why). Cloud deployment infra exists (merged from a separate branch) but this session has no access to the actual host to perform/verify a live deployment.
+**Last updated:** 2026-08-12
+**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), FOUR official brands (Casio/Citizen/Seiko/Timex, Sprint 9), with editorial-freshness semantics hardened at the Layer B specialist layer (Sprint 8), the Layer A official-news layer (Sprint 10, Timex-scoped), and Timex's own SKU-extraction/reference-resolution path (Sprint 11, see below). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. TEN Windows-scheduled tasks total (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled, verified live). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED); official Timex news additionally has a dedicated publication-age gate at the Event-creation layer (`_ISO_TIMESTAMP_NEWS_SOURCES`, Sprint 10) since `ReleaseLead` itself carries no freshness column — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`, `ai/handoff/TIMEX_FRESHNESS_AUDIT.md`, and `ai/handoff/TIMEX_MISS_AUTOPSY.md` (Sprint 11). Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere) + a local-only Windows Control Centre GUI/EXE (Sprint 6, not pushed by policy; last rebuilt Sprint 9 — Sprints 10 and 11 both required no rebuild, see their checkpoints for why). Cloud deployment infra exists (merged from a separate branch, and Sprint 11 added the missing systemd unit templates for Casioblog/G-Central/Plus9Time/Timex) but this session has no access to the actual host to perform/verify a live deployment — disclosed honestly every sprint since Sprint 5.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first
@@ -13,6 +13,88 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-12 (Sprint 11) — Timex miss autopsy, real recall fix, dual-runtime scaffolding
+
+**Starting point verified:** clean tree, 175/175 tests passing (before this
+sprint's additions), Ruff clean, Epoch 1 LIVE, 10 Windows tasks
+Ready/Enabled, 0 stale locks. 1463 Timex watches, 0 Timex-linked Events.
+
+**Why this sprint exists:** real Timex launches were published by the
+user's Notebookcheck colleagues while Watch Clank surfaced nothing — a real
+production false-negative, not a hypothetical. Full autopsy in
+`ai/handoff/TIMEX_MISS_AUTOPSY.md`.
+
+**Root cause (confirmed, not guessed):** three real NBC articles (MK1
+Chronograph, Todd Snyder x Timex Marlin Mesh, E Line Automatic) were
+verified end-to-end. In all three, Watch Clank's own `timex_news` blog feed
+had the story 1-2 days *before* Notebookcheck published — this was never a
+discovery-latency or source-coverage gap. Two confirmed, evidence-based
+bugs, found by directly reading the real stored blob content off disk:
+
+1. **PARSER_FAILURE**: the real SKUs are present in every post, but only
+   inside Shopify CDN image filenames (e.g.
+   `..._TX_TC_26_PFB_TW2Y71200_3_600x600.jpg`), never in prose — the
+   existing `MODEL_RE`'s `\b` word boundary can't match past the leading
+   `_`. The actual shoppable-product widget is stripped to a bare
+   `[SHOPPABLE_PRODUCT_BLOCK]` placeholder by Shopify's Atom feed
+   generation, so there's no href to recover either.
+2. **A second bug, found only by live validation against a copy of the
+   production DB** (not by tests): the image-filename SKU never carries
+   the catalogue's trailing variant suffix (`TW2Y71200` vs the catalogue's
+   real `TW2Y71200VQ`). Fixing bug 1 alone, live, fired 7 unwanted
+   `NEW_REFERENCE` events and created 24 duplicate watches on the first
+   validation pass — caught before touching production.
+
+**Fix:** `IMAGE_SKU_RE` added to `app/parsers/timex_news.py` (anchored on
+the real, confirmed Shopify filename convention, not a loosened `\b` —
+zero risk of false positives in prose). Timex-scoped prefix-match fallback
+added to `_resolve_or_create_watch` in `app/services/pipeline.py` — only
+auto-links when the prefix resolves to exactly one existing watch; zero
+behavior change for Casio/Citizen/Seiko or for ambiguous/zero matches.
+
+**Live proof, twice:** ran the real fix against an isolated copy of the
+production DB first (0 events, 0 duplicates, correct `watch_ids` linkage
+on the second attempt), then applied it to the real production DB with
+identical clean results (`data/watch_clank.db`, run ids 105-106), then
+repeated once more for stability (0 new leads/watches/events on the
+repeat). MK1 Chronograph and Marlin Mesh leads now correctly link
+`watch_ids` to their real catalogue watches (652/653 and 658-660) instead
+of staying orphaned. Total watches 2020 → 2027 (6 genuinely new-to-Clank
+SKUs surfaced from older June leads, all correctly gated as historical —
+0 events).
+
+**No new source added.** NBC's own cited sources for the verified misses
+were Timex's own product pages, not a third-party specialist — the brief's
+bar for adding a source ("repeatedly early") was not met by anything found
+this sprint. Three additional search hits (Capstone/Dylan/Huckberry) had
+Notebookcheck article IDs ~200K lower than the verified three, strong
+evidence they're older archived content, not genuine recent misses — flagged
+as unresolved rather than treated as confirmed gaps.
+
+**Regression:** 5 new tests (real MK1/Marlin Mesh image-filename extraction
+proof from the live fixture, false-positive substring guard, the exact
+dedup bug as a permanent regression). 175 → 176. Ruff clean (one import-order
+autofix). Pre-existing Sprint 10 freshness-gate tests still pass unchanged.
+
+**Dual-runtime (Phase 10-16):** Windows confirmed unaffected — all 10 tasks
+still Ready, `data_access.py` still never imports `app.services.pipeline`
+(no EXE rebuild needed, same fact as Sprint 10). Added the systemd unit
+templates that were missing for Hetzner (`watch-clank-casioblog`,
+`-gcentral`, `-plus9time`, `-timex-news`, `-timex-products` — mirroring
+each Windows task's exact cadence and CLI args) plus a documented
+`--force-baseline` pre-flight sequence for a brand-new cloud DB in
+`scripts/systemd/README.md`. Documented (not built — needs no code, it's
+already `.env`-driven) the Discord notification-authority policy: Hetzner
+as future sole authority, Windows kept webhook-unconfigured. **No actual
+Hetzner deployment was performed or could be verified — no SSH/host access
+in this session, same honest disclosure as every sprint since Sprint 5.**
+This section documents exactly what must happen on that host, not a claim
+that it has happened.
+
+**Final state:** 176/176 tests passing, Ruff clean, schema at head
+(`007_specialist_lead_editorial_freshness`), DB integrity OK, all 10
+sources HEALTHY, 0 stale locks.
 
 ## 2026-08-12 (Sprint 10) — Timex historical-freshness hardening
 

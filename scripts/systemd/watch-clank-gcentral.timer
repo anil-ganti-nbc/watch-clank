@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL G-Central specialist lane every 45 minutes
+
+[Timer]
+# Matches the Windows Task Scheduler cadence (WatchClank-GCentral, 45 min --
+# see scripts/install_windows_gcentral_plus9time_tasks.ps1).
+OnBootSec=9min
+OnUnitActiveSec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
