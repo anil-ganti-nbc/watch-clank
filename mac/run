@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Run one manual collector cycle against the isolated local-dev database.
+# Never touches Hetzner or any production state.
+#
+# Usage:
+#   mac/run                                   # live Casio run, small default batch
+#   mac/run --fixture-mode                    # offline, no network calls
+#   mac/run --experimental-brand timex --live # any scripts/run_pipeline.py flag passes through
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+if [ ! -x ".venv/bin/python" ]; then
+    echo "error: no .venv found. Run mac/bootstrap first." >&2
+    exit 1
+fi
+
+mkdir -p .mac-dev/data/snapshots .mac-dev/logs
+
+export DATABASE_URL="sqlite:///${REPO_ROOT}/.mac-dev/data/watch_clank.db"
+export SNAPSHOT_STORAGE_ROOT="${REPO_ROOT}/.mac-dev/data/snapshots"
+export LOG_DIR="${REPO_ROOT}/.mac-dev/logs"
+
+.venv/bin/python -m alembic upgrade head >/dev/null
+
+echo "==> Local dev DB: .mac-dev/data/watch_clank.db"
+
+if [ "$#" -eq 0 ]; then
+    exec .venv/bin/python -m scripts.run_pipeline --live --max-items 5
+else
+    exec .venv/bin/python -m scripts.run_pipeline "$@"
+fi

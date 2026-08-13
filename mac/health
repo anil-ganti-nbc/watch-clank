@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# One-shot health check: briefly starts the app against the local dev DB,
+# hits /health, prints the result, and shuts back down. Leaves no lingering
+# process. For a persistent server, use mac/dashboard instead.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+if [ ! -x ".venv/bin/python" ]; then
+    echo "error: no .venv found. Run mac/bootstrap first." >&2
+    exit 1
+fi
+
+PORT="${WATCH_CLANK_MAC_HEALTH_PORT:-8929}"
+mkdir -p .mac-dev/data/snapshots .mac-dev/logs
+
+export DATABASE_URL="sqlite:///${REPO_ROOT}/.mac-dev/data/watch_clank.db"
+export SNAPSHOT_STORAGE_ROOT="${REPO_ROOT}/.mac-dev/data/snapshots"
+export LOG_DIR="${REPO_ROOT}/.mac-dev/logs"
+
+.venv/bin/python -m alembic upgrade head >/dev/null
+
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port "$PORT" \
+    > .mac-dev/logs/health-check-server.log 2>&1 &
+SERVER_PID=$!
+trap 'kill "$SERVER_PID" >/dev/null 2>&1 || true' EXIT
+
+READY=0
+for _ in $(seq 1 20); do
+    if curl -s -o /dev/null -m 2 "http://127.0.0.1:${PORT}/health"; then
+        READY=1
+        break
+    fi
+    sleep 0.25
+done
+
+if [ "$READY" -ne 1 ]; then
+    echo "error: server did not become ready in time. See .mac-dev/logs/health-check-server.log" >&2
+    exit 1
+fi
+
+curl -s "http://127.0.0.1:${PORT}/health"
+echo ""

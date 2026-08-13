@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Set up (or reuse) a local macOS dev environment for Watch Clank.
+# Safe to re-run: never destroys an existing .venv, only installs/updates deps.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+PYTHON_VERSION="3.12"
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "error: 'uv' is not installed or not on PATH." >&2
+    echo "  Install it from https://docs.astral.sh/uv/ and re-run this script." >&2
+    exit 1
+fi
+
+if [ -d ".venv" ]; then
+    echo "==> Reusing existing .venv"
+else
+    echo "==> Creating .venv (Python $PYTHON_VERSION)"
+    uv venv --python "$PYTHON_VERSION" .venv
+fi
+
+echo "==> Installing/updating dependencies (dev extras)"
+uv pip install --python .venv/bin/python -e ".[dev]"
+
+mkdir -p .mac-dev/data/snapshots .mac-dev/logs
+
+echo "==> Setting up local dev database schema"
+DATABASE_URL="sqlite:///${REPO_ROOT}/.mac-dev/data/watch_clank.db" \
+    .venv/bin/python -m alembic upgrade head
+
+echo ""
+echo "Bootstrap complete."
+echo "  Local dev state lives in: $REPO_ROOT/.mac-dev/ (gitignored)"
+echo "  Next: mac/test, mac/health, mac/dashboard, or mac/run"
