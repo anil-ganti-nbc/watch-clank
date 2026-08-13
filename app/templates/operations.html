@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Operations – Watch Clank{% endblock %}
+{% block content %}
+<h1>Operations</h1>
+
+{% if ran %}
+<div class="card section" style="border-color: {{ 'var(--ok)' if ran_result == 'ok' else 'var(--err)' }}">
+  Ran <strong>{{ ran }}</strong>: {% if ran_result == 'ok' %}<span class="badge badge-ok">completed</span>{% else %}<span class="badge badge-err">failed</span>{% endif %}
+  — see <a href="/runs">Run History</a> for the full result.
+</div>
+{% endif %}
+{% if ran_all %}
+<div class="card section">
+  RUN ALL SAFE COLLECTORS finished: <strong>{{ ok_count }}/{{ total }}</strong> completed without error — see <a href="/runs">Run History</a> for per-collector detail.
+</div>
+{% endif %}
+
+{% if not is_loopback %}
+<div class="card section" style="border-color: var(--err)">
+  <strong>Remote access detected.</strong> RUN NOW is restricted to localhost — the buttons below will be refused by the server even if clicked.
+</div>
+{% endif %}
+
+{% if is_locked %}
+<p class="muted small">A collector run is currently active or the run lock is held — a new RUN NOW may be safely refused/queued by the pipeline's own overlap protection (SKIPPED_OVERLAP), not by this page.</p>
+{% endif %}
+
+<div class="section">
+  <form method="post" action="/operations/run-all-safe" onsubmit="return confirm('Run all 15 collectors sequentially? This makes real network requests and can take several minutes.');">
+    <button type="submit" class="btn btn-primary" {{ 'disabled' if not is_loopback else '' }}>RUN ALL SAFE COLLECTORS</button>
+    <span class="muted small">Runs every registered collector below, sequentially, real network requests.</span>
+  </form>
+</div>
+
+<div class="section">
+  <h2>Collectors</h2>
+  <table>
+    <thead><tr><th>Collector</th><th>Layer</th><th>State</th><th>Last success</th><th>Last items</th><th></th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+      {% set c = row.control %}
+      {% set h = row.health %}
+      <tr>
+        <td>{{ c.display_name }}<br><span class="muted small">{{ c.collector_id }}</span></td>
+        <td><span class="badge {{ 'badge-official' if c.layer == 'OFFICIAL' else 'badge-specialist' }}">{{ c.layer }}</span></td>
+        <td>
+          {% if h %}
+            <span class="badge {{ 'badge-ok' if h.state == 'HEALTHY' else 'badge-warn' if h.state == 'WARNING' else 'badge-err' if h.state == 'FAILED' else 'badge-neutral' }}">{{ h.state }}</span>
+            {% if h.heartbeat_overdue %}<br><span class="small muted">overdue</span>{% endif %}
+          {% else %}<span class="badge badge-neutral">NEVER_RUN</span>{% endif %}
+        </td>
+        <td class="small">{% if h and h.last_success_at %}{{ h.last_success_at|humantime }}<br><span class="muted">{{ h.last_success_at|relative }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="small">{{ h.last_item_count if h and h.last_item_count is not none else '—' }}</td>
+        <td>
+          <form method="post" action="/operations/run/{{ c.collector_id }}" style="display:inline">
+            <button type="submit" class="btn" {{ 'disabled' if not is_loopback else '' }}>RUN NOW</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

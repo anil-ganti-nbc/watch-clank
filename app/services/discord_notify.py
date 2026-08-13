@@ -67,3 +67,26 @@ class DiscordNotifier:
         if not self.health_enabled:
             return False
         return self._post(self.settings.discord_health_webhook_url, text)
+
+    def notification_authority(self) -> str:
+        """WINDOWS / HETZNER / UNLABELED / NONE — never a raw webhook URL.
+
+        Reports which *labeled instance* (see Settings.watch_clank_instance)
+        would actually send an editorial alert right now, so an operator can
+        see the authority boundary without either host ever exposing a
+        secret. NONE means this instance sends no editorial alerts at all
+        (disabled, or no webhook configured) — the safe/expected state for
+        every instance except the one true authority. UNLABELED is a
+        deliberately loud distinct state: this instance WOULD send editorial
+        alerts but has no WATCH_CLANK_INSTANCE set, so its authority can't be
+        confirmed — never silently folded into NONE, since that would hide a
+        real misconfiguration risk (an unlabeled host that's actually live).
+        """
+        if not self.editorial_enabled:
+            return "NONE"
+        label = (self.settings.watch_clank_instance or "").strip().upper()
+        if "HETZNER" in label:
+            return "HETZNER"
+        if "WINDOWS" in label:
+            return "WINDOWS"
+        return "UNLABELED"

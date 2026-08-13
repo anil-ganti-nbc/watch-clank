@@ -5,44 +5,79 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Watch Clank{% endblock %}</title>
   <style>
-    :root { --bg: #0f1419; --card: #1a2332; --text: #e7ecf3; --muted: #8b9bb4; --accent: #3b82f6; --ok: #22c55e; --warn: #f59e0b; --err: #ef4444; }
+    :root { --bg: #0f1419; --card: #1a2332; --text: #e7ecf3; --muted: #8b9bb4; --accent: #3b82f6; --ok: #22c55e; --warn: #f59e0b; --err: #ef4444; --border: #2a3548; }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
-    header { background: var(--card); padding: 1rem 1.5rem; border-bottom: 1px solid #2a3548; display: flex; gap: 1.5rem; align-items: center; }
-    header .logo { font-weight: 700; font-size: 1.25rem; }
-    nav a { margin-right: 1rem; color: var(--muted); }
-    nav a:hover { color: var(--text); }
+    header { background: var(--card); border-bottom: 1px solid var(--border); }
+    .header-top { padding: 0.6rem 1.5rem; display: flex; gap: 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+    .header-top .logo { font-weight: 700; font-size: 1.1rem; }
+    .instance-banner { display: flex; gap: 0.75rem; align-items: center; font-size: 0.8rem; }
+    .instance-pill { padding: 0.15rem 0.6rem; border-radius: 999px; font-weight: 700; letter-spacing: 0.02em; font-size: 0.75rem; }
+    .instance-pill.labeled { background: #1e3a5f; color: #93c5fd; }
+    .instance-pill.unlabeled { background: #78350f; color: #fcd34d; }
+    .authority-pill { padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.75rem; color: var(--muted); border: 1px solid var(--border); }
+    nav { padding: 0 1.5rem; display: flex; gap: 0.25rem; }
+    nav a { padding: 0.6rem 0.85rem; color: var(--muted); font-size: 0.9rem; border-bottom: 2px solid transparent; }
+    nav a:hover { color: var(--text); text-decoration: none; }
+    nav a.active { color: var(--text); border-bottom-color: var(--accent); }
     main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-    .card { background: var(--card); border-radius: 8px; padding: 1rem 1.25rem; border: 1px solid #2a3548; }
-    .card h3 { margin: 0 0 0.25rem; font-size: 0.85rem; color: var(--muted); font-weight: 500; }
-    .card .value { font-size: 1.75rem; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-    th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid #2a3548; }
-    th { color: var(--muted); font-weight: 500; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.85rem; margin-bottom: 1.5rem; }
+    .card { background: var(--card); border-radius: 8px; padding: 0.85rem 1.1rem; border: 1px solid var(--border); }
+    .card h3 { margin: 0 0 0.25rem; font-size: 0.8rem; color: var(--muted); font-weight: 500; }
+    .card .value { font-size: 1.6rem; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+    th, td { text-align: left; padding: 0.5rem 0.65rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
     .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
     .badge-ok { background: #14532d; color: #86efac; }
     .badge-warn { background: #78350f; color: #fcd34d; }
     .badge-err { background: #7f1d1d; color: #fca5a5; }
     .badge-run { background: #1e3a5f; color: #93c5fd; }
-    .empty { color: var(--muted); padding: 2rem; text-align: center; }
-    .timeline { list-style: none; padding: 0; }
-    .timeline li { position: relative; padding-left: 1.5rem; margin-bottom: 1rem; }
-    .timeline li::before { content: ""; position: absolute; left: 0; top: 0.4rem; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--accent); }
-    .timeline li::after { content: ""; position: absolute; left: 0.25rem; top: 1rem; bottom: -1rem; width: 2px; background: #2a3548; }
-    .timeline li:last-child::after { display: none; }
+    .badge-neutral { background: #1f2937; color: var(--muted); }
+    .badge-official { background: #1e3a5f; color: #93c5fd; }
+    .badge-specialist { background: #4c1d95; color: #d8b4fe; }
+    .empty { color: var(--muted); padding: 1.5rem; text-align: center; border: 1px dashed var(--border); border-radius: 8px; }
     h1, h2 { margin-top: 0; }
+    h2 { font-size: 1.05rem; margin-bottom: 0.6rem; color: var(--text); }
     .muted { color: var(--muted); }
+    .small { font-size: 0.78rem; }
+    .section { margin-bottom: 1.75rem; }
+    .btn { display: inline-block; padding: 0.35rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: #1f2937; color: var(--text); font-size: 0.82rem; cursor: pointer; }
+    .btn:hover { background: #26313f; text-decoration: none; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: white; }
+    .filter-bar { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.85rem; }
+    .filter-bar a { padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid var(--border); color: var(--muted); }
+    .filter-bar a.active { background: var(--accent); border-color: var(--accent); color: white; }
+    @media (max-width: 640px) {
+      nav { overflow-x: auto; white-space: nowrap; }
+      .grid { grid-template-columns: 1fr 1fr; }
+    }
   </style>
 </head>
 <body>
+  {% set inst = instance() %}
   <header>
-    <div class="logo">⌚ Watch Clank</div>
+    <div class="header-top">
+      <div class="logo">⌚ Watch Clank</div>
+      <div class="instance-banner">
+        <span class="instance-pill {{ 'labeled' if inst.instance_configured else 'unlabeled' }}">
+          Instance: {{ inst.instance_label }}
+        </span>
+        <span class="authority-pill" title="Which instance would actually send an editorial Discord alert right now">
+          Editorial authority: {{ inst.notification_authority }}
+        </span>
+      </div>
+    </div>
     <nav>
-      <a href="/">Dashboard</a>
-      <a href="/runs">Run History</a>
+      <a href="/"{% if active_nav == 'overview' %} class="active"{% endif %}>Overview</a>
+      <a href="/intelligence"{% if active_nav == 'intelligence' %} class="active"{% endif %}>Recent Intelligence</a>
+      <a href="/operations"{% if active_nav == 'operations' %} class="active"{% endif %}>Operations</a>
+      <a href="/runs"{% if active_nav == 'runs' %} class="active"{% endif %}>Run History</a>
+      <a href="/scheduler"{% if active_nav == 'scheduler' %} class="active"{% endif %}>Scheduler</a>
+      <a href="/diagnostics"{% if active_nav == 'diagnostics' %} class="active"{% endif %}>Health / Diagnostics</a>
     </nav>
   </header>
   <main>

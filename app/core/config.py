@@ -75,6 +75,20 @@ class Settings(BaseSettings):
     availability_editorial_min_score: float = Field(default=70.0)
     availability_recent_launch_window_days: int = Field(default=30)
 
+    # Web catch-up sprint (Phase 1): there are two independent Watch Clank
+    # deployments/databases by design (local Windows field-test, Hetzner
+    # cloud) and the web UI must never let an operator mistake one for the
+    # other. Explicit config, never inferred from hostname -- a renamed or
+    # cloned machine must not silently relabel itself. Empty string means
+    # "not configured," rendered honestly as UNLABELED rather than guessed.
+    watch_clank_instance: str = Field(default="")
+
+    # Phase 7: raw ISO timestamps (2026-08-12T07:12:26.678550+00:00) are not
+    # acceptable in the UI. Every human-facing timestamp is rendered in this
+    # IANA zone and always labeled with its abbreviation, never bare. UTC is
+    # the safe default since operational timestamps are stored in UTC.
+    display_timezone: str = Field(default="UTC")
+
     @property
     def project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]

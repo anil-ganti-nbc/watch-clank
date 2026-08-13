@@ -2,33 +2,57 @@
 {% block title %}Run History – Watch Clank{% endblock %}
 {% block content %}
 <h1>Collector Run History</h1>
+
+<form method="get" action="/runs" class="filter-bar">
+  <select name="source" onchange="this.form.submit()">
+    <option value="">All collectors</option>
+    {% for c in all_controls %}
+      <option value="{{ c.collector_id }}" {{ 'selected' if filter_source == c.collector_id else '' }}>{{ c.display_name }}</option>
+    {% endfor %}
+  </select>
+  <select name="status" onchange="this.form.submit()">
+    <option value="">All statuses</option>
+    {% for st in all_statuses %}
+      <option value="{{ st }}" {{ 'selected' if filter_status == st else '' }}>{{ st }}</option>
+    {% endfor %}
+  </select>
+  <select name="layer" onchange="this.form.submit()">
+    <option value="">Official + Specialist</option>
+    <option value="OFFICIAL" {{ 'selected' if filter_layer == 'OFFICIAL' else '' }}>Official only</option>
+    <option value="SPECIALIST" {{ 'selected' if filter_layer == 'SPECIALIST' else '' }}>Specialist only</option>
+  </select>
+  {% if filter_source or filter_status or filter_layer %}<a href="/runs">Clear filters</a>{% endif %}
+</form>
+
 {% if runs %}
 <table>
   <thead>
     <tr>
-      <th>ID</th><th>Collector</th><th>Status</th><th>Discovered</th><th>Fetched</th>
+      <th>ID</th><th>Collector</th><th>Layer</th><th>Status</th><th>Discovered</th><th>Fetched</th>
       <th>Parsed</th><th>New</th><th>Obs</th><th>Fail</th><th>Duration</th><th>Started</th>
     </tr>
   </thead>
   <tbody>
   {% for r in runs %}
+    {% set c = controls_by_id.get(r.collector_id) %}
     <tr>
       <td>{{ r.id }}</td>
-      <td>{{ r.collector_id }}@{{ r.collector_version }}</td>
-      <td><span class="badge badge-{{ 'ok' if r.status == 'SUCCESS' else 'warn' if r.status in ['PARTIAL','ZERO_ITEMS'] else 'err' if r.status == 'FAILED' else 'run' }}">{{ r.status }}</span></td>
+      <td>{{ r.collector_id }}<br><span class="small muted">@{{ r.collector_version }}</span></td>
+      <td>{% if c %}<span class="badge {{ 'badge-official' if c.layer == 'OFFICIAL' else 'badge-specialist' }}">{{ c.layer }}</span>{% else %}<span class="muted small">—</span>{% endif %}</td>
+      <td><span class="badge {{ 'badge-ok' if r.status == 'SUCCESS' else 'badge-warn' if r.status in ['PARTIAL','ZERO_ITEMS'] else 'badge-err' if r.status == 'FAILED' else 'badge-run' }}">{{ r.status }}</span></td>
       <td>{{ r.discovered_count }}</td>
       <td>{{ r.fetched_count }}</td>
       <td>{{ r.parsed_count }}</td>
       <td>{{ r.new_watch_count }}</td>
       <td>{{ r.observation_count }}</td>
       <td>{{ r.failure_count }}</td>
-      <td>{% if r.duration_ms %}{{ r.duration_ms }} ms{% else %}—{% endif %}</td>
-      <td class="muted">{{ r.started_at }}</td>
+      <td>{% if r.duration_ms %}{{ (r.duration_ms / 1000)|round(1) }}s{% else %}—{% endif %}</td>
+      <td class="small">{{ r.started_at|humantime }}<br><span class="muted">{{ r.started_at|relative }}</span></td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
 {% else %}
-<div class="empty">No collector runs recorded yet.</div>
+<div class="empty">No collector runs match this filter.</div>
 {% endif %}
 {% endblock %}

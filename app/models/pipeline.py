@@ -1,7 +1,7 @@
 """Collector runs, pipeline ledger, and event foundations."""
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from sqlalchemy import (
     JSON,
@@ -17,6 +17,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.watch import Watch
 
 
 class CollectorRun(Base):
@@ -147,3 +150,10 @@ class EventWatch(Base):
     )
 
     event: Mapped["Event"] = relationship("Event", back_populates="watches")
+    # Web catch-up sprint: Recent Intelligence needs to render manufacturer/
+    # reference for each Event without a second query per row. The watch_id
+    # FK already existed; this is a read-only ORM convenience relationship,
+    # no migration needed. One-directional on purpose -- Watch doesn't need
+    # a back-reference to every event it's ever been part of for anything
+    # this app currently does.
+    watch: Mapped["Watch"] = relationship("Watch", viewonly=True)

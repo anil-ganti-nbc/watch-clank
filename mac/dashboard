@@ -20,6 +20,7 @@ export SNAPSHOT_STORAGE_ROOT="${REPO_ROOT}/.mac-dev/data/snapshots"
 export LOG_DIR="${REPO_ROOT}/.mac-dev/logs"
 export APP_HOST="127.0.0.1"
 export APP_PORT="$PORT"
+export WATCH_CLANK_INSTANCE="${WATCH_CLANK_INSTANCE:-MACBOOK DEV}"
 
 .venv/bin/python -m alembic upgrade head >/dev/null
 

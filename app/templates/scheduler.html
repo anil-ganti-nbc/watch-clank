@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Scheduler – Watch Clank{% endblock %}
+{% block content %}
+<h1>Scheduler</h1>
+<p class="small muted">Live scheduler source on this host: <strong>{{ scheduler_source }}</strong></p>
+{% if not is_windows %}
+<div class="card section">
+  This host has no Windows Task Scheduler. On Hetzner/Linux, actual scheduling is done by cron/systemd,
+  which this page does not query live. Everything below is <strong>DERIVED</strong> — computed from run
+  history and each collector's expected cadence, not read from a real scheduler.
+</div>
+{% endif %}
+
+<table>
+  <thead>
+    <tr>
+      <th>Collector</th><th>Cadence</th><th>Last run</th><th>Next expected</th>
+      {% if is_windows %}<th>Windows Task Scheduler (live)</th>{% endif %}
+    </tr>
+  </thead>
+  <tbody>
+  {% for row in rows %}
+    <tr>
+      <td>{{ row.control.display_name }}<br><span class="small muted">{{ row.control.collector_id }}</span></td>
+      <td class="small">{% if row.cadence_minutes %}every {{ row.cadence_minutes }} min{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="small">{% if row.last_run %}{{ row.last_run.started_at|humantime }}<br><span class="muted">{{ row.last_run.started_at|relative }}</span>{% else %}<span class="muted">never</span>{% endif %}</td>
+      <td class="small">
+        {% if row.next_expected %}{{ row.next_expected|humantime }}<span class="badge badge-neutral" style="margin-left:0.4rem">DERIVED</span>
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      {% if is_windows %}
+      <td class="small">
+        {% if row.windows_task_name %}
+          {% if row.windows_live %}
+            {{ row.windows_live.status or '—' }}
+            {% if row.windows_live.next_run %}<br><span class="muted">next: {{ row.windows_live.next_run }}</span>{% endif %}
+          {% else %}<span class="muted">query failed — see DERIVED column</span>{% endif %}
+        {% else %}<span class="muted">no Windows task for this collector</span>{% endif %}
+      </td>
+      {% endif %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
