@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
-**Last updated:** 2026-08-14
-**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), FOUR official brands (Casio/Citizen/Seiko/Timex, Sprint 9), with editorial-freshness semantics hardened at the Layer B specialist layer (Sprint 8), the Layer A official-news layer (Sprint 10, Timex-scoped), and Timex's own SKU-extraction/reference-resolution path (Sprint 11, see below). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. Between Sprint 11 and Sprint 12 (undocumented at the time, reconstructed 2026-08-14 — see that day's checkpoint) regional-commercialisation `NEW_REGION` detection, a Citizen Germany sitemap-delta collector, four new specialist RSS sources (Monochrome/Deployant/Fratello/WatchTime), Discord notification-authority honoring, and availability-editorial-eligibility tightening (SOLD_OUT/RESTOCK noise gating) all shipped. TEN Windows-scheduled tasks total as of Sprint 9-11 (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled as of last verification) — Windows itself has not been reachable by any session since before Sprint 12 (away until 2026-08-18). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED); official Timex news additionally has a dedicated publication-age gate at the Event-creation layer (`_ISO_TIMESTAMP_NEWS_SOURCES`, Sprint 10) since `ReleaseLead` itself carries no freshness column — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`, `ai/handoff/TIMEX_FRESHNESS_AUDIT.md`, and `ai/handoff/TIMEX_MISS_AUTOPSY.md` (Sprint 11). Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere this session could see). Cloud deployment infra exists; Sprint 12 discovered (read-only) that a `watch-clank` instance is live-soaking on Hetzner on a stale pre-Sprint-5 commit (`fcb5e918`) — **confirmed still true and still running on that same stale commit as of 2026-08-14** (see this day's checkpoint; not redeployed this sprint, deliberately — see `ai/handoff/REMEDIATION_PLAN.md`). **2026-08-14 (Hall of Shame forensic sprint):** reconstructed 12 real Notebookcheck competitive-miss cases, found and fixed the single highest-leverage architectural gap — product-catalogue collectors (Citizen/Seiko/Timex) could create a `Watch` row for a genuinely new SKU but had **no path to ever emit an Event for it**, plus a silent pagination cap that excluded ~81% of Timex's and ~35% of Citizen's real catalogue from every non-baseline run. Both fixed; full writeup in `ai/handoff/WATCH_CLANK_HALL_OF_SHAME_AUTOPSY.md`, `ai/handoff/REGIONAL_COVERAGE_MATRIX.md`, `ai/handoff/REMEDIATION_PLAN.md`.
+**Last updated:** 2026-08-15
+**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), FOUR official brands (Casio/Citizen/Seiko/Timex, Sprint 9), with editorial-freshness semantics hardened at the Layer B specialist layer (Sprint 8), the Layer A official-news layer (Sprint 10, Timex-scoped), and Timex's own SKU-extraction/reference-resolution path (Sprint 11, see below). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. Between Sprint 11 and Sprint 12 (undocumented at the time, reconstructed 2026-08-14 — see that day's checkpoint) regional-commercialisation `NEW_REGION` detection, a Citizen Germany sitemap-delta collector, four new specialist RSS sources (Monochrome/Deployant/Fratello/WatchTime), Discord notification-authority honoring, and availability-editorial-eligibility tightening (SOLD_OUT/RESTOCK noise gating) all shipped. TEN Windows-scheduled tasks total as of Sprint 9-11 (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled as of last verification) — Windows itself has not been reachable by any session since before Sprint 12 (away until 2026-08-18). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED); official Timex news additionally has a dedicated publication-age gate at the Event-creation layer (`_ISO_TIMESTAMP_NEWS_SOURCES`, Sprint 10) since `ReleaseLead` itself carries no freshness column — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`, `ai/handoff/TIMEX_FRESHNESS_AUDIT.md`, and `ai/handoff/TIMEX_MISS_AUTOPSY.md` (Sprint 11). Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere this session could see). Cloud deployment infra exists; Sprint 12 discovered (read-only) that a `watch-clank` instance is live-soaking on Hetzner on a stale pre-Sprint-5 commit (`fcb5e918`) — **confirmed still true and still running on that same stale commit as of 2026-08-14** (see this day's checkpoint; not redeployed this sprint, deliberately — see `ai/handoff/REMEDIATION_PLAN.md`). **2026-08-14 (Hall of Shame forensic sprint):** reconstructed 12 real Notebookcheck competitive-miss cases, found and fixed the single highest-leverage architectural gap — product-catalogue collectors (Citizen/Seiko/Timex) could create a `Watch` row for a genuinely new SKU but had **no path to ever emit an Event for it**, plus a silent pagination cap that excluded ~81% of Timex's and ~35% of Citizen's real catalogue from every non-baseline run. Both fixed; full writeup in `ai/handoff/WATCH_CLANK_HALL_OF_SHAME_AUTOPSY.md`, `ai/handoff/REGIONAL_COVERAGE_MATRIX.md`, `ai/handoff/REMEDIATION_PLAN.md`. **2026-08-14/15 (post-Hall-of-Shame implementation sprint):** all three of that sprint's top follow-ups executed. (1) **Hetzner redeployed** to current GitHub HEAD (`d0ee4e9`) — real `git clone` + `docker build` on the host, migrated `003_release_leads`→`007_specialist_lead_editorial_freshness` in place (22 pre-existing watches preserved, verified backup taken first), every new-to-this-DB source force-baselined then repeat-verified 0/0, and a **real, verified, unattended `systemctl --user` deployment** installed (17 timers, generated from the collector registry, not hand-written) — no root was available or used; see `ai/handoff/HETZNER_DEPLOYMENT.md`. (2) **Seiko Japan retail-store collector built** (`seiko_jp_products`) — live-confirmed NOT geo-blocked, resolving Hall of Shame Case 12; see `ai/handoff/SEIKO_JP_COLLECTOR.md`. (3) **Casio UK sitemap-delta collector built** (`casio_uk_sitemap`) — the product pages remain Cloudflare-blocked, but the sitemap isn't and carries real dated evidence for both Case 5 and Case 8; **Citizen UK remains genuinely blocked** (Cloudflare *and* an explicit robots.txt disallow naming ClaudeBot) and was left undone, honestly documented rather than forced; see `ai/handoff/UK_SIGNAL_PATH_RESEARCH.md`. Now 17 registered collectors total (was 15). 232 tests (was 221), Ruff clean.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first (also now macOS-portable — see `mac/` and `mac_dev_environment_setup` conventions; core application code is unchanged by that, only launcher scripts were added)
@@ -14,6 +14,115 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-14/15 — Post-Hall-of-Shame implementation sprint: Hetzner redeploy, Seiko JP collector, UK research
+
+**Starting point verified:** HEAD `c474e75` (== `origin/main`, clean tree),
+221 tests passing, Ruff clean — the prior sprint's own end state. This
+sprint implements its three named follow-ups.
+
+### 1. Seiko Japan retail-store collector (`seiko_jp_products`)
+
+`store.seikowatches.com` confirmed live, from two independent vantage
+points (Hetzner Helsinki, this session's macOS host) — HTTP 200, **not**
+geo-blocked, contradicting the working assumption carried forward from the
+prior sprint. Real Shopify JSON catalogue, 959 watches (later 956-959 on
+re-checks — real-world drift), no `product_type` filtering needed (this
+store sells nothing else). Built mirroring `seiko_products.py`/
+`timex_products.py` exactly, with this sprint's discovery-cap
+delta-prioritization fix (`known_product_urls`) built in from day one
+rather than retrofitted later. HBC008J/HBC009J (Hall of Shame Case 12)
+both live-verified: JPY 155,100 each, matching Notebookcheck exactly,
+`予約購入ボタン` (preorder) tag present. 7 new tests. Full detail:
+`ai/handoff/SEIKO_JP_COLLECTOR.md`.
+
+### 2. Casio UK sitemap-delta collector (`casio_uk_sitemap`)
+
+Casio UK product pages remain Cloudflare-403 (resistant to browser-like
+headers, not attempted to bypass). **`www.casio.com/uk/sitemap.xml` is
+not blocked** — HTTP 200, explicitly published in Casio's own robots.txt,
+no ClaudeBot-specific restriction anywhere in that (very long) file. Real
+capture: both `GD-350S-1` (Case 8) and `F-B100W-1A`/`-3A` (Case 5) present
+with real `<lastmod>` timestamps matching their editorial dates almost
+exactly. Built a sitemap-only collector — **honest, load-bearing
+limitation**: no price/currency/availability exists in a sitemap, so this
+source can only ever produce `NEW_REFERENCE`/`NEW_REGION`, never
+`PRICE_CHANGE`/`SOLD_OUT`/`RESTOCK` (the existing transition classifier
+safely no-ops on all-`None` price/availability pairs — no new event type
+was invented). 4 new tests including the mandatory GD-350S-1 regression
+(`test_casio_uk_sitemap_known_gd350s1_from_japan_emits_new_region`).
+
+### 3. Citizen UK — researched, correctly left undone
+
+Product pages Cloudflare-403 (unchanged). **Citizen's own robots.txt
+explicitly disallows `ClaudeBot` by name** (modern Content-Signal format,
+alongside GPTBot/Amazonbot/CCBot/etc.) — a second, independent, decisive
+reason beyond the technical block. `citizenwatch.eu` (the platform
+`de.citizenwatch.eu` already uses) was investigated as a possible
+alternative: real, accessible, 399 products — but confirmed **EUR-priced**
+regardless of `Accept-Language`/`?currency=GBP` (tested both), so it was
+explicitly *not* repurposed as fake UK/GBP evidence. No collector built.
+Full research trail, including the Casio findings above:
+`ai/handoff/UK_SIGNAL_PATH_RESEARCH.md`.
+
+### 4. Hetzner redeployed to current HEAD
+
+Full detail: `ai/handoff/HETZNER_DEPLOYMENT.md`. Summary: verified backup
+taken and integrity-checked before touching anything; cloned from GitHub
+directly on the host (`~/watch-clank`, no manual file copying); built
+`watch-clank:d0ee4e9` on the host; migrated the existing volume in place
+(`003_release_leads` → `007_specialist_lead_editorial_freshness`, 22
+pre-existing watches preserved exactly); force-baselined every one of the
+16 sources new to this DB (`casio_multi` was **not** baselined — it
+already had real, non-baseline history here and kept it); repeat-verified
+0 new watches/events across all 16 before enabling anything; discovered
+`anilganti` is already in the `docker` group (no sudo needed) and that
+`loginctl enable-linger` works for one's own account without root even
+though `sudo -n` does not; generated and installed **real, working
+`systemctl --user` timers** for all 17 collectors via a new registry-driven
+generator (`scripts/systemd/docker/render_units.py` — reads the same
+`collector_registry.py`/`health.py` the web dashboard uses, so nothing
+here can silently drift from what's actually registered); verified one
+unit manually end-to-end via `journalctl` before enabling the rest; final
+state confirmed via `scripts.status`: schema OK at head, DB integrity OK,
+4177 total watches, 0 stale RUNNING rows, 0 active locks, **all 17 sources
+HEALTHY**. Every Hall-of-Shame reference across all 12 cases (including
+GD-350S-1, F-B100W, HBC008J/HBC009J, NJ0238-57E, the three Dress Classic
+UK refs, and both Nighthawk refs) confirmed present in the live deployed
+database by direct query.
+
+**Known, disclosed limitation:** the original invisible `casio_multi`
+invocation mechanism (most likely root's crontab, never confirmed — no
+root access available or attempted) was not found or disabled. It is
+likely still firing independently on its own ~90-minute cadence against
+the same (now-migrated) volume. This is safe — the migrations were purely
+additive, and `RunLockService`'s per-`collector_id` lock means any overlap
+resolves as `SKIPPED_OVERLAP`, never corruption — but redundant. Flagged
+as the top remaining follow-up for whoever has root on that box.
+
+**Discord authority: unchanged, unambiguous.** No webhook configured on
+Hetzner (none existed to carry forward); every generated unit references
+the webhook env vars via pass-through only, so with no `secrets.env` they
+resolve empty and `DiscordNotifier.editorial_enabled` stays `False` by
+construction. Not flipped to Hetzner-authoritative this sprint — the
+explicit precondition "Windows can be disabled as editorial sender
+without losing collection" could not be verified (Windows unreachable
+this session, same as the prior sprint, away until 2026-08-18).
+
+**Tests:** 221 → **232 passed** (11 new: 7 Seiko JP + 4 Casio UK). Ruff
+clean throughout (one import-order auto-fix each round). No existing test
+was weakened; all Hall-of-Shame regression specimens from the prior sprint
+still pass unmodified.
+
+**GitHub:** two commits this sprint, both pushed and remote-verified —
+`c474e75..d0ee4e9`. Ending local/remote HEAD: `d0ee4e9`. (The Hetzner
+deployment itself does not change GitHub state; it deploys what was
+already pushed.)
+
+**Not done, deliberately:** no Citizen UK collector (see above); no
+Reddit/community source; no Orient Star; no UI redesign (existing generic
+event rendering already handles every new source's output — verified, not
+assumed); root's crontab was not located, touched, or disabled.
 
 ## 2026-08-14 — Hall of Shame forensic + remediation sprint
 
