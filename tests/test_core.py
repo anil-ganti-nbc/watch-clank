@@ -619,6 +619,279 @@ def test_multi_source_news_success_catalog_blocked(db_session: Session, tmp_sett
     assert db_session.scalars(select(ReleaseLead)).first() is not None
 
 
+# --- 2026-08-15 incident: casio_multi could never emit an Event or notify --
+# See ai/handoff/INCIDENT_SILENT_SCHEDULED_NOTIFICATIONS.md. run_multi_source_
+# pipeline is the single entrypoint for both --live (manual) and --scheduled
+# (systemd) Casio runs; these tests exercise it exactly as both really call
+# it, proving the fix rather than a synthetic shortcut.
+
+
+def _casio_multi_new_product_mocks(list_html: bytes, detail: bytes):
+    from app.collectors.base import CollectorRunResult
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+
+    def news_run(self, *, max_items=None, index_html=None):
+        col = CasioIntlNewsCollector()
+        items = col.discover_index(list_html.decode("utf-8", errors="ignore"))[:2]
+        items = [i for i in items if "efk-200" in i.url][:1] or items[:1]
+        r = CollectorRunResult(
+            collector_id="casio_intl_news", collector_version="0.1.0", region="INTL",
+            trust_score=95.0, discovered=items,
+        )
+        for it in items:
+            r.fetched.append(
+                FetchResult(url=it.url, success=True, status_code=200, content_type="text/html", payload=detail)
+            )
+        r.metadata["component_status"] = "SUCCESS"
+        r.metadata["discovered_count"] = len(items)
+        return r
+
+    def cat_run_blocked(self, *, max_items=None, known_product_urls=None, discovery_urls=None):
+        r = CollectorRunResult(collector_id="casio_japan", collector_version="0.2.0", region="JP", trust_score=100.0)
+        r.metadata["component_status"] = "BLOCKED"
+        r.metadata["discovery_fetches"] = [{"url": "x", "status": 403, "success": False, "blocked": True}]
+        return r
+
+    return news_run, cat_run_blocked
+
+
+def test_scheduled_casio_new_product_creates_event_and_notifies(db_session: Session, tmp_settings: Settings):
+    """Phase 4-A: known baseline exists, a genuinely new product appears,
+    the real --scheduled/--live entrypoint (run_multi_source_pipeline, no
+    explicit emit_events override) runs. Before this sprint's fix this
+    silently created zero Events, forever, regardless of Discord config."""
+    from unittest.mock import patch
+
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+    from app.collectors.casio_japan import CasioJapanCollector
+    from app.core.config import Settings
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
+    detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
+    news_run, cat_run_blocked = _casio_multi_new_product_mocks(list_html, detail)
+
+    configured = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    calls: list[str] = []
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with (
+        patch.object(CasioIntlNewsCollector, "run", news_run),
+        patch.object(CasioJapanCollector, "run", cat_run_blocked),
+        patch("app.services.pipeline.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+
+    assert run.status == "PARTIAL"
+    events = db_session.scalars(select(Event)).all()
+    # the real fixture announcement lists 5 EDIFICE variant references --
+    # one Event per genuinely new reference, all from the same article.
+    assert len(events) == 5
+    assert all(e.event_type == "NEW_REFERENCE" for e in events)
+    assert all(e.story_score >= 50.0 for e in events)  # EDIFICE is a recognisable family -> 30+10+20=60
+    assert all(e.extra["alerted"] is True for e in events)
+    assert calls == ["https://discord.example/editorial"] * 5
+
+
+def test_scheduled_casio_no_webhook_creates_event_no_crash(db_session: Session, tmp_settings: Settings):
+    """Phase 4-G: eligible Event, no webhook configured. Event persists,
+    no crash, notifier is a clean no-op."""
+    from unittest.mock import patch
+
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+    from app.collectors.casio_japan import CasioJapanCollector
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
+    detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
+    news_run, cat_run_blocked = _casio_multi_new_product_mocks(list_html, detail)
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with (
+        patch.object(CasioIntlNewsCollector, "run", news_run),
+        patch.object(CasioJapanCollector, "run", cat_run_blocked),
+    ):
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+
+    assert run.status == "PARTIAL"
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 5
+    assert all(e.extra["alerted"] is False for e in events)
+
+
+def test_scheduled_casio_notifier_failure_does_not_fail_the_run(db_session: Session, tmp_settings: Settings):
+    """Phase 4-F: webhook configured but the HTTP POST raises. The
+    collector run must remain successful (collection/persistence
+    succeeded); the failure is isolated to the notifier and logged, never
+    rolled back into the run's own status."""
+    from unittest.mock import patch
+
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+    from app.collectors.casio_japan import CasioJapanCollector
+    from app.core.config import Settings
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
+    detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
+    news_run, cat_run_blocked = _casio_multi_new_product_mocks(list_html, detail)
+
+    configured = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with (
+        patch.object(CasioIntlNewsCollector, "run", news_run),
+        patch.object(CasioJapanCollector, "run", cat_run_blocked),
+        patch("app.services.pipeline.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=ConnectionError("network unreachable")),
+    ):
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+
+    assert run.status == "PARTIAL"  # collection itself is unaffected by the notifier failure
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 5
+    assert all(e.extra["alerted"] is False for e in events)  # send failed, but Events + run both persisted cleanly
+
+
+def test_scheduled_casio_catalog_known_watch_new_region_creates_event_and_notifies(
+    db_session: Session, tmp_settings: Settings
+):
+    """Phase 4-B, exercising run_multi_source_pipeline's OTHER emit_events
+    call site (catalog enrichment / process_fetch_result), not just the
+    news-announcement one. No real casio_japan HTML fixture has ever
+    existed in this repo (the source has been permanently Akamai-blocked
+    since before this project's first sprint) -- the parser itself is
+    monkeypatched rather than fabricating HTML the real parser was never
+    proven against, so this test cannot claim to validate parsing, only
+    that the pipeline correctly threads emit_events/notify through this
+    call site exactly like the news one."""
+    from unittest.mock import patch
+
+    from app.collectors.base import CollectorRunResult, FetchResult
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+    from app.collectors.casio_japan import CasioJapanCollector
+    from app.core.config import Settings
+    from app.models import Event, SourceObservation, Watch
+    from app.parsers.base import ParsedWatch, ParseResult
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GMW-B5000D-1", reference_canonical="GMW-B5000D-1")
+    db_session.add(watch)
+    db_session.flush()
+    db_session.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="casio_intl_news", collector_version="0.1.0", parser_id="fixture",
+            parser_version="1", region="INTL", source_url="https://example.test/intl/gmw-b5000d-1",
+            overall_confidence=90.0,
+        )
+    )
+    db_session.commit()
+
+    def news_run_empty(self, *, max_items=None, index_html=None):
+        r = CollectorRunResult(collector_id="casio_intl_news", collector_version="0.1.0", region="INTL", trust_score=95.0)
+        r.metadata["component_status"] = "ZERO_ITEMS"
+        return r
+
+    def cat_run_healthy(self, *, max_items=None, known_product_urls=None, discovery_urls=None):
+        r = CollectorRunResult(collector_id="casio_japan", collector_version="0.2.0", region="JP", trust_score=100.0)
+        r.fetched.append(
+            FetchResult(url="https://www.casio.com/jp/product/GMW-B5000D-1/", success=True, status_code=200, content_type="text/html", payload=b"<html></html>")
+        )
+        r.metadata["component_status"] = "SUCCESS"
+        return r
+
+    def fake_parse(payload, *, source_url=""):
+        return ParseResult(
+            success=True, parser_id="test", parser_version="0",
+            watches=[ParsedWatch(
+                reference_raw="GMW-B5000D-1", manufacturer="Casio", brand="Casio",
+                price=45000.0, currency="JPY", availability_status="AVAILABLE",
+            )],
+        )
+
+    configured = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    calls: list[str] = []
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with (
+        patch.object(CasioIntlNewsCollector, "run", news_run_empty),
+        patch.object(CasioJapanCollector, "run", cat_run_healthy),
+        patch("app.services.pipeline.parse_casio_product_html", fake_parse),
+        patch("app.services.pipeline.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+
+    assert run.status in ("SUCCESS", "PARTIAL")
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1
+    assert events[0].event_type == "NEW_REGION"
+    assert events[0].extra["region"] == "JP"
+    assert events[0].extra["alerted"] is True
+    assert calls == ["https://discord.example/editorial"]
+
+
+def test_scheduled_casio_epoch_baseline_creates_no_event(db_session: Session, tmp_settings: Settings):
+    """Phase 4-D: same evidence, but an active epoch baseline is in
+    progress. Must persist state (ReleaseLead/Watch) and create 0 Events --
+    the pre-existing epoch-baseline guard inside _record_watch_event is
+    what actually protects this, unrelated to (and unweakened by) this
+    sprint's emit_events default change."""
+    from unittest.mock import patch
+
+    from app.collectors.casio_intl_news import CasioIntlNewsCollector
+    from app.collectors.casio_japan import CasioJapanCollector
+    from app.models import Event, ReleaseLead
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_test")
+    start_baseline(db_session, epoch)  # deliberately not completed -- baseline still active
+
+    list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
+    detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
+    news_run, cat_run_blocked = _casio_multi_new_product_mocks(list_html, detail)
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with (
+        patch.object(CasioIntlNewsCollector, "run", news_run),
+        patch.object(CasioJapanCollector, "run", cat_run_blocked),
+    ):
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+
+    assert run.status == "PARTIAL"
+    assert db_session.scalars(select(ReleaseLead)).first() is not None  # evidence stored
+    assert db_session.query(Event).count() == 0  # but silent -- baseline is not news
+
+
+def test_casio_official_lane_still_has_no_iso_timestamp_freshness_gate(db_session: Session, tmp_settings: Settings):
+    """Phase 4-E, stated honestly rather than fixed (freshness semantics
+    are explicitly out of scope for this sprint): only timex_news is in
+    _ISO_TIMESTAMP_NEWS_SOURCES. Casio (like Citizen/Seiko) has no
+    structured per-article timestamp to gate on and is unaffected by that
+    Sprint 10 hardening -- this was already true and already equally live
+    for Citizen/Seiko's own emit_events=True production paths; this
+    sprint's fix does not change it for Casio, only makes it newly
+    *reachable* now that Casio can emit Events at all. Documented as a
+    known, disclosed, deliberately-unfixed gap, not asserted as safe."""
+    from app.models import ReleaseLead
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    lead = ReleaseLead(
+        manufacturer="Casio", brand="Casio", announcement_title="old", source_id="casio_intl_news",
+        announcement_date="not a real date, matches real Casio free-text format",
+        announcement_url="https://example.test/old", source_region="INTL",
+    )
+    assert pipeline._stale_official_announcement(lead) is None
+
+
 # --- Timezone / backoff regression tests -----------------------------------
 # Soak defect: SourceComponentState.backoff_until is declared DateTime(timezone=True)
 # but SQLite does not actually preserve tz offsets, so values reloaded from the

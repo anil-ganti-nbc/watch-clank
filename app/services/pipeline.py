@@ -1170,7 +1170,9 @@ class PipelineService:
 
         if notify and editorial_eligible:
             notifier = DiscordNotifier(settings)
-            threshold = settings.discord_experimental_min_score if experimental else 100.0
+            threshold = (
+                settings.discord_experimental_min_score if experimental else settings.discord_official_min_score
+            )
             if notifier.editorial_enabled and scored.score >= threshold:
                 text = format_alert(
                     manufacturer=watch.manufacturer,
@@ -1286,7 +1288,9 @@ class PipelineService:
         if notify:
             settings = get_settings()
             notifier = DiscordNotifier(settings)
-            threshold = settings.discord_experimental_min_score if experimental else 100.0
+            threshold = (
+                settings.discord_experimental_min_score if experimental else settings.discord_official_min_score
+            )
             if notifier.editorial_enabled and scored.score >= threshold:
                 text = format_alert(
                     manufacturer=watch.manufacturer,
@@ -1513,8 +1517,29 @@ class PipelineService:
         skip_lock: bool = False,
         include_catalog: bool = True,
         news_index_html: bytes | None = None,
+        emit_events: bool = True,
     ) -> CollectorRun:
-        """Run accessible official Casio sources + optional catalog enrichment."""
+        """Run accessible official Casio sources + optional catalog enrichment.
+
+        emit_events (added 2026-08-15, see
+        ai/handoff/INCIDENT_SILENT_SCHEDULED_NOTIFICATIONS.md): this is the
+        production entrypoint for both the manual `--live` and scheduled
+        `--scheduled` CLI paths (scripts/run_pipeline.py::run_live_or_scheduled
+        calls this identically either way -- there is no separate "scheduler"
+        code path to keep in sync). Defaults True, matching the same
+        established contract run_brand_news_pipeline/
+        run_product_observation_pipeline already use for every other
+        production lane: real Event creation and Discord-eligibility on
+        real production runs, with the pre-existing epoch-baseline check
+        inside _record_watch_event/_record_product_transition (unrelated to
+        this parameter) remaining the actual protection against a historical
+        backlog being misclassified as news. Before this change, this
+        function never passed emit_events to process_news_announcement/
+        process_fetch_result at all, so both silently took their own
+        emit_events=False default -- Casio's production path could
+        discover a genuinely new watch and never create an Event for it,
+        regardless of Discord configuration.
+        """
         from app.collectors.casio_intl_news import (
             COLLECTOR_ID as NEWS_ID,
         )
@@ -1589,6 +1614,8 @@ class PipelineService:
                     discovered_meta=meta_by_url.get(fr.url),
                     collector_id=NEWS_ID,
                     collector_version=NEWS_VER,
+                    emit_events=emit_events,
+                    notify=emit_events,
                 )
                 if out["success"]:
                     parsed += 1
@@ -1624,7 +1651,9 @@ class PipelineService:
                             if not fr.success:
                                 failures += 1
                                 continue
-                            out = self.process_fetch_result(fr, run_id=run.id)
+                            out = self.process_fetch_result(
+                                fr, run_id=run.id, emit_events=emit_events, notify=emit_events
+                            )
                             if out["success"]:
                                 parsed += 1
                                 if out.get("new_watch"):

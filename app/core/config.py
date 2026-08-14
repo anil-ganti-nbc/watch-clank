@@ -50,6 +50,16 @@ class Settings(BaseSettings):
     # Deliberately low for the experimental lane per Sprint 2: we want to see
     # plausible opportunities during tuning, not filter them out.
     discord_experimental_min_score: float = Field(default=0.0)
+    # Minimum score (0-100) for a non-experimental (official production,
+    # e.g. Casio) Event to alert. Previously a hardcoded 100.0 literal at
+    # both call sites -- mathematically unreachable (score_event's real
+    # maximum for NEW_REFERENCE/NEW_REGION is 90), so the official lane
+    # could never alert regardless of Discord configuration. 50.0 matches
+    # score_event's own HIGH-confidence cutoff: only strong, well-evidenced
+    # official events alert, distinct from the experimental lane's
+    # deliberately permissive "alert on everything during tuning" policy --
+    # see ai/handoff/INCIDENT_SILENT_SCHEDULED_NOTIFICATIONS.md.
+    discord_official_min_score: float = Field(default=50.0)
     # Minimum SpecialistLead.confidence (0-100) to send a Layer B
     # early-warning Discord alert. Sprint 6.
     discord_specialist_min_confidence: float = Field(default=40.0)
