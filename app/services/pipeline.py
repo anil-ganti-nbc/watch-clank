@@ -1923,6 +1923,16 @@ class PipelineService:
         brand joining an already-baselined epoch -- see _epoch_fields.
         """
         if not self._PRODUCT_REGISTRY:
+            from app.collectors.casio_uk_sitemap import (
+                COLLECTOR_ID as CASIO_UK_ID,
+            )
+            from app.collectors.casio_uk_sitemap import (
+                COLLECTOR_VERSION as CASIO_UK_VER,
+            )
+            from app.collectors.casio_uk_sitemap import (
+                REGION as CASIO_UK_REGION,
+            )
+            from app.collectors.casio_uk_sitemap import CasioUKSitemapCollector
             from app.collectors.citizen_de_products import (
                 COLLECTOR_ID as CITIZEN_DE_PROD_ID,
             )
@@ -1944,6 +1954,18 @@ class PipelineService:
             )
             from app.collectors.citizen_products import (
                 CitizenProductsCollector,
+            )
+            from app.collectors.seiko_jp_products import (
+                COLLECTOR_ID as SEIKO_JP_PROD_ID,
+            )
+            from app.collectors.seiko_jp_products import (
+                COLLECTOR_VERSION as SEIKO_JP_PROD_VER,
+            )
+            from app.collectors.seiko_jp_products import (
+                REGION as SEIKO_JP_PROD_REGION,
+            )
+            from app.collectors.seiko_jp_products import (
+                SeikoJapanProductsCollector,
             )
             from app.collectors.seiko_products import (
                 COLLECTOR_ID as SEIKO_PROD_ID,
@@ -1969,13 +1991,25 @@ class PipelineService:
             from app.collectors.timex_products import (
                 TimexProductsCollector,
             )
+            from app.parsers.casio_uk_sitemap import parse_casio_uk_sitemap_item
             from app.parsers.citizen_de_products import parse_citizen_de_product_html
             from app.parsers.citizen_products import parse_citizen_search_hit
+            from app.parsers.seiko_jp_products import parse_seiko_jp_product_json
             from app.parsers.seiko_products import parse_seiko_product_json
             from app.parsers.timex_products import parse_timex_product_json
 
             self._PRODUCT_REGISTRY.update(
                 {
+                    "casio_uk": {
+                        "collector_cls": CasioUKSitemapCollector,
+                        "collector_id": CASIO_UK_ID,
+                        "collector_version": CASIO_UK_VER,
+                        "parse_fn": parse_casio_uk_sitemap_item,
+                        "default_region": CASIO_UK_REGION,
+                        "offline_kwarg": "sitemap_payload",
+                        "default_max_items": 300,
+                        "known_urls_from_observations": True,
+                    },
                     "citizen": {
                         "collector_cls": CitizenProductsCollector,
                         "collector_id": CITIZEN_PROD_ID,
@@ -2004,6 +2038,16 @@ class PipelineService:
                         "default_region": SEIKO_PROD_REGION,
                         "offline_kwarg": "listing_pages",
                         "default_max_items": 300,
+                    },
+                    "seiko_jp": {
+                        "collector_cls": SeikoJapanProductsCollector,
+                        "collector_id": SEIKO_JP_PROD_ID,
+                        "collector_version": SEIKO_JP_PROD_VER,
+                        "parse_fn": parse_seiko_jp_product_json,
+                        "default_region": SEIKO_JP_PROD_REGION,
+                        "offline_kwarg": "listing_pages",
+                        "default_max_items": 300,
+                        "known_urls_from_observations": True,
                     },
                     "timex": {
                         "collector_cls": TimexProductsCollector,

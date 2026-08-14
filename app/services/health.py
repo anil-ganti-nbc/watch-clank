@@ -27,11 +27,13 @@ from app.models import CollectorRun, Event, SourceObservation, SpecialistLead, W
 # NEVER_RUN instead of silently not appearing.
 KNOWN_COLLECTORS = [
     "casio_multi",
+    "casio_uk_sitemap",
     "citizen_news",
     "citizen_products",
     "citizen_de_products",
     "seiko_jp_news",
     "seiko_products",
+    "seiko_jp_products",
     "casioblog_rss",
     "gcentral_rss",
     "plus9time_rss",
@@ -53,11 +55,13 @@ SUCCESS_STATUSES = {"SUCCESS", "PARTIAL", "ZERO_ITEMS"}
 # WARNING even if its most recent run technically succeeded a long time ago.
 EXPECTED_CADENCE_MINUTES = {
     "casio_multi": 90,
+    "casio_uk_sitemap": 720,
     "citizen_news": 90,
     "citizen_products": 360,
     "citizen_de_products": 720,
     "seiko_jp_news": 90,
     "seiko_products": 360,
+    "seiko_jp_products": 360,
     "casioblog_rss": 45,
     "gcentral_rss": 45,
     "plus9time_rss": 360,

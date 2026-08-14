@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL Seiko Japan product lane every 6 hours
+
+[Timer]
+# store.seikowatches.com, confirmed live 2026-08-14 NOT geo-blocked from the
+# Hetzner cloud vantage point (see ai/handoff/SEIKO_JP_COLLECTOR.md) --
+# same cadence rationale as seiko-products.timer.
+OnBootSec=20min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

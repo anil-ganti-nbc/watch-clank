@@ -2169,6 +2169,162 @@ def test_seiko_product_parser_rejects_non_watch_product_type():
     assert result.success is False
 
 
+def test_seiko_jp_products_collector_paginates_and_terminates_on_empty_page():
+    """Reconnaissance regression: store.seikowatches.com/products.json,
+    real capture 2026-08-14 from the Hetzner cloud vantage point -- HTTP
+    200, not geo-blocked, confirmed live in ai/handoff/SEIKO_JP_COLLECTOR.md."""
+    from app.collectors.seiko_jp_products import SeikoJapanProductsCollector
+
+    page1 = (FIXTURES / "seiko_jp_products_page1.json").read_bytes()
+    empty = (FIXTURES / "seiko_jp_products_page_empty.json").read_bytes()
+    result = SeikoJapanProductsCollector().run(listing_pages=[page1, empty])
+    assert result.metadata["component_status"] == "SUCCESS"
+    refs = {i.reference_hint for i in result.discovered}
+    assert {"HBC008J", "HBC009J", "HCC011J", "HCC005J"} <= refs
+
+
+def test_seiko_jp_product_parser_extracts_hbc008j_real_captured_fields():
+    """Mandatory Hall-of-Shame regression specimen (Case 12): HBC008J,
+    real Alpinist Mechanical GMT preorder, JPY 155,100 -- matches the
+    Notebookcheck-reported price exactly."""
+    import json
+
+    from app.parsers.seiko_jp_products import parse_seiko_jp_product_json
+
+    data = json.loads((FIXTURES / "seiko_jp_products_page1.json").read_bytes())
+    product = next(p for p in data["products"] if p["handle"] == "hbc008j")
+    result = parse_seiko_jp_product_json(product, source_url="https://store.seikowatches.com/products/hbc008j")
+    assert result.success
+    w = result.watches[0]
+    assert w.reference_raw == "HBC008J"
+    assert w.manufacturer == "Seiko" and w.brand == "Seiko"
+    assert w.price == 155100.0
+    assert w.currency == "JPY"
+    assert w.availability_status == "AVAILABLE"
+    assert w.extra_specs["preorder_tag_present"] is True
+
+
+def test_seiko_jp_product_parser_extracts_hbc009j_real_captured_fields():
+    """Second mandatory Hall-of-Shame regression specimen (Case 12)."""
+    import json
+
+    from app.parsers.seiko_jp_products import parse_seiko_jp_product_json
+
+    data = json.loads((FIXTURES / "seiko_jp_products_page1.json").read_bytes())
+    product = next(p for p in data["products"] if p["handle"] == "hbc009j")
+    result = parse_seiko_jp_product_json(product, source_url="https://store.seikowatches.com/products/hbc009j")
+    assert result.success
+    w = result.watches[0]
+    assert w.reference_raw == "HBC009J"
+    assert w.price == 155100.0
+    assert w.currency == "JPY"
+    assert w.availability_status == "AVAILABLE"
+
+
+def test_seiko_jp_product_parser_sold_out_fixture():
+    """Real captured example (HCC011J) with variants[0].available == False."""
+    import json
+
+    from app.parsers.seiko_jp_products import parse_seiko_jp_product_json
+
+    data = json.loads((FIXTURES / "seiko_jp_products_page1.json").read_bytes())
+    product = next(p for p in data["products"] if p["handle"] == "hcc011j")
+    result = parse_seiko_jp_product_json(product, source_url="x")
+    assert result.success
+    assert result.watches[0].availability_status == "SOLD_OUT"
+
+
+def test_seiko_jp_products_collector_prioritizes_unknown_urls_under_cap():
+    """Same discovery-cap discipline applied to timex_products.py/
+    citizen_products.py earlier this sprint, built in from day one for a
+    brand-new source rather than reintroducing the bug."""
+    from app.collectors.seiko_jp_products import SeikoJapanProductsCollector
+
+    page1 = (FIXTURES / "seiko_jp_products_page1.json").read_bytes()
+    full = SeikoJapanProductsCollector().run(listing_pages=[page1]).discovered
+    assert len(full) == 4
+
+    new_item = full[-1]
+    known_urls = {i.url for i in full if i.url != new_item.url}
+    capped = SeikoJapanProductsCollector().run(
+        listing_pages=[page1], max_items=1, known_product_urls=known_urls
+    ).discovered
+    assert len(capped) == 1
+    assert capped[0].url == new_item.url
+
+
+def test_seiko_jp_hbc008j_new_watch_creates_new_reference_event(db_session: Session, tmp_settings: Settings):
+    """Hall-of-Shame Case 12 regression: HBC008J's first-ever sighting on a
+    healthy (non-baseline) run must produce real editorial intelligence,
+    exactly like every other product-catalogue source after this sprint's
+    core fix -- not silently absorbed."""
+    import json
+
+    from app.collectors.base import FetchResult
+    from app.models import Event
+    from app.parsers.seiko_jp_products import parse_seiko_jp_product_json
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    data = json.loads((FIXTURES / "seiko_jp_products_page1.json").read_bytes())
+    product = next(p for p in data["products"] if p["handle"] == "hbc008j")
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="seiko_jp_products", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    fr = FetchResult(
+        url="https://store.seikowatches.com/products/hbc008j", success=True, status_code=200,
+        content_type="application/json", payload=json.dumps(product).encode("utf-8"),
+    )
+    out = pipeline.process_fetch_result(
+        fr, run_id=run.id, collector_id="seiko_jp_products", collector_version="0.1.0",
+        parse_fn=parse_seiko_jp_product_json, default_region="JP", emit_events=True,
+    )
+    assert out["success"] and out["new_watch"] is True
+    assert out["product_event"]["event_type"] == "NEW_REFERENCE"
+    event = db_session.query(Event).one()
+    assert event.extra["editorial_eligible"] is True
+
+
+def test_seiko_jp_known_reference_preorder_opening_fires_restock(db_session: Session, tmp_settings: Settings):
+    """Phase 9 preorder-semantics audit: this source's Shopify `available`
+    boolean is binary (orderable vs not) -- there is no distinct PREORDER
+    availability string in the real data (see parser module docstring), so
+    a known reference moving from not-yet-orderable to orderable is
+    represented by the EXISTING SOLD_OUT/RESTOCK machinery, unmodified. No
+    new event type was needed."""
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(manufacturer="Seiko", brand="Seiko", reference_raw="HBC008J", reference_canonical="HBC008J")
+    db_session.add(watch)
+    db_session.flush()
+    not_yet = SourceObservation(
+        watch_id=watch.id, collector_id="seiko_jp_products", collector_version="0.1.0", parser_id="t",
+        parser_version="0", region="JP", source_url="https://x/hbc008j", price=155100.0, currency="JPY",
+        availability_status="SOLD_OUT", overall_confidence=90.0,
+    )
+    db_session.add(not_yet)
+    db_session.commit()
+
+    now_orderable = SourceObservation(
+        watch_id=watch.id, collector_id="seiko_jp_products", collector_version="0.1.0", parser_id="t",
+        parser_version="0", region="JP", source_url="https://x/hbc008j", price=155100.0, currency="JPY",
+        availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(now_orderable)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=now_orderable, is_new_watch=False
+    )
+    assert result["event_type"] == "RESTOCK"
+    assert db_session.scalars(select(Event)).first() is not None
+
+
 def test_seiko_product_pipeline_baseline_then_price_change(db_session: Session, tmp_settings: Settings):
     import json
 
@@ -3681,6 +3837,89 @@ def test_citizen_de_products_force_baseline_then_repeat_is_silent(
     assert repeat.status == "ZERO_ITEMS"
     assert repeat.new_watch_count == 0
     assert db_session.query(SourceObservation).filter_by(collector_id="citizen_de_products").count() == before_count
+
+
+def test_casio_uk_sitemap_discovery_extracts_references_and_lastmod():
+    """UK signal-path research regression (Case 5 F-B100W, Case 8 GD-350S-1):
+    real sitemap capture 2026-08-14 from the Hetzner cloud vantage point --
+    HTTP 200, not Cloudflare-blocked (unlike the product pages themselves)."""
+    from app.collectors.casio_uk_sitemap import CasioUKSitemapCollector
+
+    xml = (FIXTURES / "casio_uk_sitemap.xml").read_bytes()
+    items = CasioUKSitemapCollector().discover_from_sitemap_xml(xml)
+    refs = {i.reference_hint for i in items}
+    assert {"GD-350S-1", "F-B100W-3A", "F-B100W-1A"} <= refs
+    gd350s = next(i for i in items if i.reference_hint == "GD-350S-1")
+    assert gd350s.metadata["lastmod"] == "2026-08-12T15:46:46.821Z"
+    # deduped: BTTF and non-BTTF sitemap sections both list the same refs
+    assert len(refs) == len(items)
+
+
+def test_casio_uk_sitemap_run_prioritizes_unknown_urls_under_cap():
+    from app.collectors.casio_uk_sitemap import CasioUKSitemapCollector
+
+    xml = (FIXTURES / "casio_uk_sitemap.xml").read_bytes()
+    full = CasioUKSitemapCollector().run(sitemap_payload=xml).discovered
+    assert len(full) >= 5
+    new_item = full[-1]
+    known_urls = {i.url for i in full if i.url != new_item.url}
+    capped = CasioUKSitemapCollector().run(sitemap_payload=xml, max_items=1, known_product_urls=known_urls).discovered
+    assert len(capped) == 1
+    assert capped[0].url == new_item.url
+
+
+def test_casio_uk_sitemap_parser_never_fabricates_price_or_availability():
+    from app.parsers.casio_uk_sitemap import parse_casio_uk_sitemap_item
+
+    result = parse_casio_uk_sitemap_item(
+        {"reference": "GD-350S-1", "lastmod": "2026-08-12T15:46:46.821Z"}, source_url="x"
+    )
+    assert result.success
+    w = result.watches[0]
+    assert w.reference_raw == "GD-350S-1"
+    assert w.price is None and w.currency is None and w.availability_status is None
+    assert w.extra_specs["lastmod"] == "2026-08-12T15:46:46.821Z"
+
+
+def test_casio_uk_sitemap_known_gd350s1_from_japan_emits_new_region(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """Mandatory Hall-of-Shame Case 8 regression: GD-350S-1 already known
+    from another Casio source (e.g. casio_multi's JP catalogue/intl news),
+    first observed via the UK sitemap -- must fire NEW_REGION, never a
+    fabricated price/availability event, since none exists in this source."""
+    from app.collectors.base import FetchResult
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GD-350S-1", reference_canonical="GD-350S-1")
+    db_session.add(watch)
+    db_session.flush()
+    db_session.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="casio_multi", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="JP", source_url="https://example.test/jp/gd350s1",
+            price=None, currency=None, availability_status=None, overall_confidence=70.0,
+        )
+    )
+    db_session.commit()
+
+    xml = (FIXTURES / "casio_uk_sitemap.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_uk_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline("casio_uk")
+
+    assert run.status == "SUCCESS"
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REGION")).all()
+    gd_event = next((e for e in events if e.title.startswith("Casio GD-350S-1")), None)
+    assert gd_event is not None
+    assert gd_event.extra["region"] == "UK"
+    assert db_session.scalar(select(Event).where(Event.event_type == "PRICE_CHANGE")) is None
+    assert db_session.scalar(select(Event).where(Event.event_type == "SOLD_OUT")) is None
 
 
 def test_citizen_de_first_normal_listing_of_known_us_reference_emits_new_region(

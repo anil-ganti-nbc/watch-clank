@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Clank EXPERIMENTAL Casio UK sitemap-delta observation
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/watch-clank
+EnvironmentFile=-/opt/watch-clank/.env
+ExecStart=/opt/watch-clank/.venv/bin/python -m scripts.run_pipeline --experimental-product casio_uk
+SuccessExitStatus=0

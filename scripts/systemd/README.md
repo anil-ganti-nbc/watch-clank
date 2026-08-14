@@ -2,7 +2,17 @@
 
 These unit files are **templates to review and adapt**, not a deployment
 this repository performs automatically. Nothing here is installed by any
-script — you must copy, edit the paths, and enable them yourself.
+script — you must copy, edit the paths, and enable them yourself. They
+assume a native `/opt/watch-clank` venv install and root-owned
+`/etc/systemd/system` units.
+
+**If the target host already runs Watch Clank as a Docker container
+against a persistent volume (e.g. Hetzner, where root SSH is intentionally
+disabled) — see `scripts/systemd/docker/README.md` instead.** That path
+generates the equivalent unit set from the same registry these templates
+describe, using `docker run` and user-level (`systemctl --user`) units, no
+root required. This is the real mechanism used for the 2026-08-14 Hetzner
+redeploy — see `ai/handoff/HETZNER_DEPLOYMENT.md`.
 
 ## Files
 
@@ -46,6 +56,18 @@ script — you must copy, edit the paths, and enable them yourself.
   `ai/handoff/TIMEX_MISS_AUTOPSY.md`.
 - `watch-clank-timex-products.service` / `.timer` — EXPERIMENTAL, 6h
   (mirrors Windows task `WatchClank-TimexProducts`).
+- `watch-clank-seiko-jp-products.service` / `.timer` — EXPERIMENTAL, 6h
+  (2026-08-14 sprint). store.seikowatches.com, Seiko's own Japan retail
+  site — confirmed live NOT geo-blocked from the Hetzner cloud vantage
+  point. See `ai/handoff/SEIKO_JP_COLLECTOR.md`.
+- `watch-clank-casio-uk-sitemap.service` / `.timer` — EXPERIMENTAL, 12h
+  sitemap-delta monitor (2026-08-14 sprint). Casio's UK product pages are
+  Cloudflare-blocked, but `www.casio.com/uk/sitemap.xml` is not; this
+  source can only ever produce NEW_REFERENCE/NEW_REGION (no price or
+  availability data exists in a sitemap). See
+  `ai/handoff/UK_SIGNAL_PATH_RESEARCH.md` for why no Citizen UK equivalent
+  was built (Cloudflare-blocked **and** Citizen's robots.txt explicitly
+  disallows ClaudeBot by name).
 
 Each experimental unit is fully independent: distinct
 `collector_id`, distinct lock file (see app/services/run_lock.py), distinct
@@ -82,6 +104,8 @@ sudo systemctl enable --now watch-clank-fratello.timer
 sudo systemctl enable --now watch-clank-watchtime.timer
 sudo systemctl enable --now watch-clank-timex-news.timer
 sudo systemctl enable --now watch-clank-timex-products.timer
+sudo systemctl enable --now watch-clank-seiko-jp-products.timer
+sudo systemctl enable --now watch-clank-casio-uk-sitemap.timer
 ```
 
 To disable any one lane independently: `sudo systemctl disable --now watch-clank-<name>.timer`.
@@ -113,6 +137,8 @@ cd /opt/watch-clank
 .venv/bin/python -m scripts.run_pipeline --experimental-specialist watchtime --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-brand timex --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-product timex --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-product seiko_jp --force-baseline
+.venv/bin/python -m scripts.run_pipeline --experimental-product casio_uk --force-baseline
 ```
 
 Then run every one of the above a second time *without* `--force-baseline`

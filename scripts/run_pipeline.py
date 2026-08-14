@@ -295,7 +295,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--experimental-product",
-        choices=["citizen", "citizen_de", "seiko", "timex"],
+        choices=["casio_uk", "citizen", "citizen_de", "seiko", "seiko_jp", "timex"],
         default=None,
         help="Run an EXPERIMENTAL product/catalogue-observation lane instead of Casio",
     )

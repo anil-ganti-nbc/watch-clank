@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Watch Clank's EXPERIMENTAL Casio UK sitemap-delta lane every 12 hours
+
+[Timer]
+# Sitemap-only, no per-item price/availability fetch (the product pages
+# are Cloudflare-blocked -- see ai/handoff/UK_SIGNAL_PATH_RESEARCH.md).
+# Same conservative cadence as citizen-de-products' sitemap-delta lane.
+OnBootSec=25min
+OnUnitActiveSec=12h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

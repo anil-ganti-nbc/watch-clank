@@ -33,6 +33,10 @@ class CollectorControl:
 
 _CONTROLS: dict[str, CollectorControl] = {
     "casio_multi": CollectorControl("casio_multi", "Casio (intl news + Japan catalogue)", "OFFICIAL", ()),
+    "casio_uk_sitemap": CollectorControl(
+        "casio_uk_sitemap", "Casio products (UK sitemap-delta, no price/availability)", "OFFICIAL",
+        ("--experimental-product", "casio_uk"),
+    ),
     "citizen_news": CollectorControl("citizen_news", "Citizen news", "OFFICIAL", ("--experimental-brand", "citizen")),
     "citizen_products": CollectorControl(
         "citizen_products", "Citizen products (US)", "OFFICIAL", ("--experimental-product", "citizen")
@@ -43,6 +47,9 @@ _CONTROLS: dict[str, CollectorControl] = {
     "seiko_jp_news": CollectorControl("seiko_jp_news", "Seiko news", "OFFICIAL", ("--experimental-brand", "seiko")),
     "seiko_products": CollectorControl(
         "seiko_products", "Seiko products", "OFFICIAL", ("--experimental-product", "seiko")
+    ),
+    "seiko_jp_products": CollectorControl(
+        "seiko_jp_products", "Seiko products (Japan)", "OFFICIAL", ("--experimental-product", "seiko_jp")
     ),
     "timex_news": CollectorControl("timex_news", "Timex news", "OFFICIAL", ("--experimental-brand", "timex")),
     "timex_products": CollectorControl(
