@@ -1,6 +1,6 @@
 # Watch Clank — Development Handoff
 **Last updated:** 2026-08-15
-**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), FOUR official brands (Casio/Citizen/Seiko/Timex, Sprint 9), with editorial-freshness semantics hardened at the Layer B specialist layer (Sprint 8), the Layer A official-news layer (Sprint 10, Timex-scoped), and Timex's own SKU-extraction/reference-resolution path (Sprint 11, see below). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. Between Sprint 11 and Sprint 12 (undocumented at the time, reconstructed 2026-08-14 — see that day's checkpoint) regional-commercialisation `NEW_REGION` detection, a Citizen Germany sitemap-delta collector, four new specialist RSS sources (Monochrome/Deployant/Fratello/WatchTime), Discord notification-authority honoring, and availability-editorial-eligibility tightening (SOLD_OUT/RESTOCK noise gating) all shipped. TEN Windows-scheduled tasks total as of Sprint 9-11 (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled as of last verification) — Windows itself has not been reachable by any session since before Sprint 12 (away until 2026-08-18). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED); official Timex news additionally has a dedicated publication-age gate at the Event-creation layer (`_ISO_TIMESTAMP_NEWS_SOURCES`, Sprint 10) since `ReleaseLead` itself carries no freshness column — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`, `ai/handoff/TIMEX_FRESHNESS_AUDIT.md`, and `ai/handoff/TIMEX_MISS_AUTOPSY.md` (Sprint 11). Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere this session could see). Cloud deployment infra exists; Sprint 12 discovered (read-only) that a `watch-clank` instance is live-soaking on Hetzner on a stale pre-Sprint-5 commit (`fcb5e918`) — **confirmed still true and still running on that same stale commit as of 2026-08-14** (see this day's checkpoint; not redeployed this sprint, deliberately — see `ai/handoff/REMEDIATION_PLAN.md`). **2026-08-14 (Hall of Shame forensic sprint):** reconstructed 12 real Notebookcheck competitive-miss cases, found and fixed the single highest-leverage architectural gap — product-catalogue collectors (Citizen/Seiko/Timex) could create a `Watch` row for a genuinely new SKU but had **no path to ever emit an Event for it**, plus a silent pagination cap that excluded ~81% of Timex's and ~35% of Citizen's real catalogue from every non-baseline run. Both fixed; full writeup in `ai/handoff/WATCH_CLANK_HALL_OF_SHAME_AUTOPSY.md`, `ai/handoff/REGIONAL_COVERAGE_MATRIX.md`, `ai/handoff/REMEDIATION_PLAN.md`. **2026-08-14/15 (post-Hall-of-Shame implementation sprint):** all three of that sprint's top follow-ups executed. (1) **Hetzner redeployed** to current GitHub HEAD (`d0ee4e9`) — real `git clone` + `docker build` on the host, migrated `003_release_leads`→`007_specialist_lead_editorial_freshness` in place (22 pre-existing watches preserved, verified backup taken first), every new-to-this-DB source force-baselined then repeat-verified 0/0, and a **real, verified, unattended `systemctl --user` deployment** installed (17 timers, generated from the collector registry, not hand-written) — no root was available or used; see `ai/handoff/HETZNER_DEPLOYMENT.md`. (2) **Seiko Japan retail-store collector built** (`seiko_jp_products`) — live-confirmed NOT geo-blocked, resolving Hall of Shame Case 12; see `ai/handoff/SEIKO_JP_COLLECTOR.md`. (3) **Casio UK sitemap-delta collector built** (`casio_uk_sitemap`) — the product pages remain Cloudflare-blocked, but the sitemap isn't and carries real dated evidence for both Case 5 and Case 8; **Citizen UK remains genuinely blocked** (Cloudflare *and* an explicit robots.txt disallow naming ClaudeBot) and was left undone, honestly documented rather than forced; see `ai/handoff/UK_SIGNAL_PATH_RESEARCH.md`. Now 17 registered collectors total (was 15). 232 tests (was 221), Ruff clean.
+**Current phase:** EPOCH 1 (started 2026-08-11T13:11:25Z), FOUR official brands (Casio/Citizen/Seiko/Timex, Sprint 9), with editorial-freshness semantics hardened at the Layer B specialist layer (Sprint 8), the Layer A official-news layer (Sprint 10, Timex-scoped), and Timex's own SKU-extraction/reference-resolution path (Sprint 11, see below). Operating from a fresh operational database after a controlled reset (Sprint 7) — the impromptu Sprint 1-6 production soak is preserved as an archive, not deleted. Between Sprint 11 and Sprint 12 (undocumented at the time, reconstructed 2026-08-14 — see that day's checkpoint) regional-commercialisation `NEW_REGION` detection, a Citizen Germany sitemap-delta collector, four new specialist RSS sources (Monochrome/Deployant/Fratello/WatchTime), Discord notification-authority honoring, and availability-editorial-eligibility tightening (SOLD_OUT/RESTOCK noise gating) all shipped. TEN Windows-scheduled tasks total as of Sprint 9-11 (Casio + Citizen news/products + Seiko news/products + Timex news/products + CASIOBLOG + G-Central + Plus9Time, all Ready/Enabled as of last verification) — Windows itself has not been reachable by any session since before Sprint 12 (away until 2026-08-18). Every specialist_leads row carries an `editorial_freshness` classification (FRESH/STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED); official Timex news additionally has a dedicated publication-age gate at the Event-creation layer (`_ISO_TIMESTAMP_NEWS_SOURCES`, Sprint 10) since `ReleaseLead` itself carries no freshness column — see `ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md`, `ai/handoff/TIMEX_FRESHNESS_AUDIT.md`, and `ai/handoff/TIMEX_MISS_AUTOPSY.md` (Sprint 11). Layer B early-warning system with family-aware correlation + Discord editorial/health alerts wired (still inert — no webhook URLs configured anywhere this session could see). Cloud deployment infra exists; Sprint 12 discovered (read-only) that a `watch-clank` instance is live-soaking on Hetzner on a stale pre-Sprint-5 commit (`fcb5e918`) — **confirmed still true and still running on that same stale commit as of 2026-08-14** (see this day's checkpoint; not redeployed this sprint, deliberately — see `ai/handoff/REMEDIATION_PLAN.md`). **2026-08-14 (Hall of Shame forensic sprint):** reconstructed 12 real Notebookcheck competitive-miss cases, found and fixed the single highest-leverage architectural gap — product-catalogue collectors (Citizen/Seiko/Timex) could create a `Watch` row for a genuinely new SKU but had **no path to ever emit an Event for it**, plus a silent pagination cap that excluded ~81% of Timex's and ~35% of Citizen's real catalogue from every non-baseline run. Both fixed; full writeup in `ai/handoff/WATCH_CLANK_HALL_OF_SHAME_AUTOPSY.md`, `ai/handoff/REGIONAL_COVERAGE_MATRIX.md`, `ai/handoff/REMEDIATION_PLAN.md`. **2026-08-14/15 (post-Hall-of-Shame implementation sprint):** all three of that sprint's top follow-ups executed. (1) **Hetzner redeployed** to current GitHub HEAD (`d0ee4e9`) — real `git clone` + `docker build` on the host, migrated `003_release_leads`→`007_specialist_lead_editorial_freshness` in place (22 pre-existing watches preserved, verified backup taken first), every new-to-this-DB source force-baselined then repeat-verified 0/0, and a **real, verified, unattended `systemctl --user` deployment** installed (17 timers, generated from the collector registry, not hand-written) — no root was available or used; see `ai/handoff/HETZNER_DEPLOYMENT.md`. (2) **Seiko Japan retail-store collector built** (`seiko_jp_products`) — live-confirmed NOT geo-blocked, resolving Hall of Shame Case 12; see `ai/handoff/SEIKO_JP_COLLECTOR.md`. (3) **Casio UK sitemap-delta collector built** (`casio_uk_sitemap`) — the product pages remain Cloudflare-blocked, but the sitemap isn't and carries real dated evidence for both Case 5 and Case 8; **Citizen UK remains genuinely blocked** (Cloudflare *and* an explicit robots.txt disallow naming ClaudeBot) and was left undone, honestly documented rather than forced; see `ai/handoff/UK_SIGNAL_PATH_RESEARCH.md`. Now 17 registered collectors total (was 15). 232 tests (was 221), Ruff clean. **2026-08-15 (emergency notification-path remediation):** a Discord-authority audit found `casio_multi` — the original, most mature official source — could **never** create an `Event`, on either its manual or scheduled path (they're the same function call; there is no scheduler-specific code anywhere in this repo), regardless of Discord configuration. Root cause: `run_multi_source_pipeline` never passed `emit_events`/`notify` to its two internal call sites, so both silently took their own `False` default — unlike `run_brand_news_pipeline`/`run_product_observation_pipeline`/`run_publication_pipeline`, all three of which were already correct (audited explicitly, not assumed). Fixed by giving Casio's production path the same `emit_events: bool = True` contract the other three already use. A second, deeper defect found while testing the first fix: the non-experimental notify threshold was a hardcoded `100.0`, mathematically unreachable (`score_event`'s real ceiling is 90) — Discord could never have fired for the official lane even after the first fix. Replaced with a new, real `DISCORD_OFFICIAL_MIN_SCORE` setting (default 50). A third gap (the catalogue-enrichment call site missed in the first pass) was caught by its own regression test before ever reaching Hetzner. Full incident report, Phase-1 audit matrix of all 17 collectors, and the read-only silent-period audit (**nothing was actually lost** — 0 Events and 0 `FRESH`-eligible SpecialistLeads existed on Hetzner during the entire silent period): `ai/handoff/INCIDENT_SILENT_SCHEDULED_NOTIFICATIONS.md`, `ai/handoff/HETZNER_SILENT_PERIOD_AUDIT.md`. Deployed to Hetzner from GitHub (`c81ebed`), real Discord webhooks configured (`~/.config/watch-clank/secrets.env`, machine-local, never committed), one clearly-labeled test message delivered successfully to each of the editorial and health channels, verified via the real systemd execution path. **Hetzner is now the actual, live, configured Discord authority** for both editorial and health alerts. 238 tests (was 232), Ruff clean.
 **Sprint priority note (record, don't erase history):** Sprint 1 deliberately held Stage 2 during soak. Sprint 2 was an explicit owner-directed priority change — recall over precision for the experimental lane, journalist is the verification layer — executed 2026-08-11, 3 days into the original soak hold. That original soak-hold reasoning was correct at the time; this is a documented pivot, not a retraction.
 **Next developer:** Claude
 **Primary environment:** Windows 10/11, local-first (also now macOS-portable — see `mac/` and `mac_dev_environment_setup` conventions; core application code is unchanged by that, only launcher scripts were added)
@@ -14,6 +14,143 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 ---
 
 # Checkpoint log
+
+## 2026-08-15 — Emergency notification-path remediation: casio_multi fix + Hetzner Discord authority live
+
+**Starting point verified:** HEAD `12e8d3e`, 232 tests passing, Ruff clean
+— the prior sprint's own end state, plus a same-day Discord-authority
+audit (chat-only, no code changes) that first surfaced this incident.
+
+**Root cause, precisely** (full trace: `ai/handoff/INCIDENT_SILENT_SCHEDULED_NOTIFICATIONS.md`):
+`scripts/run_pipeline.py::run_live_or_scheduled` is the single entrypoint
+for both `--live` and `--scheduled` Casio runs — `scheduled` is a log
+field only, both branches call the identical
+`pipeline.run_multi_source_pipeline(max_items=max_items)`. That function
+had no `emit_events`/`notify` parameter at all; its two internal calls to
+`process_news_announcement`/`process_fetch_result` omitted the argument
+entirely, silently taking each function's own `emit_events=False` default.
+Result: **zero `Event` rows were ever possible from Casio's production
+path**, on either invocation mode, since the function existed (Sprint 1).
+This was a deliberate scope decision at the time (don't destabilize the
+one working source while Discord/scoring infrastructure was unproven on
+the "experimental" brands) that quietly became a real bug once every other
+brand matured into a real, scheduled, systemd-timer production source
+with correct event/notify wiring — Casio was simply never brought along.
+
+**Audited every other scheduled entrypoint before touching anything**
+(matrix in the incident doc): `run_brand_news_pipeline`
+(citizen_news/seiko_jp_news/timex_news), `run_product_observation_pipeline`
+(all 6 product lanes), and `run_publication_pipeline` (all 7 specialist
+RSS lanes) were all **already correct** — `emit_events=True`/`notify=
+emit_events` by default, or (for specialist leads)
+`SpecialistLeadService.notify_new_lead`/`notify_correlation` called
+unconditionally per lead with proper internal gating (baseline, freshness,
+confidence, dedup, webhook). **Exactly one of 17 registered collectors was
+affected.**
+
+**Fix:** `run_multi_source_pipeline` gained `emit_events: bool = True`,
+threaded to both its internal call sites — the same contract every other
+production pipeline already used. No new "scheduler intelligence logic,"
+no enum/mode invented, `scripts/run_pipeline.py` untouched (manual and
+scheduled inherit the new default identically, preserving the property
+that they can never diverge for this collector).
+
+**Second defect, found while testing the first fix:** the notify
+threshold for non-experimental (official) events was a hardcoded `100.0`
+in both `_record_watch_event` and `_persist_product_event` — but
+`score_event`'s real maximum for `NEW_REFERENCE`/`NEW_REGION` is 90 (all
+five bonus conditions simultaneously, essentially never). **Discord could
+never have fired for the official lane even with `emit_events` fixed.**
+Replaced both literals with a new `Settings.discord_official_min_score`
+(default `50.0`, matching `score_event`'s own HIGH-confidence cutoff —
+deliberately stricter than the experimental lane's permissive
+`discord_experimental_min_score=0`). Documented in `.env.example`.
+
+**Third gap, caught by its own regression test before deployment:** the
+first pass of the fix only updated the news-announcement call site; the
+catalogue-enrichment (`process_fetch_result`) call site was still missing
+`emit_events`/`notify`. `test_scheduled_casio_catalog_known_watch_new_
+region_creates_event_and_notifies` failed (0 Events where 1 was expected)
+immediately, fixed on the spot.
+
+**Tests:** 232 → **238 passed** (6 new: Phase 4-A/B/D/E/F/G from the
+remediation brief — scheduled new product creates Event + notifies;
+scheduled catalogue new-region creates Event + notifies; active epoch
+baseline stays silent; Casio's lack of an ISO-timestamp freshness gate
+stated honestly rather than "fixed," since freshness semantics were
+explicitly out of scope this sprint; notifier failure never fails the
+run; no webhook never crashes). Phase 4-C (specialist lead) was already
+covered by pre-existing tests — not duplicated. Ruff clean throughout.
+
+**Silent-period audit** (`ai/handoff/HETZNER_SILENT_PERIOD_AUDIT.md`,
+read-only, no historical row touched): **0 `Event` rows ever existed on
+Hetzner to lose** (nothing was ever eligible, since nothing was ever
+created), and **0 `SpecialistLead` rows were ever `FRESH`-eligible**
+during the entire period — every lead present was either the deliberate
+force-baseline set (9) or genuinely old backlog correctly excluded by the
+pre-existing Sprint 8 freshness gate (50, sampled 2026-07-10 to
+2026-08-08, all discovered for the first time the same day their sources
+were onboarded). **Nothing useful actually clanked into the void** — the
+cost of both defects was structural/prospective, not a backlog of real
+missed stories.
+
+**Deployed to Hetzner from GitHub, no manual file copying:** `git pull`
+on the existing clone (`c474e75`→`c81ebed`), rebuilt the image
+(`watch-clank:c81ebed`, label-verified), updated
+`~/.config/watch-clank/docker.env`'s image tag (no systemd unit changes
+needed — units already reference the tag indirectly). Triggered one real
+`casio_multi` run via the actual installed systemd service before and
+after configuring secrets — clean both times, 0 new leads/watches (nothing
+genuinely new existed in the news feed at the time; per this sprint's own
+acceptance criterion, zero notifications when nothing is new **is**
+correct — the test is that the path is *capable* of notifying, which the
+regression suite proves directly).
+
+**Discord secrets configured** (owner-supplied, two real webhook URLs,
+correctly disambiguated via an explicit clarifying question before writing
+anything): `~/.config/watch-clank/secrets.env` on Hetzner, mode `600`,
+machine-local, never printed, logged, committed, or included in any
+tracked systemd unit. `EDITORIAL_NOTIFICATIONS_ENABLED=true` set
+alongside. Verified via the real `-e VARNAME` pass-through mechanism the
+installed systemd units actually use (not a shortcut `--env-file`):
+`editorial_webhook_configured=True`, `health_webhook_configured=True`,
+`editorial_enabled=True`, `health_enabled=True`,
+`discord_official_min_score=50.0`. **One clearly-labeled configuration-
+test message delivered successfully to each channel** (editorial + health,
+both explicitly say "CONFIGURATION TEST... not a real watch alert/ops
+failure") — both returned delivery success. No fake DB `Event` was
+created for this; the messages were sent directly via `DiscordNotifier`,
+bypassing persistence entirely, per the explicit instruction not to
+manufacture production events.
+
+**No duplicate-sender risk:** the still-unlocated old invisible
+`casio_multi` invocation mechanism (root's crontab, most likely — still
+never found, no root access attempted) runs image `watch-clank:fcb5e91`,
+built **2026-08-10**, which **predates Sprint 2** (2026-08-11, when the
+Discord notification system was first written) entirely — that image's
+code cannot send a Discord message under any configuration, because the
+code to do so doesn't exist in that build. Hetzner is now unambiguously
+the sole environment capable of sending, and is now actually configured
+to do so.
+
+**Windows:** unreachable this session, same as every session since before
+the Hall of Shame sprint (away until 2026-08-18) — reported honestly as
+NOT VERIFIED, not assumed. Once reachable, its own editorial webhook (if
+any was ever configured there — never confirmed either way) must be
+disabled/unconfigured so Hetzner remains the sole authoritative sender.
+
+**Final health (Hetzner):** all 17 sources HEALTHY, schema at head, DB
+integrity `ok`, 0 stale `RUNNING` rows, 0 active locks, `total events: 0`
+(no flood from any of this sprint's verification runs), deployed image
+label matches GitHub HEAD (`c81ebedbae27b85381cb9b6372220dfd84ab04e2`)
+exactly.
+
+**Not done, deliberately, per explicit scope constraints:** no new
+sources, no new brands, no freshness-semantics changes (Casio's own lack
+of an ISO-timestamp gate was documented, not fixed — matching Citizen/
+Seiko's identical, already-accepted exposure), no Citizen UK work, no
+Reddit, no UI redesign, no SSH/fail2ban changes, no SQLite sync, no replay
+of historical leads/events into Discord.
 
 ## 2026-08-14/15 — Post-Hall-of-Shame implementation sprint: Hetzner redeploy, Seiko JP collector, UK research
 
