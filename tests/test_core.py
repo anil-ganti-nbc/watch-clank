@@ -1539,9 +1539,13 @@ def _process_citizen_product_fixture(pipeline, run_id, fixture_name: str, url: s
     )
 
 
-def test_citizen_product_baseline_observation_creates_no_event(db_session: Session, tmp_settings: Settings):
-    """Sprint 3 example Run 1: first observation of a reference is a
-    baseline, not an event."""
+def test_citizen_product_baseline_observation_creates_new_reference_event(db_session: Session, tmp_settings: Settings):
+    """Hall-of-shame remediation: a genuinely first-ever product-catalogue
+    sighting of a reference is real new-product discovery evidence and must
+    produce NEW_REFERENCE (outside an active epoch/force_baseline — see
+    test_new_watch_from_catalogue_silent_during_epoch_baseline for that
+    guard). Previously this was an unconditional no-op ("baseline_new_watch"),
+    the single biggest product-catalogue discovery gap found this sprint."""
     from app.models import Event, SourceObservation, Watch
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
@@ -1553,7 +1557,7 @@ def test_citizen_product_baseline_observation_creates_no_event(db_session: Sessi
 
     out = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
     assert out["success"] and out["new_watch"] is True
-    assert out["product_event"]["event_type"] is None
+    assert out["product_event"]["event_type"] == "NEW_REFERENCE"
 
     watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Citizen")).all()
     assert len(watches) == 1
@@ -1569,7 +1573,8 @@ def test_citizen_product_baseline_observation_creates_no_event(db_session: Sessi
     assert obs[0].price == 1225.0 and obs[0].currency == "USD" and obs[0].availability_status == "AVAILABLE"
     assert obs[0].region == "US"
 
-    assert db_session.scalars(select(Event)).first() is None
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1 and events[0].event_type == "NEW_REFERENCE"
 
 
 def test_citizen_product_repeat_identical_fetch_creates_no_duplicate_event(db_session: Session, tmp_settings: Settings):
@@ -1589,9 +1594,9 @@ def test_citizen_product_repeat_identical_fetch_creates_no_duplicate_event(db_se
     out2 = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
     assert out1["new_watch"] is True
     assert out2["new_watch"] is False
-    assert out1["product_event"]["event_type"] is None
+    assert out1["product_event"]["event_type"] == "NEW_REFERENCE"  # first-ever sighting is real discovery
     assert out2["product_event"]["event_type"] is None  # identical price+availability -> no transition
-    assert db_session.scalars(select(Event)).first() is None
+    assert len(db_session.scalars(select(Event)).all()) == 1
 
 
 def test_known_citizen_first_product_listing_in_new_region_is_regional_intelligence(
@@ -1749,9 +1754,11 @@ def test_citizen_product_price_transition_produces_price_change(db_session: Sess
     assert out2["product_event"]["event_type"] == "PRICE_CHANGE"
 
     events = db_session.scalars(select(Event)).all()
-    assert len(events) == 1
-    assert events[0].event_type == "PRICE_CHANGE"
-    assert any("980" in r and "1225" in r for r in events[0].extra["reasons"])
+    # First observation now also fires its own NEW_REFERENCE (see
+    # test_citizen_product_baseline_observation_creates_new_reference_event).
+    assert sorted(e.event_type for e in events) == ["NEW_REFERENCE", "PRICE_CHANGE"]
+    price_event = next(e for e in events if e.event_type == "PRICE_CHANGE")
+    assert any("980" in r and "1225" in r for r in price_event.extra["reasons"])
 
 
 def test_citizen_product_availability_transitions_sold_out_then_restock(db_session: Session, tmp_settings: Settings):
@@ -1772,9 +1779,12 @@ def test_citizen_product_availability_transitions_sold_out_then_restock(db_sessi
     assert restock["product_event"]["event_type"] == "RESTOCK"
 
     events = db_session.scalars(select(Event)).all()
-    assert sorted(e.event_type for e in events) == ["RESTOCK", "SOLD_OUT"]
-    assert all(e.extra["editorial_eligible"] is False for e in events)
-    assert all("EDITORIAL HIDDEN" in e.extra["editorial_eligibility_reasons"][0] for e in events)
+    # First observation now also fires its own NEW_REFERENCE (see
+    # test_citizen_product_baseline_observation_creates_new_reference_event).
+    assert sorted(e.event_type for e in events) == ["NEW_REFERENCE", "RESTOCK", "SOLD_OUT"]
+    availability_events = [e for e in events if e.event_type in ("SOLD_OUT", "RESTOCK")]
+    assert all(e.extra["editorial_eligible"] is False for e in availability_events)
+    assert all("EDITORIAL HIDDEN" in e.extra["editorial_eligibility_reasons"][0] for e in availability_events)
 
 
 def _availability_transition(
@@ -1875,7 +1885,11 @@ def test_unknown_availability_never_classifies_as_sold_out() -> None:
     assert event_type != "SOLD_OUT"
 
 
-def test_initial_unavailable_product_baseline_creates_no_sold_out_event(db_session: Session, tmp_settings: Settings):
+def test_initial_unavailable_product_never_reported_as_sold_out(db_session: Session, tmp_settings: Settings):
+    """A genuinely first-ever sighting of a reference must never be reported
+    as SOLD_OUT (there is no prior AVAILABLE state to transition from) --
+    it is real new-reference discovery evidence instead, see
+    test_new_watch_from_catalogue_creates_new_reference_event below."""
     from app.models import Event, SourceObservation, Watch
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
@@ -1897,7 +1911,74 @@ def test_initial_unavailable_product_baseline_creates_no_sold_out_event(db_sessi
         watch=watch, new_obs=observation, is_new_watch=True, experimental=True
     )
 
-    assert result == {"event_type": None, "reason": "baseline_new_watch"}
+    assert result["event_type"] == "NEW_REFERENCE"
+    assert db_session.query(Event).count() == 1
+
+
+def test_new_watch_from_catalogue_creates_new_reference_event(db_session: Session, tmp_settings: Settings):
+    """Hall-of-shame remediation: a brand-new SKU discovered directly through
+    a product catalogue (no prior news announcement) must produce real
+    editorial intelligence, not silent absorption -- this was previously
+    the single biggest discovery gap (Citizen Nighthawk / Q Timex Continental
+    style misses)."""
+    from app.models import Event, EventWatch, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Citizen", brand="Citizen", reference_raw="CA0890-54H",
+        reference_canonical="CA0890-54H", collection="Nighthawk",
+    )
+    db_session.add(watch)
+    db_session.flush()
+    observation = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://example.test/nighthawk", price=595.0,
+        currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(observation)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=observation, is_new_watch=True, experimental=True
+    )
+
+    assert result["event_type"] == "NEW_REFERENCE"
+    event = db_session.query(Event).one()
+    assert event.event_type == "NEW_REFERENCE"
+    assert event.extra["editorial_eligible"] is True
+    linked_watch_ids = {ew.watch_id for ew in db_session.query(EventWatch).filter_by(event_id=event.id)}
+    assert linked_watch_ids == {watch.id}
+
+
+def test_new_watch_from_catalogue_silent_during_epoch_baseline(db_session: Session, tmp_settings: Settings):
+    """The epoch/force_baseline guards must still short-circuit before the
+    new is_new_watch branch -- a brand-new source's mandatory first baseline
+    run must stay silent exactly like every other pre-existing baseline
+    guard in this module."""
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Citizen", brand="Citizen", reference_raw="CA0890-54H", reference_canonical="CA0890-54H"
+    )
+    db_session.add(watch)
+    db_session.flush()
+    observation = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://example.test/nighthawk", price=595.0,
+        currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(observation)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=observation, is_new_watch=True, force_baseline=True
+    )
+
+    assert result == {"event_type": None, "reason": "source_scoped_baseline"}
+    assert db_session.query(Event).count() == 0
     assert db_session.query(Event).count() == 0
 
 
@@ -1993,7 +2074,8 @@ def test_citizen_product_failed_fetch_cannot_create_sold_out(db_session: Session
 
     # only the one baseline observation exists; the failure created none
     assert len(db_session.scalars(select(SourceObservation)).all()) == 1
-    assert db_session.scalars(select(Event)).first() is None
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1 and events[0].event_type == "NEW_REFERENCE"  # from the first real observation
 
     # a subsequent healthy AVAILABLE fetch after the failure is still just a
     # repeat, not a fabricated RESTOCK (there was never a real SOLD_OUT)
@@ -2114,7 +2196,7 @@ def test_seiko_product_pipeline_baseline_then_price_change(db_session: Session, 
         )
 
     out1 = process(base)
-    assert out1["new_watch"] is True and out1["product_event"]["event_type"] is None
+    assert out1["new_watch"] is True and out1["product_event"]["event_type"] == "NEW_REFERENCE"
 
     cheaper = dict(base)
     cheaper["variants"] = [dict(base["variants"][0], price="2400.00")]
@@ -2126,7 +2208,7 @@ def test_seiko_product_pipeline_baseline_then_price_change(db_session: Session, 
     assert len(watches) == 1 and watches[0].reference_canonical == "HAB001"
 
     events = db_session.scalars(select(Event)).all()
-    assert len(events) == 1 and events[0].event_type == "PRICE_CHANGE"
+    assert sorted(e.event_type for e in events) == ["NEW_REFERENCE", "PRICE_CHANGE"]
 
 
 # --- Sprint 4: Citizen broad catalogue discovery (search-hit pagination) ---
@@ -2174,6 +2256,37 @@ def test_citizen_search_pagination_dedupes_across_collections():
     # same 3 references appear via both "mens" and "womens" fixtures reused —
     # must be deduplicated to 3, not 6
     assert len(items) == 3
+
+
+def test_citizen_products_run_prioritizes_unknown_urls_under_cap():
+    """Same discovery-cap fix as timex_products.py: citizenwatch.com's real
+    US catalogue (~530 across mens+womens) already exceeds the default
+    300-item budget, so a positional slice must not be able to permanently
+    starve a genuinely new SKU."""
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    p1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    p2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+    full = CitizenProductsCollector().run(search_pages={"mens": [p1, p2]}).discovered
+    assert [i.reference_hint for i in full] == ["CC4107-80H", "CC4078-51E", "AT8384-58E"]
+
+    new_item = full[-1]  # AT8384-58E -- would be excluded by a blind items[:2] slice
+    known_urls = {i.url for i in full if i.url != new_item.url}
+    capped = CitizenProductsCollector().run(
+        search_pages={"mens": [p1, p2]}, max_items=2, known_product_urls=known_urls
+    ).discovered
+    assert len(capped) == 2
+    assert new_item.url in {i.url for i in capped}
+
+
+def test_citizen_products_run_without_known_urls_keeps_positional_cap():
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    p1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    p2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+    full = CitizenProductsCollector().run(search_pages={"mens": [p1, p2]}).discovered
+    capped = CitizenProductsCollector().run(search_pages={"mens": [p1, p2]}, max_items=2).discovered
+    assert [i.url for i in capped] == [i.url for i in full[:2]]
 
 
 def test_citizen_search_pagination_respects_safety_cap():
@@ -2232,7 +2345,7 @@ def test_citizen_search_hit_pipeline_baseline_then_no_duplicate(db_session: Sess
 
     out1 = process()
     assert out1["success"] and out1["new_watch"] is True
-    assert out1["product_event"]["event_type"] is None
+    assert out1["product_event"]["event_type"] == "NEW_REFERENCE"
 
     out2 = process()
     assert out2["new_watch"] is False
@@ -2241,7 +2354,8 @@ def test_citizen_search_hit_pipeline_baseline_then_no_duplicate(db_session: Sess
     watches = db_session.scalars(select(Watch).where(Watch.reference_canonical == "CC4107-80H")).all()
     assert len(watches) == 1
     assert watches[0].case_material == "Super Titanium"
-    assert db_session.scalars(select(Event)).first() is None
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1 and events[0].event_type == "NEW_REFERENCE"
 
 
 # --- Sprint 4: Seiko full-catalogue pagination ------------------------------
@@ -3337,6 +3451,39 @@ def test_timex_products_collector_dedupes_by_sku_across_pages():
     result = TimexProductsCollector().run(listing_pages=[page1, page1])  # same page "twice"
     refs = [i.reference_hint for i in result.discovered]
     assert len(refs) == len(set(refs))  # no duplicate SKUs despite repeated page
+
+
+def test_timex_products_collector_prioritizes_unknown_urls_under_cap():
+    """Discovery-cap audit finding: a plain items[:max_items] slice can
+    permanently starve a new SKU that happens to sort past the cap. Every
+    URL already in our own observation history must be deprioritized so a
+    genuinely new SKU is always seen first, regardless of catalogue order."""
+    from app.collectors.timex_products import TimexProductsCollector
+
+    page1 = (FIXTURES / "timex_products_page1.json").read_bytes()
+    full = TimexProductsCollector().run(listing_pages=[page1]).discovered
+    assert len(full) == 30  # sanity: fixture has more items than our test cap
+
+    # Pretend every item except the very last one discovered is already known.
+    new_item = full[-1]
+    known_urls = {i.url for i in full if i.url != new_item.url}
+
+    capped = TimexProductsCollector().run(
+        listing_pages=[page1], max_items=5, known_product_urls=known_urls
+    ).discovered
+    assert len(capped) == 5
+    assert new_item.url in {i.url for i in capped}  # would be excluded by a blind positional slice
+
+
+def test_timex_products_collector_without_known_urls_keeps_positional_cap():
+    """No known_product_urls (e.g. a fresh baseline run) must behave exactly
+    as before -- a plain positional slice, no behavior change."""
+    from app.collectors.timex_products import TimexProductsCollector
+
+    page1 = (FIXTURES / "timex_products_page1.json").read_bytes()
+    full = TimexProductsCollector().run(listing_pages=[page1]).discovered
+    capped = TimexProductsCollector().run(listing_pages=[page1], max_items=5).discovered
+    assert [i.url for i in capped] == [i.url for i in full[:5]]
 
 
 def test_timex_news_parser_real_capture():

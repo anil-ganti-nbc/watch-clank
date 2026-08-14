@@ -963,7 +963,46 @@ class PipelineService:
             return {"event_type": None, "reason": "epoch_baseline_active"}
 
         if is_new_watch:
-            return {"event_type": None, "reason": "baseline_new_watch"}
+            # Hall-of-shame autopsy finding: a genuinely new-to-Clank SKU
+            # discovered directly through a product catalogue (no prior news
+            # announcement, no prior region) previously produced a Watch row
+            # and a SourceObservation but NEVER an Event -- only the news
+            # pipeline's _record_watch_event could emit NEW_REFERENCE. That
+            # made real new-product launches (e.g. a SKU that simply appears
+            # in a Shopify catalogue with no accompanying press release)
+            # structurally invisible to Recent Intelligence/Discord even
+            # though Watch Clank had genuinely just discovered it. Safe by
+            # the same construction as the NEW_REGION branch below: this
+            # line is unreachable during an active epoch/force_baseline
+            # (guards above), so it only fires for a catalogue's first
+            # non-baseline sighting of a reference -- exactly the discipline
+            # already required before any collector is scheduled.
+            evidence = EventEvidence(
+                event_type="NEW_REFERENCE",
+                manufacturer=watch.manufacturer,
+                brand=watch.brand,
+                collection=watch.collection,
+                region=new_obs.region,
+                is_first_party=True,
+                reference_raw=watch.reference_raw,
+                price=new_obs.price,
+                currency=new_obs.currency,
+                availability_status=new_obs.availability_status,
+                **self._availability_event_character(watch),
+            )
+            return self._persist_product_event(
+                watch=watch,
+                new_obs=new_obs,
+                scored=score_event(evidence),
+                reasons=[
+                    "first-ever product-catalogue observation of this reference; "
+                    "no prior region or announcement existed"
+                ],
+                prior_observation=None,
+                notify=notify,
+                experimental=experimental,
+                prior_regions=None,
+            )
 
         prior_product_regions = self._prior_product_regions_for_watch(
             watch.id, exclude_observation_id=new_obs.id
@@ -1945,6 +1984,7 @@ class PipelineService:
                         "default_region": CITIZEN_PROD_REGION,
                         "offline_kwarg": "search_pages",
                         "default_max_items": 300,
+                        "known_urls_from_observations": True,
                     },
                     "citizen_de": {
                         "collector_cls": CitizenGermanyProductsCollector,
@@ -1973,6 +2013,7 @@ class PipelineService:
                         "default_region": TIMEX_PROD_REGION,
                         "offline_kwarg": "listing_pages",
                         "default_max_items": 300,
+                        "known_urls_from_observations": True,
                     },
                 }
             )

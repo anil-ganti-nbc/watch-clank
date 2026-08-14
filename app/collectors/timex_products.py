@@ -107,7 +107,13 @@ class TimexProductsCollector:
 
         return all_items, fetches
 
-    def run(self, *, max_items: int | None = 250, listing_pages: list[bytes] | None = None) -> CollectorRunResult:
+    def run(
+        self,
+        *,
+        max_items: int | None = 250,
+        listing_pages: list[bytes] | None = None,
+        known_product_urls: set[str] | None = None,
+    ) -> CollectorRunResult:
         result = CollectorRunResult(
             collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, region=REGION, trust_score=TRUST_SCORE
         )
@@ -123,7 +129,23 @@ class TimexProductsCollector:
             result.fetched = discovery_fetches
             return result
 
-        if max_items is not None:
+        # Discovery cap/audit finding: the full catalogue (~1606 items) is
+        # always fully paginated above, but only `max_items` of it gets
+        # fetched/parsed per run -- previously a blind items[:max_items]
+        # slice in whatever order Shopify's default (non-recency) sort
+        # returns, meaning genuinely new SKUs landing past position N could
+        # be silently skipped on every routine run forever, not just once.
+        # Prioritizing URLs not already in our own observation history
+        # (mirrors citizen_de_products.py's proven sitemap-delta pattern)
+        # guarantees a new-to-Clank SKU is seen on the very next run
+        # regardless of where it happens to sort, at the cost of refreshing
+        # fewer already-known items in that same run.
+        known = known_product_urls or set()
+        if max_items is not None and known:
+            new_items = [i for i in items if i.url not in known]
+            known_items = [i for i in items if i.url in known]
+            items = (new_items + known_items)[:max_items]
+        elif max_items is not None:
             items = items[:max_items]
         result.discovered = items
         result.metadata["discovered_count"] = len(items)

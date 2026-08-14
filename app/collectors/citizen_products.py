@@ -195,6 +195,7 @@ class CitizenProductsCollector:
         *,
         max_items: int | None = 60,
         search_pages: dict[str, list[bytes]] | None = None,
+        known_product_urls: set[str] | None = None,
     ) -> CollectorRunResult:
         result = CollectorRunResult(
             collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, region=REGION, trust_score=TRUST_SCORE
@@ -211,7 +212,17 @@ class CitizenProductsCollector:
             result.fetched = discovery_fetches
             return result
 
-        if max_items is not None:
+        # See timex_products.py's run() for the full discovery-cap rationale:
+        # the real US catalogue (~530 across mens+womens) already exceeds
+        # the default 300-item processing budget, so a plain positional
+        # slice can permanently starve a genuinely new SKU that happens to
+        # sort past the cap. Known URLs are deprioritized, not dropped.
+        known = known_product_urls or set()
+        if max_items is not None and known:
+            new_items = [i for i in items if i.url not in known]
+            known_items = [i for i in items if i.url in known]
+            items = (new_items + known_items)[:max_items]
+        elif max_items is not None:
             items = items[:max_items]
         result.discovered = items
         result.metadata["discovered_count"] = len(items)
