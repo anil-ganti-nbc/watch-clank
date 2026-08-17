@@ -3071,6 +3071,121 @@ def test_monochrome_source_scoped_baseline_is_silent_then_repeat_is_deduped(
     send_alert.assert_not_called()
 
 
+def test_great_gshock_world_gcwb5000_fixture_extracts_exact_reference_from_japanese_title():
+    """Permanent regression fixture for the 2026-08-16 GCW-B5000 source-gap
+    specimen (ai/handoff/SPECIALIST_SOURCE_GREAT_G_SHOCK_WORLD.md). The
+    real article title mixes Japanese text with two ASCII Casio
+    references and no separating space/punctuation around "G-SHOCK" --
+    exactly the shape that silently failed brand detection before
+    re.ASCII was added to _BRAND_TERMS/_REFERENCE_PATTERNS."""
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    result = parse_specialist_publication_feed(
+        (FIXTURES / "great_gshock_world_gcwb5000_feed.xml").read_bytes(), feed_format="atom"
+    )
+
+    assert result.success
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.brand == "Casio"
+    assert item.reference_candidates == ["GCW-B5000", "MRG-B5000SA-2"]
+    assert item.published_at == "2026-08-16T10:39:01+09:00"  # <issued>, not <modified>
+
+
+def test_great_gshock_world_source_scoped_baseline_is_silent_then_repeat_is_deduped(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    from unittest.mock import patch
+
+    from app.core import config as config_mod
+    from app.models import Event, SpecialistLead
+    from app.services.specialist_leads import run_great_gshock_world_pipeline
+
+    monkeypatch.setattr(config_mod, "get_settings", lambda: tmp_settings)
+    xml = (FIXTURES / "great_gshock_world_gcwb5000_feed.xml").read_bytes()
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=tmp_settings),
+        patch("app.services.discord_notify.DiscordNotifier.send_editorial_alert") as send_alert,
+    ):
+        baseline = run_great_gshock_world_pipeline(db_session, feed_xml=xml, force_baseline=True)
+        repeat = run_great_gshock_world_pipeline(db_session, feed_xml=xml)
+
+    lead = db_session.scalars(select(SpecialistLead)).one()
+    assert baseline.status == "SUCCESS"
+    assert baseline.is_baseline is True
+    assert baseline.summary_metadata["new_leads"] == 1
+    assert lead.source_id == "great_gshock_world"
+    assert lead.reference_candidates == ["GCW-B5000", "MRG-B5000SA-2"]
+    assert lead.is_baseline is True
+    assert lead.editorial_freshness == "BASELINE"
+    assert db_session.query(Event).count() == 0  # Layer B must not fabricate an official Event.
+    assert repeat.status == "SUCCESS"
+    assert repeat.summary_metadata["new_leads"] == 0
+    send_alert.assert_not_called()
+
+
+def _great_gshock_world_live_entry(published_at_iso: str) -> bytes:
+    """A GCW-B5000-shaped Atom entry with a caller-supplied published time,
+    for the WatchBench acceptance test below -- distinct from the fixture
+    file (which preserves the real, fixed 2026-08-16 timestamp for the
+    extraction/baseline tests above, where wall-clock-relative freshness
+    isn't being asserted)."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<feed version="0.3" xmlns="http://purl.org/atom/ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xml:lang="ja">
+<title>great G-SHOCK world</title>
+<entry>
+<title>【G-SHOCK秋冬予想】MR-G３０周年第２弾「MRG-B5000SA-2」と、フルカーボンオリジン「GCW-B5000」他！</title>
+<link rel="alternate" type="text/html" href="https://gshockjp.blog.jp/G-SHOCK-newmodel-Late2026-20260816" />
+<modified>{published_at_iso}</modified>
+<issued>{published_at_iso}</issued>
+<id>tag:blog.livedoor.jp,2026:gshockjp.watchbench</id>
+<summary type="text/plain">G-SHOCKの新作情報です。</summary>
+<dc:subject>新作情報</dc:subject>
+<author><name>gshockjp</name></author>
+</entry>
+</feed>
+""".encode()
+
+
+def test_watchbench_great_gshock_world_would_surface_gcwb5000_intelligence_today(
+    db_session: Session, tmp_settings: Settings
+):
+    """WatchBench/Hall-of-Shame acceptance test for the 2026-08-16 GCW-
+    B5000 source-gap specimen (ai/handoff/SPECIALIST_SOURCE_GREAT_G_SHOCK_WORLD.md):
+    would current Watch Clank surface equivalent upstream specialist
+    intelligence tomorrow? Simulates the everyday, steady-state case (no
+    baseline in progress -- Great G-Shock World already onboarded, exactly
+    like production after this sprint) with a GCW-B5000-shaped article
+    published 2 hours ago: must create a real, FRESH SpecialistLead with
+    both exact references extracted, and must actually attempt Discord
+    delivery -- not just persist a row."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_great_gshock_world_pipeline
+
+    published_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    xml = _great_gshock_world_live_entry(published_at)
+
+    configured = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    calls: list[str] = []
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        run = run_great_gshock_world_pipeline(db_session, feed_xml=xml)
+
+    assert run.status == "SUCCESS"
+    assert run.summary_metadata["new_leads"] == 1
+    lead = db_session.scalars(select(SpecialistLead)).one()
+    assert lead.reference_candidates == ["GCW-B5000", "MRG-B5000SA-2"]
+    assert lead.is_baseline is False
+    assert lead.editorial_freshness == "FRESH"
+    assert calls == ["https://discord.example/editorial"]  # a real alert attempt, not just a DB row
+
+
 def test_specialist_cross_source_exact_reference_preserves_leads_but_alerts_once(db_session: Session):
     from datetime import UTC, datetime
     from unittest.mock import patch

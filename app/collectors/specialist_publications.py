@@ -1,4 +1,4 @@
-"""Bounded public-RSS collectors for approved Layer B publications.
+"""Bounded public-RSS/Atom collectors for approved Layer B publications.
 
 Each source is one GET of its published syndication endpoint.  No article
 pages, archives, commerce endpoints, or anti-bot bypasses are involved.
@@ -17,6 +17,11 @@ class PublicationSource:
     source_id: str
     collector_id: str
     feed_url: str
+    # "rss2" (default) or "atom" -- see app/parsers/rss_common.py. Great G-
+    # Shock World's platform (livedoor Blog) does not expose RSS 2.0 at
+    # all, only RSS 1.0/RDF and Atom; Atom was chosen as the more standard
+    # shape likely to recur for future non-English sources.
+    feed_format: str = "rss2"
 
 
 PUBLICATION_SOURCES: dict[str, PublicationSource] = {
@@ -24,6 +29,9 @@ PUBLICATION_SOURCES: dict[str, PublicationSource] = {
     "deployant": PublicationSource("deployant", "deployant_rss", "https://deployant.com/feed/"),
     "fratello": PublicationSource("fratello", "fratello_rss", "https://www.fratellowatches.com/feed/"),
     "watchtime": PublicationSource("watchtime", "watchtime_rss", "https://www.watchtime.com/feed/rss"),
+    "great_gshock_world": PublicationSource(
+        "great_gshock_world", "great_gshock_world_atom", "https://gshockjp.blog.jp/atom.xml", feed_format="atom"
+    ),
 }
 
 
@@ -47,7 +55,7 @@ class SpecialistPublicationCollector:
                 url=self.source.feed_url,
                 success=True,
                 status_code=200,
-                content_type="application/rss+xml",
+                content_type="application/atom+xml" if self.source.feed_format == "atom" else "application/rss+xml",
                 payload=feed_xml,
             )
             if feed_xml is not None

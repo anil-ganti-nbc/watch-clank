@@ -1,9 +1,20 @@
-"""Deterministic RSS parser for approved multi-brand publications.
+"""Deterministic RSS/Atom parser for approved multi-brand publications.
 
-Only RSS title, categories, publication date, canonical URL and the shared
-short description excerpt enter the candidate.  A reference must match one
-of the explicitly supported brand formats; no language-model inference or
-article-body scraping is used.
+Only feed title, categories, publication date, canonical URL and the
+shared short description excerpt enter the candidate.  A reference must
+match one of the explicitly supported brand formats; no language-model
+inference or article-body scraping is used.
+
+re.ASCII on every pattern below (added for Great G-Shock World, see
+ai/handoff/SPECIALIST_SOURCE_GREAT_G_SHOCK_WORLD.md): Python's default
+Unicode-aware \\b treats CJK ideographs as "word" characters, so an ASCII
+brand/reference token directly adjacent to Japanese text with no
+separating space or punctuation (e.g. "G-SHOCK秋冬予想", a
+real title from this source) silently fails to match at all -- verified
+empirically against the real GCW-B5000 article this source was onboarded
+for. re.ASCII restores standard boundary behavior (ASCII word chars vs.
+everything else) and is a no-op for the four purely-English sources that
+predate it.
 """
 
 from __future__ import annotations
@@ -11,23 +22,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from app.parsers.rss_common import parse_rss_feed
+from app.parsers.rss_common import parse_atom_feed, parse_rss_feed
 
 PARSER_ID = "specialist_publication_rss"
-PARSER_VERSION = "0.1.0"
+PARSER_VERSION = "0.2.0"
 
 _BRAND_TERMS = (
-    ("Casio", re.compile(r"\b(?:casio|g-shock)\b", re.IGNORECASE)),
-    ("Seiko", re.compile(r"\bseiko\b", re.IGNORECASE)),
-    ("Citizen", re.compile(r"\bcitizen\b", re.IGNORECASE)),
-    ("Timex", re.compile(r"\btimex\b", re.IGNORECASE)),
+    ("Casio", re.compile(r"\b(?:casio|g-shock)\b", re.IGNORECASE | re.ASCII)),
+    ("Seiko", re.compile(r"\bseiko\b", re.IGNORECASE | re.ASCII)),
+    ("Citizen", re.compile(r"\bcitizen\b", re.IGNORECASE | re.ASCII)),
+    ("Timex", re.compile(r"\btimex\b", re.IGNORECASE | re.ASCII)),
 )
 _REFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
-    # Require a digit, preventing ordinary title words from becoming a model.
-    "Casio": re.compile(r"\b((?:GA|GW|GM|GMW|GBD|GBDH|GBX|GWR|GBA|GMA|GMD|GME|GSH|GST|EFK|EF|OCW|PRG|PRW|MRG|MTG|BGA|MSG)[-]?(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,24})\b", re.IGNORECASE),
-    "Seiko": re.compile(r"\b((?:S[A-Z]{2,3}[0-9]{3,4}|H(?:CC|BC|DB)[A-Z0-9]{3,5}))\b", re.IGNORECASE),
-    "Citizen": re.compile(r"\b([A-Z]{2}[0-9]{4}-[0-9A-Z]{2,4})\b", re.IGNORECASE),
-    "Timex": re.compile(r"\b(TW[A-Z0-9]{6,})\b", re.IGNORECASE),
+    # Require a digit, preventing ordinary title words from becoming a
+    # model. GCW added alongside the existing G-prefixed families for the
+    # real full-carbon GCW-B5000 square -- a genuine Casio reference
+    # prefix, not a specimen-specific special case.
+    "Casio": re.compile(r"\b((?:GA|GW|GM|GMW|GCW|GBD|GBDH|GBX|GWR|GBA|GMA|GMD|GME|GSH|GST|EFK|EF|OCW|PRG|PRW|MRG|MTG|BGA|MSG)[-]?(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,24})\b", re.IGNORECASE | re.ASCII),
+    "Seiko": re.compile(r"\b((?:S[A-Z]{2,3}[0-9]{3,4}|H(?:CC|BC|DB)[A-Z0-9]{3,5}))\b", re.IGNORECASE | re.ASCII),
+    "Citizen": re.compile(r"\b([A-Z]{2}[0-9]{4}-[0-9A-Z]{2,4})\b", re.IGNORECASE | re.ASCII),
+    "Timex": re.compile(r"\b(TW[A-Z0-9]{6,})\b", re.IGNORECASE | re.ASCII),
 }
 _LIMITED_RE = re.compile(r"\b(?:limited edition|limited to|limited-run)\b", re.IGNORECASE)
 _COLLAB_RE = re.compile(r"\b(?:collaboration|collab| x )\b", re.IGNORECASE)
@@ -57,8 +71,14 @@ def _brand_from_blob(blob: str) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def parse_specialist_publication_feed(xml_bytes: bytes | str, *, max_items: int | None = 20) -> PublicationFeedParseResult:
-    raw_result = parse_rss_feed(xml_bytes, max_items=max_items)
+def parse_specialist_publication_feed(
+    xml_bytes: bytes | str, *, max_items: int | None = 20, feed_format: str = "rss2"
+) -> PublicationFeedParseResult:
+    raw_result = (
+        parse_atom_feed(xml_bytes, max_items=max_items)
+        if feed_format == "atom"
+        else parse_rss_feed(xml_bytes, max_items=max_items)
+    )
     if not raw_result.success:
         return PublicationFeedParseResult(success=False, error=raw_result.error)
 

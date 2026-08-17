@@ -206,6 +206,7 @@ def run_experimental_specialist(source: str, max_items: int = 20, *, force_basel
         run_deployant_pipeline,
         run_fratello_pipeline,
         run_gcentral_pipeline,
+        run_great_gshock_world_pipeline,
         run_monochrome_pipeline,
         run_plus9time_pipeline,
         run_watchtime_pipeline,
@@ -219,6 +220,7 @@ def run_experimental_specialist(source: str, max_items: int = 20, *, force_basel
         "deployant": run_deployant_pipeline,
         "fratello": run_fratello_pipeline,
         "watchtime": run_watchtime_pipeline,
+        "great_gshock_world": run_great_gshock_world_pipeline,
     }
 
     settings = get_settings()
@@ -301,7 +303,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--experimental-specialist",
-        choices=["casioblog", "gcentral", "plus9time", "monochrome", "deployant", "fratello", "watchtime"],
+        choices=["casioblog", "gcentral", "plus9time", "monochrome", "deployant", "fratello", "watchtime", "great_gshock_world"],
         default=None,
         help="Run an EXPERIMENTAL Layer B (early-warning) specialist-source lane",
     )

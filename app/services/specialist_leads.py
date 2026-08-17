@@ -672,7 +672,9 @@ def run_publication_pipeline(
         status = result.metadata.get("component_status") or "FAILED"
         new_leads = 0
         if status == "SUCCESS":
-            parsed = parse_specialist_publication_feed(result.fetched[0].payload, max_items=max_items)
+            parsed = parse_specialist_publication_feed(
+                result.fetched[0].payload, max_items=max_items, feed_format=source.feed_format
+            )
             if not parsed.success:
                 status = "FAILED"
             else:
@@ -747,3 +749,7 @@ def run_fratello_pipeline(session: Session, *, feed_xml: bytes | None = None, ma
 
 def run_watchtime_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20, force_baseline: bool = False) -> CollectorRun:
     return run_publication_pipeline(session, source_id="watchtime", feed_xml=feed_xml, max_items=max_items, force_baseline=force_baseline)
+
+
+def run_great_gshock_world_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20, force_baseline: bool = False) -> CollectorRun:
+    return run_publication_pipeline(session, source_id="great_gshock_world", feed_xml=feed_xml, max_items=max_items, force_baseline=force_baseline)

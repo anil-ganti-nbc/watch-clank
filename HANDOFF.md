@@ -15,6 +15,50 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 
 # Checkpoint log
 
+## 2026-08-17 — New specialist source: Great G-Shock World (GCW-B5000 source-gap specimen)
+
+**Trigger:** a real Notebookcheck story (MRG-B5000SA-2/GCW-B5000, 2026-08-16)
+traced to Great G-Shock World (gshockjp.blog.jp), a Japanese blog
+Notebookcheck cites by name and links to directly for this exact watch
+family. None of Watch Clank's 7 existing specialist sources or official
+Casio collectors had it.
+
+**Two general bugs found and fixed while onboarding, not GCW-B5000-specific:**
+(1) this platform exposes RSS 1.0/RDF and Atom, never RSS 2.0 -- the
+existing `parse_rss_feed` structurally cannot read either (items sit as
+RDF siblings of `<channel>`, not children). New `parse_atom_feed()` added
+to `app/parsers/rss_common.py`; `PublicationSource` gained a `feed_format`
+field (default unchanged for the 4 existing sources). (2) Python's default
+Unicode-aware `\b` treats CJK ideographs as word characters, so the brand/
+reference regexes in `specialist_publications.py` silently failed to match
+ASCII terms directly adjacent to Japanese text with no separator --
+verified empirically against the real article title before fixing.
+`re.ASCII` added to every pattern (no-op for English sources); `"GCW"`
+added to the Casio reference-prefix list (a real prefix family, not a
+specimen-specific branch).
+
+Registered as `great_gshock_world_atom` (45-min cadence, matching the
+other frequent specialist sources) using a `source_registry.py` entry
+that already existed from earlier, never-automated research. Verified
+live end-to-end against the real feed (isolated throwaway DB): 7 real
+leads on first run including the exact specimen with both references
+extracted, 0 new leads on repeat. 3 new regression tests using the real
+specimen. 257 tests (was 254), Ruff clean.
+
+**Phase 4 research (not automated, reported honestly):** grail-watch.com
+(RSS blocked, HTTP 403 -- anti-bot, correctly left alone), webchronos.net
+(valid but empty RSS feed, both EN and JP), konta-watch.blog.jp and
+bokunekotokei.blog.jp (active, valid feeds, but "celebrity wore this
+watch" / vintage content -- not new-product intelligence), and Japanese
+retailer sites as a class (commerce content, different source category
+from a `SPECIALIST_BLOG`, not evaluated further here). No second
+automatable source found this pass -- reported as a genuine outcome, not
+forced to hit a quota. Full writeup:
+`ai/handoff/SPECIALIST_SOURCE_GREAT_G_SHOCK_WORLD.md`.
+
+Deployed to Hetzner from GitHub, new systemd timer installed alongside
+the 18 existing ones, verified live.
+
 ## 2026-08-17 — Timex baseline-absorption autopsy: fix, WatchBench regression, deploy
 
 **Trigger:** a real competitor cluster of six Timex/Citizen stories, none

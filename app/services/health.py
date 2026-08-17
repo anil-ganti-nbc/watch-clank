@@ -41,6 +41,7 @@ KNOWN_COLLECTORS = [
     "deployant_rss",
     "fratello_rss",
     "watchtime_rss",
+    "great_gshock_world_atom",
     "timex_products",
     "timex_news",
 ]
@@ -69,6 +70,7 @@ EXPECTED_CADENCE_MINUTES = {
     "deployant_rss": 90,
     "fratello_rss": 45,
     "watchtime_rss": 90,
+    "great_gshock_world_atom": 45,
     "timex_news": 90,
     "timex_products": 360,
 }

@@ -76,6 +76,10 @@ _CONTROLS: dict[str, CollectorControl] = {
     "watchtime_rss": CollectorControl(
         "watchtime_rss", "WatchTime", "SPECIALIST", ("--experimental-specialist", "watchtime")
     ),
+    "great_gshock_world_atom": CollectorControl(
+        "great_gshock_world_atom", "Great G-Shock World", "SPECIALIST",
+        ("--experimental-specialist", "great_gshock_world"),
+    ),
 }
 
 # Sanity check at import time, not just documentation: every KNOWN_COLLECTORS
