@@ -15,6 +15,34 @@ empirically against the real GCW-B5000 article this source was onboarded
 for. re.ASCII restores standard boundary behavior (ASCII word chars vs.
 everything else) and is a no-op for the four purely-English sources that
 predate it.
+
+Two additions for Gear Patrol (see
+ai/handoff/SPECIALIST_SOURCE_GEAR_PATROL.md), both general-purpose, not
+specimen-specific:
+
+- `required_category`: unlike the dedicated watch publications that
+  predate it, Gear Patrol's only accessible feed is site-wide (its
+  watch-specific feed and sitemap both return HTTP 403; the site-wide
+  `/feed/` does not). ~79% of its real items are non-watch (motorcycles,
+  audio, footwear, outdoors, cars, deals). Brand-keyword matching alone
+  is not enough: a "Deals" roundup mentioning exactly one tracked brand
+  by name (e.g. "...Seiko Sports Watches...") would otherwise pass the
+  existing brand filter despite being commerce/deals content, not
+  editorial -- verified against a real captured example. Gear Patrol's
+  own `<category>Watches</category>` tag reliably distinguishes the two
+  (that same "Deals" example is tagged `Deals`, never `Watches`).
+  `required_category`, when set, is checked before brand matching even
+  runs; `None` (the default) preserves every existing source's behavior
+  exactly.
+- The canonical URL is now part of the blob used for reference
+  extraction (previously title + categories + description only): Gear
+  Patrol's real headlines are editorial prose ("Timex Wrenches Its
+  Heritage Waterbury Watch into a Historic Racing Chronograph") that
+  never states the model number, which appears only in the URL slug
+  (`.../timex-waterbury-heritage-chronograph-tw2y93300/`) -- verified
+  empirically against the real specimen article before this was added.
+  Benefits every source equally; URLs are already-trusted first-party
+  data, not scraped free text.
 """
 
 from __future__ import annotations
@@ -71,8 +99,21 @@ def _brand_from_blob(blob: str) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _canonicalize_url(url: str) -> str:
+    """Strip query string/fragment so tracking params (utm_*, etc.) never
+    let the same article dedup as two different source_url values.
+    Trailing slash preserved as-is -- Gear Patrol and every existing
+    source already emit it consistently; normalizing it away would risk
+    the opposite problem (two genuinely different paths colliding)."""
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
 def parse_specialist_publication_feed(
-    xml_bytes: bytes | str, *, max_items: int | None = 20, feed_format: str = "rss2"
+    xml_bytes: bytes | str,
+    *,
+    max_items: int | None = 20,
+    feed_format: str = "rss2",
+    required_category: str | None = None,
 ) -> PublicationFeedParseResult:
     raw_result = (
         parse_atom_feed(xml_bytes, max_items=max_items)
@@ -84,17 +125,28 @@ def parse_specialist_publication_feed(
 
     items: list[PublicationLeadCandidate] = []
     for raw in raw_result.items:
+        if required_category is not None:
+            cats_lower = {c.strip().lower() for c in raw.categories if c}
+            if required_category.lower() not in cats_lower:
+                continue
+
+        url = _canonicalize_url(raw.url)
         blob = f"{raw.title} {' '.join(raw.categories)} {raw.claim_text or ''}"
         brand = _brand_from_blob(blob)
         # A general-publication article outside the four approved brands is
         # irrelevant to Watch Clank and must not become an undifferentiated lead.
         if brand is None:
             continue
-        refs = sorted({match.group(1).upper() for match in _REFERENCE_PATTERNS[brand].finditer(blob)})
+        # URL included for reference extraction only (see module docstring):
+        # some sources put the model number only in the slug, never in the
+        # human-readable title/description.
+        refs = sorted(
+            {match.group(1).upper() for match in _REFERENCE_PATTERNS[brand].finditer(f"{blob} {url}")}
+        )
         items.append(
             PublicationLeadCandidate(
                 title=raw.title,
-                url=raw.url,
+                url=url,
                 published_at=raw.published_at,
                 claim_text=raw.claim_text,
                 brand=brand,

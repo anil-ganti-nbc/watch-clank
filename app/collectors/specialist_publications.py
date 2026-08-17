@@ -22,6 +22,11 @@ class PublicationSource:
     # all, only RSS 1.0/RDF and Atom; Atom was chosen as the more standard
     # shape likely to recur for future non-English sources.
     feed_format: str = "rss2"
+    # Only items carrying this exact <category> (case-insensitive) are
+    # kept -- see app/parsers/specialist_publications.py's module
+    # docstring. None (every source before Gear Patrol) means no
+    # category gate, preserving existing behavior exactly.
+    required_category: str | None = None
 
 
 PUBLICATION_SOURCES: dict[str, PublicationSource] = {
@@ -31,6 +36,13 @@ PUBLICATION_SOURCES: dict[str, PublicationSource] = {
     "watchtime": PublicationSource("watchtime", "watchtime_rss", "https://www.watchtime.com/feed/rss"),
     "great_gshock_world": PublicationSource(
         "great_gshock_world", "great_gshock_world_atom", "https://gshockjp.blog.jp/atom.xml", feed_format="atom"
+    ),
+    # Gear Patrol's dedicated /watches/feed/ and /sitemap.xml both return
+    # HTTP 403 (Cloudflare); only the site-wide /feed/ is accessible.
+    # required_category="Watches" is load-bearing here -- see
+    # ai/handoff/SPECIALIST_SOURCE_GEAR_PATROL.md.
+    "gear_patrol": PublicationSource(
+        "gear_patrol", "gear_patrol_rss", "https://www.gearpatrol.com/feed/", required_category="Watches"
     ),
 }
 

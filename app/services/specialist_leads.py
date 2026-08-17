@@ -673,7 +673,10 @@ def run_publication_pipeline(
         new_leads = 0
         if status == "SUCCESS":
             parsed = parse_specialist_publication_feed(
-                result.fetched[0].payload, max_items=max_items, feed_format=source.feed_format
+                result.fetched[0].payload,
+                max_items=max_items,
+                feed_format=source.feed_format,
+                required_category=source.required_category,
             )
             if not parsed.success:
                 status = "FAILED"
@@ -753,3 +756,14 @@ def run_watchtime_pipeline(session: Session, *, feed_xml: bytes | None = None, m
 
 def run_great_gshock_world_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20, force_baseline: bool = False) -> CollectorRun:
     return run_publication_pipeline(session, source_id="great_gshock_world", feed_xml=feed_xml, max_items=max_items, force_baseline=force_baseline)
+
+
+def run_gear_patrol_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 60, force_baseline: bool = False) -> CollectorRun:
+    """max_items defaults higher than the other publication sources (20):
+    Gear Patrol's feed is site-wide, not watches-only -- ~79% of items in
+    a real captured sample were non-watch categories (Motorcycles, Audio,
+    Footwear, Outdoors, Motoring, Style, Deals). 60 raw items covers
+    roughly the same real-world watches-relevant window (~2-3 days) that
+    20 items gives a 100%-watches source, rather than silently truncating
+    the effective watch coverage to a handful of items per run."""
+    return run_publication_pipeline(session, source_id="gear_patrol", feed_xml=feed_xml, max_items=max_items, force_baseline=force_baseline)

@@ -42,6 +42,7 @@ KNOWN_COLLECTORS = [
     "fratello_rss",
     "watchtime_rss",
     "great_gshock_world_atom",
+    "gear_patrol_rss",
     "timex_products",
     "timex_news",
 ]
@@ -71,6 +72,7 @@ EXPECTED_CADENCE_MINUTES = {
     "fratello_rss": 45,
     "watchtime_rss": 90,
     "great_gshock_world_atom": 45,
+    "gear_patrol_rss": 90,  # matches deployant's tier-3 cadence, not the 45min tier-2 sources
     "timex_news": 90,
     "timex_products": 360,
 }

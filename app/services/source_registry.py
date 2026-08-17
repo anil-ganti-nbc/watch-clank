@@ -118,6 +118,21 @@ SOURCE_REGISTRY: dict[str, SourceProfile] = {
         account_or_domain="watchtime.com",
         display_name="WatchTime",
     ),
+    # Tier 3, not 2, deliberately: unlike every tier-2 source above (each a
+    # publication dedicated to watches), Gear Patrol is a large general
+    # lifestyle site where watches are one category among many -- ~79% of
+    # its real recent output (motorcycles, audio, footwear, outdoors, cars,
+    # deals) is unrelated. Matches deployant's own precedent for "credible
+    # specialist source requiring more verification" vs. the dedicated
+    # watch publications. See ai/handoff/SPECIALIST_SOURCE_GEAR_PATROL.md
+    # for the historical-evaluation evidence this is based on.
+    "gear_patrol": SourceProfile(
+        source_id="gear_patrol",
+        source_type="SPECIALIST_PUBLICATION",
+        tier=3,
+        account_or_domain="gearpatrol.com",
+        display_name="Gear Patrol",
+    ),
 }
 
 

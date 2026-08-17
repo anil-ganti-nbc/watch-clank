@@ -3186,6 +3186,230 @@ def test_watchbench_great_gshock_world_would_surface_gcwb5000_intelligence_today
     assert calls == ["https://discord.example/editorial"]  # a real alert attempt, not just a DB row
 
 
+# --- Gear Patrol: TW2Y93300/TW2Y93400 Waterbury Heritage Chronograph
+# source-gap specimen (ai/handoff/SPECIALIST_SOURCE_GEAR_PATROL.md). The
+# fixture is a trimmed but real capture of gearpatrol.com/feed/ (its only
+# accessible feed -- /watches/feed/ and /sitemap.xml both return HTTP 403)
+# including the real specimen article plus real true/false-positive
+# neighbors from the same feed: a "Deals" post that name-checks "Seiko"
+# but is not editorial, a "Style"/footwear post, and a "Motorcycles" post.
+
+
+def test_gear_patrol_waterbury_fixture_discovers_and_filters_by_category():
+    """The core mechanism: category-based filtering (required_category=
+    "Watches") must keep the Waterbury article and the two other real
+    Watches-tagged items, and must reject the Deals/Style/Motorcycles
+    items even though the Deals one contains the brand keyword "Seiko" --
+    proving taxonomy-based filtering catches what keyword-only matching
+    would not."""
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    result = parse_specialist_publication_feed(
+        (FIXTURES / "gear_patrol_waterbury_feed.xml").read_bytes(), required_category="Watches"
+    )
+
+    assert result.success
+    urls = {item.url for item in result.items}
+    assert "https://www.gearpatrol.com/watches/timex-waterbury-heritage-chronograph-tw2y93300/" in urls
+    assert "https://www.gearpatrol.com/watches/casio-f-91w-fitness-tracker-launch/" in urls
+    # the "Deals" item name-checks Seiko but is not Watches-tagged -- must be rejected
+    assert not any("best-deals-today" in u for u in urls)
+    assert not any("best-timberland" in u for u in urls)  # Style
+    assert not any("new-motorcycles" in u for u in urls)  # Motorcycles
+    assert len(result.items) == 3  # exactly the 3 real Watches-tagged items in the fixture
+
+
+def test_gear_patrol_waterbury_reference_extracted_from_url_not_headline():
+    """The real headline and description never state "TW2Y93300" -- it
+    only appears in the URL slug. Verified empirically against the real
+    article before this was implemented."""
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    result = parse_specialist_publication_feed(
+        (FIXTURES / "gear_patrol_waterbury_feed.xml").read_bytes(), required_category="Watches"
+    )
+    waterbury = next(i for i in result.items if "tw2y93300" in i.url)
+    assert waterbury.brand == "Timex"
+    assert waterbury.reference_candidates == ["TW2Y93300"]
+    assert waterbury.published_at == "2026-08-13T15:15:15+00:00"  # RFC822 pubDate parsed to ISO 8601
+
+
+def test_gear_patrol_without_category_filter_would_wrongly_admit_the_deals_post():
+    """Negative control proving the category gate is load-bearing, not
+    decorative: with required_category=None (the pre-Gear-Patrol default
+    for every other source), the same Deals post -- not genuine watch
+    editorial -- would incorrectly pass because it name-checks exactly one
+    tracked brand ("Seiko")."""
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    result = parse_specialist_publication_feed(
+        (FIXTURES / "gear_patrol_waterbury_feed.xml").read_bytes(), required_category=None
+    )
+    urls = {item.url for item in result.items}
+    assert any("best-deals-today" in u for u in urls)  # confirms the category gate, not brand-matching, excludes it
+
+
+def test_gear_patrol_missing_category_and_missing_pubdate_handled_safely():
+    """Malformed/missing metadata must never crash the parser: an item
+    with no <category> at all must be excluded by the required_category
+    gate (not raise), and an item with no <pubDate> must come through
+    with published_at=None rather than a fabricated timestamp."""
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    xml = b"""<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>
+    <title>Gear Patrol</title>
+    <item>
+        <title><![CDATA[Seiko Announces a New Diver Reference]]></title>
+        <link>https://www.gearpatrol.com/watches/seiko-new-diver-no-category/</link>
+        <description><![CDATA[No category element on this item at all.]]></description>
+    </item>
+    <item>
+        <title><![CDATA[Citizen Launches a New Eco-Drive Chronograph]]></title>
+        <link>https://www.gearpatrol.com/watches/citizen-new-chrono-no-date/</link>
+        <category><![CDATA[Watches]]></category>
+        <description><![CDATA[No pubDate element on this item at all.]]></description>
+    </item>
+    </channel></rss>"""
+
+    result = parse_specialist_publication_feed(xml, required_category="Watches")
+
+    assert result.success
+    urls = {item.url for item in result.items}
+    assert "https://www.gearpatrol.com/watches/seiko-new-diver-no-category/" not in urls  # no category -> excluded
+    citizen_item = next(i for i in result.items if "citizen-new-chrono" in i.url)
+    assert citizen_item.published_at is None  # honest, not fabricated
+
+
+def test_gear_patrol_source_scoped_baseline_is_silent_then_repeat_is_deduped(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    from unittest.mock import patch
+
+    from app.core import config as config_mod
+    from app.models import Event, SpecialistLead
+    from app.services.specialist_leads import run_gear_patrol_pipeline
+
+    monkeypatch.setattr(config_mod, "get_settings", lambda: tmp_settings)
+    xml = (FIXTURES / "gear_patrol_waterbury_feed.xml").read_bytes()
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=tmp_settings),
+        patch("app.services.discord_notify.DiscordNotifier.send_editorial_alert") as send_alert,
+    ):
+        baseline = run_gear_patrol_pipeline(db_session, feed_xml=xml, force_baseline=True)
+        repeat = run_gear_patrol_pipeline(db_session, feed_xml=xml)
+
+    leads = db_session.scalars(select(SpecialistLead)).all()
+    assert baseline.status == "SUCCESS"
+    assert baseline.is_baseline is True
+    assert baseline.summary_metadata["new_leads"] == 3  # the 3 real Watches-tagged items only
+    assert {lead.source_id for lead in leads} == {"gear_patrol"}
+    assert all(lead.is_baseline is True for lead in leads)
+    assert all(lead.editorial_freshness == "BASELINE" for lead in leads)
+    waterbury = next(lead for lead in leads if "tw2y93300" in lead.source_url)
+    assert waterbury.reference_candidates == ["TW2Y93300"]
+    assert db_session.query(Event).count() == 0  # Layer B must not fabricate an official Event.
+    assert repeat.status == "SUCCESS"
+    assert repeat.summary_metadata["new_leads"] == 0  # dedup on repeat collection
+    send_alert.assert_not_called()
+
+
+def _gear_patrol_watches_entry(url_slug: str, headline: str, published_at_rfc822: str) -> bytes:
+    """A single-item, Watches-category Gear Patrol RSS feed for the
+    WatchBench acceptance test below."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"
+        xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+    <title>Gear Patrol</title>
+    <item>
+        <title><![CDATA[{headline}]]></title>
+        <link>https://www.gearpatrol.com/watches/{url_slug}/</link>
+        <dc:creator><![CDATA[Sean Tirman]]></dc:creator>
+        <pubDate>{published_at_rfc822}</pubDate>
+        <category><![CDATA[Watches]]></category>
+        <description><![CDATA[New reference announced.]]></description>
+    </item>
+    </channel></rss>""".encode()
+
+
+def test_watchbench_gear_patrol_would_surface_waterbury_style_intelligence_today(
+    db_session: Session, tmp_settings: Settings
+):
+    """WatchBench/Hall-of-Shame acceptance test for the TW2Y93300/TW2Y93400
+    Waterbury Heritage Chronograph specimen: would current Watch Clank
+    surface equivalent upstream Gear Patrol intelligence tomorrow?
+    Steady-state (no baseline), a Waterbury-shaped article published 2
+    hours ago, reference only in the URL slug exactly like the real
+    specimen: must create a real, FRESH SpecialistLead with the reference
+    extracted, and must actually attempt Discord delivery."""
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_gear_patrol_pipeline
+
+    published_at = datetime.now(UTC) - timedelta(hours=2)
+    xml = _gear_patrol_watches_entry(
+        "timex-waterbury-heritage-chronograph-tw2y93300",
+        "Timex Wrenches Its Heritage Waterbury Watch into a Historic Racing Chronograph",
+        format_datetime(published_at),
+    )
+
+    configured = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    calls: list[str] = []
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        run = run_gear_patrol_pipeline(db_session, feed_xml=xml)
+
+    assert run.status == "SUCCESS"
+    assert run.summary_metadata["new_leads"] == 1
+    lead = db_session.scalars(select(SpecialistLead)).one()
+    assert lead.reference_candidates == ["TW2Y93300"]
+    assert lead.is_baseline is False
+    assert lead.editorial_freshness == "FRESH"
+    assert calls == ["https://discord.example/editorial"]  # a real alert attempt, not just a DB row
+
+
+def test_gear_patrol_does_not_affect_existing_sources_and_url_canonicalized(
+    db_session: Session, tmp_settings: Settings
+):
+    """No regression to the existing seven (now eight, with Great G-Shock
+    World) specialist collectors, and a real URL-canonicalization check:
+    a tracking query string on an otherwise-identical URL must still dedup
+    against the bare canonical URL."""
+    from app.models import SpecialistLead
+    from app.services.specialist_leads import run_gear_patrol_pipeline, run_monochrome_pipeline
+
+    monochrome_xml = (FIXTURES / "monochrome_hcc009j1_feed.xml").read_bytes()
+    monochrome_run = run_monochrome_pipeline(db_session, feed_xml=monochrome_xml, force_baseline=True)
+    assert monochrome_run.status == "SUCCESS"
+    assert monochrome_run.summary_metadata["new_leads"] == 1
+
+    tracked_xml = (FIXTURES / "gear_patrol_waterbury_feed.xml").read_bytes().replace(
+        b"timex-waterbury-heritage-chronograph-tw2y93300/",
+        b"timex-waterbury-heritage-chronograph-tw2y93300/?utm_source=newsletter",
+    )
+    first = run_gear_patrol_pipeline(db_session, feed_xml=tracked_xml, force_baseline=True)
+    clean_xml = (FIXTURES / "gear_patrol_waterbury_feed.xml").read_bytes()
+    second = run_gear_patrol_pipeline(db_session, feed_xml=clean_xml)
+
+    assert first.status == "SUCCESS"
+    assert first.summary_metadata["new_leads"] == 3
+    assert second.summary_metadata["new_leads"] == 0  # canonicalized URL deduped against the tracked-URL version
+
+    waterbury = db_session.scalars(
+        select(SpecialistLead).where(SpecialistLead.source_url.like("%tw2y93300%"))
+    ).one()
+    assert "utm_source" not in waterbury.source_url  # stored canonicalized, not the raw tracked URL
+
+    monochrome_leads = db_session.scalars(
+        select(SpecialistLead).where(SpecialistLead.source_id == "monochrome")
+    ).all()
+    assert len(monochrome_leads) == 1  # untouched by anything Gear Patrol-related
+
+
 def test_specialist_cross_source_exact_reference_preserves_leads_but_alerts_once(db_session: Session):
     from datetime import UTC, datetime
     from unittest.mock import patch
