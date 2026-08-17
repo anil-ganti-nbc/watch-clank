@@ -4350,6 +4350,236 @@ def test_force_baseline_is_source_scoped_not_global(db_session: Session, tmp_set
     assert db_session.scalars(select(Event)).first() is not None
 
 
+# --- Incident: baseline absorption of a genuinely recent product-catalogue
+# launch (Timex Weekender New England, TW2Y86600/TW2Y86500) -- see
+# ai/handoff/INCIDENT_TIMEX_BASELINE_ABSORPTION.md. These are the
+# permanent WatchBench/Hall-of-Shame regression for that incident plus its
+# adversarial companions, proving the fixed mechanism (not a hardcoded
+# SKU): a baseline-discovered NEW_REFERENCE is still allowed to alert when
+# the source's own captured published_at proves it's within the tight
+# (72h) freshness window, and stays exactly as silent as before otherwise.
+
+
+def test_baseline_new_reference_with_fresh_published_at_still_creates_event(
+    db_session: Session, tmp_settings: Settings
+):
+    """The core mechanism fix, isolated: an is_new_watch NEW_REFERENCE
+    discovered while baseline is active must still raise an Event if the
+    source captured a published_at within the freshness window -- this is
+    what a specimen shaped exactly like TW2Y86600/TW2Y86500 needs to be
+    caught today."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    published_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    watch = Watch(
+        manufacturer="Timex", brand="Timex", reference_raw="TW2Y86600VQ", reference_canonical="TW2Y86600VQ",
+        collection="YGroup_TimexWeekenderNewEngland34mmLeatherStrapWatch",
+        model_name="Timex Weekender® New England 34mm Leather Strap Watch",
+        extra_specs={"tags": ["YGroup_TimexWeekenderNewEngland34mmLeatherStrapWatch"], "published_at": published_at},
+    )
+    db_session.add(watch)
+    db_session.flush()
+    observation = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://www.timex.com/products/tw2y86600",
+        price=52.5, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(observation)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=observation, is_new_watch=True, force_baseline=True
+    )
+
+    assert result["event_type"] == "NEW_REFERENCE"
+    event = db_session.scalar(select(Event))
+    assert event is not None
+    assert any("baseline override" in r for r in event.extra["reasons"])
+
+
+def test_baseline_new_reference_with_stale_published_at_stays_silent(db_session: Session, tmp_settings: Settings):
+    """A baseline-discovered reference whose own published_at is old (the
+    common case -- most of a freshly onboarded catalogue really is
+    pre-existing inventory) must stay exactly as silent as before. Uses
+    the real 10-day TW2Y86600/TW2Y86500 gap deliberately, to prove the
+    fix does NOT simply un-suppress baseline wholesale."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    published_at = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    watch = Watch(
+        manufacturer="Timex", brand="Timex", reference_raw="TW2Y86600VQ", reference_canonical="TW2Y86600VQ",
+        collection="YGroup_TimexWeekenderNewEngland34mmLeatherStrapWatch",
+        extra_specs={"published_at": published_at},
+    )
+    db_session.add(watch)
+    db_session.flush()
+    observation = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://www.timex.com/products/tw2y86600",
+        price=52.5, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(observation)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=observation, is_new_watch=True, force_baseline=True
+    )
+
+    assert result == {"event_type": None, "reason": "source_scoped_baseline"}
+    assert db_session.scalar(select(Event)) is None
+
+
+def test_baseline_new_reference_without_published_at_stays_silent(db_session: Session, tmp_settings: Settings):
+    """Every collector that never captured a published_at (Citizen, Seiko,
+    Casio UK, ...) must be completely unaffected by this fix -- baseline
+    stays silent exactly as before when there is no evidence to consult."""
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(manufacturer="Citizen", brand="Citizen", reference_raw="AW1234-56W", reference_canonical="AW1234-56W")
+    db_session.add(watch)
+    db_session.flush()
+    observation = SourceObservation(
+        watch_id=watch.id, collector_id="citizen_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://citizenwatch.com/us/en/product/AW1234-56W",
+        price=395.0, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(observation)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=observation, is_new_watch=True, force_baseline=True
+    )
+
+    assert result == {"event_type": None, "reason": "source_scoped_baseline"}
+    assert db_session.scalar(select(Event)) is None
+
+
+def _weekender_new_england_listing_page(published_at: str) -> bytes:
+    import json
+
+    product = {
+        "product_type": "Watch",
+        "handle": "timex-weekender-new-england-34mm-leather-strap-watch-tw2y86600",
+        "title": "Timex Weekender® New England 34mm Leather Strap Watch",
+        "tags": ["badge:new", "YGroup_TimexWeekenderNewEngland34mmLeatherStrapWatch"],
+        "published_at": published_at,
+        "variants": [{"sku": "TW2Y86600VQ", "price": "52.50", "available": True}],
+    }
+    return json.dumps({"products": [product]}).encode("utf-8")
+
+
+def test_watchbench_timex_weekender_new_england_baseline_launch_now_caught(
+    db_session: Session, tmp_settings: Settings
+):
+    """WatchBench/Hall-of-Shame regression for
+    ai/handoff/INCIDENT_TIMEX_BASELINE_ABSORPTION.md, run through the real
+    production entrypoint (run_product_observation_pipeline), not a
+    hardcoded SKU branch: a Weekender-New-England-shaped product, first
+    discovered by Watch Clank while baseline is active, with a
+    published_at within the freshness window, must both create a real
+    Event AND actually reach the configured Discord webhook -- proving the
+    end-to-end path, not just a DB row."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import Event
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    published_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    page1 = _weekender_new_england_listing_page(published_at)
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+
+    configured = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    calls: list[str] = []
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with (
+        patch("app.services.pipeline.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert run.new_watch_count == 1
+    event = db_session.scalar(select(Event).where(Event.event_type == "NEW_REFERENCE"))
+    assert event is not None
+    assert "TW2Y86600VQ" in event.title
+    assert event.extra["alerted"] is True
+    assert calls == ["https://discord.example/editorial"]
+
+
+def test_watchbench_weekender_repeat_run_does_not_duplicate(db_session: Session, tmp_settings: Settings):
+    """Dedup: once the baseline-fresh Event has fired, an identical repeat
+    run of the same listing page (the collector's normal 6-hour re-poll)
+    must not create a second Event -- there was no new transition."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    published_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    page1 = _weekender_new_england_listing_page(published_at)
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    first = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+    second = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert first.new_watch_count == 1
+    assert second.new_watch_count == 0
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1  # not duplicated on repeat
+
+
+def test_watchbench_weekender_fresh_baseline_no_webhook_creates_event_no_crash(
+    db_session: Session, tmp_settings: Settings
+):
+    """Same specimen, no Discord webhook configured: the Event must still
+    persist (real discovery data), the notifier must be a clean no-op, and
+    nothing may crash -- mirrors the existing casio_multi no-webhook
+    regression for this new code path specifically."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event
+    from app.services.epoch import start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+
+    published_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    page1 = _weekender_new_england_listing_page(published_at)
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert run.status == "SUCCESS"
+    event = db_session.scalar(select(Event))
+    assert event is not None
+    assert event.extra["alerted"] is False  # no webhook -> clean no-op, not a crash
+
+
 def test_timex_news_baseline_leads_classify_baseline_not_fresh(db_session: Session, tmp_settings: Settings):
     """The old August/July Timex blog entries discovered during a source-
     scoped Timex baseline must be stored as ReleaseLead evidence but must

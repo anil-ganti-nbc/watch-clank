@@ -89,6 +89,17 @@ class Settings(BaseSettings):
     availability_editorial_min_score: float = Field(default=70.0)
     availability_recent_launch_window_days: int = Field(default=30)
 
+    # A brand-new reference discovered while a source/epoch baseline is
+    # active is still allowed to raise a NEW_REFERENCE Event if the source
+    # captured a structured published_at proving it's within this window --
+    # see app/services/freshness.py::classify_baseline_product_freshness
+    # and ai/handoff/INCIDENT_TIMEX_BASELINE_ABSORPTION.md. Deliberately
+    # tight (matches specialist_freshness_window_hours, not the much wider
+    # availability_recent_launch_window_days above) -- empirically, a wider
+    # window lets through routine catalogue-maintenance noise that shares
+    # no real relationship to when a product actually launched.
+    product_baseline_freshness_window_hours: int = Field(default=72)
+
     # Web catch-up sprint (Phase 1): there are two independent Watch Clank
     # deployments/databases by design (local Windows field-test, Hetzner
     # cloud) and the web UI must never let an operator mistake one for the

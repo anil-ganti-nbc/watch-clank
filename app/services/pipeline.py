@@ -919,6 +919,36 @@ class PipelineService:
             return None
         return days
 
+    @staticmethod
+    def _parse_extra_specs_published_at(extra_specs: dict[str, Any] | None) -> datetime | None:
+        """Best-effort ISO-8601 parse of a Watch's opportunistically
+        captured `published_at` (see app/parsers/timex_products.py).
+        Returns None for anything missing or unparseable -- callers must
+        treat that exactly like "no evidence available", never an error."""
+        if not extra_specs:
+            return None
+        raw = extra_specs.get("published_at")
+        if not raw or not isinstance(raw, str):
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _new_reference_baseline_freshness(self, *, watch: Watch, new_obs: SourceObservation):
+        """Would this NEW_REFERENCE still be worth alerting despite an
+        active baseline, because the source's own evidence proves it's
+        recent? See ai/handoff/INCIDENT_TIMEX_BASELINE_ABSORPTION.md and
+        app.services.freshness.classify_baseline_product_freshness."""
+        from app.services.freshness import classify_baseline_product_freshness
+
+        published_at = self._parse_extra_specs_published_at(watch.extra_specs)
+        return classify_baseline_product_freshness(
+            published_at=published_at,
+            observed_at=new_obs.observed_at,
+            window_hours=get_settings().product_baseline_freshness_window_hours,
+        )
+
     def _record_product_transition(
         self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False,
         experimental: bool = False, force_baseline: bool = False,
@@ -941,6 +971,14 @@ class PipelineService:
         crawl, a known Watch's first official listing in an additional region
         is a NEW_REGION event, even if its announcement is old: novelty belongs
         to the observed commercial transition, not to the Watch's birth date.
+
+        Narrow exception (see ai/handoff/INCIDENT_TIMEX_BASELINE_ABSORPTION.md):
+        a brand-new reference (is_new_watch) discovered while baseline is
+        active is still allowed through if the source captured a structured
+        `published_at` proving it's genuinely recent -- see
+        app.services.freshness.classify_baseline_product_freshness. Every
+        other transition type, and every source without that evidence,
+        remains unconditionally silent during baseline exactly as before.
         """
         from app.services.editorial import (
             EventEvidence,
@@ -949,12 +987,17 @@ class PipelineService:
         )
         from app.services.epoch import is_baseline_active
 
-        if force_baseline:
-            # Sprint 9: source-scoped silent baseline (e.g. Timex joining an
-            # already-baselined epoch) -- independent of the epoch's own
-            # baseline window, see _epoch_fields' docstring.
-            return {"event_type": None, "reason": "source_scoped_baseline"}
-        if is_baseline_active(self.session):
+        baseline_active = force_baseline or is_baseline_active(self.session)
+        baseline_freshness = None
+        if baseline_active and is_new_watch:
+            baseline_freshness = self._new_reference_baseline_freshness(watch=watch, new_obs=new_obs)
+
+        if baseline_active and not (baseline_freshness is not None and baseline_freshness.state == "FRESH"):
+            if force_baseline:
+                # Sprint 9: source-scoped silent baseline (e.g. Timex joining
+                # an already-baselined epoch) -- independent of the epoch's
+                # own baseline window, see _epoch_fields' docstring.
+                return {"event_type": None, "reason": "source_scoped_baseline"}
             # Epoch 1 (or any epoch's) baseline: the Watch/SourceObservation
             # rows already got created by the caller -- that's real discovery
             # data. But a transition detected purely because the fresh DB has
@@ -974,9 +1017,10 @@ class PipelineService:
             # though Watch Clank had genuinely just discovered it. Safe by
             # the same construction as the NEW_REGION branch below: this
             # line is unreachable during an active epoch/force_baseline
-            # (guards above), so it only fires for a catalogue's first
-            # non-baseline sighting of a reference -- exactly the discipline
-            # already required before any collector is scheduled.
+            # (guards above) UNLESS baseline_freshness proved FRESH, so it
+            # otherwise only fires for a catalogue's first non-baseline
+            # sighting of a reference -- exactly the discipline already
+            # required before any collector is scheduled.
             evidence = EventEvidence(
                 event_type="NEW_REFERENCE",
                 manufacturer=watch.manufacturer,
@@ -990,14 +1034,17 @@ class PipelineService:
                 availability_status=new_obs.availability_status,
                 **self._availability_event_character(watch),
             )
+            reasons = [
+                "first-ever product-catalogue observation of this reference; "
+                "no prior region or announcement existed"
+            ]
+            if baseline_freshness is not None and baseline_freshness.state == "FRESH":
+                reasons.append(f"baseline override: {baseline_freshness.reason}")
             return self._persist_product_event(
                 watch=watch,
                 new_obs=new_obs,
                 scored=score_event(evidence),
-                reasons=[
-                    "first-ever product-catalogue observation of this reference; "
-                    "no prior region or announcement existed"
-                ],
+                reasons=reasons,
                 prior_observation=None,
                 notify=notify,
                 experimental=experimental,
