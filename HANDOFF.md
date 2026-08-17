@@ -15,6 +15,51 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 
 # Checkpoint log
 
+## 2026-08-17 — New specialist source: Gear Patrol (Waterbury Heritage Chronograph source-gap specimen) — local macOS only, NOT deployed
+
+**Trigger:** Gear Patrol covered the Timex Waterbury Heritage
+Chronograph (TW2Y93300/TW2Y93400) roughly 3 days before the local
+Timex US collector independently discovered the same references.
+
+**Discovery surface:** Gear Patrol's dedicated `/watches/feed/`,
+`/watches/sitemap.xml`, and even `robots.txt` are all Cloudflare-blocked
+(403/challenge). The sitewide RSS feed (`gearpatrol.com/feed/`) is
+clean HTTP 200 and carries a `<category>` per item -- the only viable
+first-party surface, and the one implemented. `PublicationSource`
+gained a `required_category: str | None` field (default `None`, no-op
+for the 8 existing sources); Gear Patrol is registered with
+`required_category="Watches"`, since a real live fetch showed Watches
+is only ~21% of sitewide volume and a "Deals" post can genuinely
+name-check a tracked brand while being commerce content, not editorial.
+
+**Second fix:** Gear Patrol's real headlines never state the model
+number in prose, only in the URL slug -- reference extraction now also
+scans the canonicalized URL (`_canonicalize_url` strips query/fragment,
+applied ahead of dedup too, both general-purpose, not specimen-specific).
+
+Registered at **tier=3** (not tier=2 -- Gear Patrol is a general
+lifestyle publication, not a single-purpose horology blog like the
+existing tier-2 specialists), 90-min cadence matching Deployant's
+existing tier-3 precedent. `max_items=60` (vs. 20 for other publication
+sources) since the feed is sitewide and 20 raw items would silently
+under-cover real watch content.
+
+Live-validated end-to-end against the real feed into an isolated
+throwaway DB: 8 real leads, including the exact Waterbury specimen
+(`TW2Y93300`, correctly URL-extracted), repeat fetch deduped to 0 new,
+0 category leakage. One honest, minor known limitation found live and
+documented, not fixed: a URL slug ending in `-sale` (`gm-2110d-4a-sale`)
+over-captured as `GM-2110D-4A-SALE` -- affects precision (a missed
+correlation), not safety (no false one). Full writeup:
+`ai/handoff/SPECIALIST_SOURCE_GEAR_PATROL.md`.
+
+7 new tests, 260 passed total, Ruff clean. **Implemented, tested, and
+committed (`b838618`) entirely in the local macOS dev checkout per this
+task's explicit constraint -- not pushed to GitHub, not deployed to
+Hetzner, no timer installed.** `gear_patrol_rss` exists in
+`collector_registry.py`/`health.py` for future deployment but has no
+running schedule anywhere.
+
 ## 2026-08-17 — New specialist source: Great G-Shock World (GCW-B5000 source-gap specimen)
 
 **Trigger:** a real Notebookcheck story (MRG-B5000SA-2/GCW-B5000, 2026-08-16)
