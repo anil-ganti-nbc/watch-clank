@@ -177,14 +177,27 @@ Committed and pushed to `origin/main` (see final report for exact SHA).
 
 ## 9. Hetzner state
 
-`casio_europe_sitemap` deployed alongside the current already-validated
-`cadaac4`-era codebase, force-baselined on first run (matching the
-established onboarding convention used for every other Hetzner source),
-repeat-verified 0/0, one new systemd timer installed
-(`watch-clank-casio-europe-sitemap.timer`, 720min cadence matching UK).
-No other Hetzner collector, timer, secret, or configuration touched.
-`citizen_de` remains retired (not re-enabled). See final report for
-exact before/after image tag and verification detail.
+`casio_europe_sitemap` deployed to Hetzner (image rebuilt from
+`origin/main` at `02d925c`, `WATCH_CLANK_IMAGE` updated from `cadaac4`),
+force-baselined on the real production volume (run 850: 1,475 new
+watches, 0 events), repeat-verified 0/0 (run 851), one new systemd timer
+installed (`watch-clank-casio-europe-sitemap.timer`, 720min cadence
+matching UK). DB integrity `ok` throughout, watches +1,475 (4,194 ->
+5,669), events unchanged at 51, no stale locks.
+
+**One necessary exception found during verification**: this deployment
+was the first time the prior session's already-committed `citizen_de`
+retirement actually reached Hetzner's running code (that session
+deliberately froze Hetzner). Hetzner's `watch-clank-citizen-de-products.timer`
+was still enabled and due to fire in ~1 hour; the retired code no
+longer accepts `citizen_de` as a valid CLI argument, so that firing
+would have failed loudly. Disabled the timer
+(`systemctl --user disable --now`, unit files left on disk, not
+deleted -- same convention as the code-level retirement) before that
+could happen. `citizen_de` remains retired, not re-enabled; this closes
+a deployment gap the retirement always intended, it does not change
+that decision. No other Hetzner collector, timer, secret, or
+configuration touched.
 
 ## 10. Remaining limitations
 
