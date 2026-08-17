@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(default="sqlite:///./data/watch_clank.db")
+    # Multiple timer-launched collectors share the production SQLite file.
+    # WAL permits readers plus one writer, but a writer must wait rather than
+    # immediately fail when another natural run is committing.
+    sqlite_busy_timeout_seconds: float = Field(default=60.0, gt=0)
     snapshot_storage_root: Path = Field(default=Path("./data/snapshots"))
     snapshot_max_payload_bytes: int = Field(default=10 * 1024 * 1024)
     snapshot_compression: str = Field(default="gzip")

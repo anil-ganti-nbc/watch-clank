@@ -21,6 +21,7 @@ def get_engine() -> Engine:
         connect_args = {}
         if url.startswith("sqlite"):
             connect_args["check_same_thread"] = False
+            connect_args["timeout"] = _settings.sqlite_busy_timeout_seconds
 
         _engine = create_engine(
             url,
@@ -34,6 +35,12 @@ def get_engine() -> Engine:
             @event.listens_for(_engine, "connect")
             def _set_sqlite_pragma(dbapi_conn, connection_record):  # type: ignore[no-untyped-def]
                 cursor = dbapi_conn.cursor()
+                # Keep the SQLite driver timeout and the connection pragma in
+                # agreement. The latter is directly observable in diagnostics
+                # and protects every connection created by this engine.
+                cursor.execute(
+                    f"PRAGMA busy_timeout={int(_settings.sqlite_busy_timeout_seconds * 1000)}"
+                )
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA synchronous=NORMAL")
