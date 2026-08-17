@@ -14,7 +14,7 @@ a = Analysis(
         (str(root / "alembic"), "alembic"),
         (str(root / "alembic.ini"), "."),
     ],
-    hiddenimports=["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"],
+    hiddenimports=["scripts.run_pipeline", "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"],
 )
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="Watch Clank", console=False)

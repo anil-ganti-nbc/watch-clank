@@ -3,6 +3,14 @@
 {% block content %}
 <h1>Operations</h1>
 
+{% if field_test %}
+<div class="card section" style="border-color: var(--accent)">
+  <strong>LOCAL FIELD TEST · Local database only · No external delivery</strong>
+  <p class="muted small">Choose one source below. Collection uses Watch Clank’s canonical one-shot runner and writes only to this Mac’s isolated field-test state.</p>
+  <div id="collection-status">Status: IDLE</div>
+</div>
+{% endif %}
+
 {% if ran %}
 <div class="card section" style="border-color: {{ 'var(--ok)' if ran_result == 'ok' else 'var(--err)' }}">
   Ran <strong>{{ ran }}</strong>: {% if ran_result == 'ok' %}<span class="badge badge-ok">completed</span>{% else %}<span class="badge badge-err">failed</span>{% endif %}
@@ -25,12 +33,13 @@
 <p class="muted small">A collector run is currently active or the run lock is held — a new RUN NOW may be safely refused/queued by the pipeline's own overlap protection (SKIPPED_OVERLAP), not by this page.</p>
 {% endif %}
 
-<div class="section">
+{% if not field_test %}<div class="section">
   <form method="post" action="/operations/run-all-safe" onsubmit="return confirm('Run all 15 collectors sequentially? This makes real network requests and can take several minutes.');">
     <button type="submit" class="btn btn-primary" {{ 'disabled' if not is_loopback else '' }}>RUN ALL SAFE COLLECTORS</button>
     <span class="muted small">Runs every registered collector below, sequentially, real network requests.</span>
   </form>
 </div>
+{% endif %}
 
 <div class="section">
   <h2>Collectors</h2>
@@ -52,8 +61,8 @@
         <td class="small">{% if h and h.last_success_at %}{{ h.last_success_at|humantime }}<br><span class="muted">{{ h.last_success_at|relative }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
         <td class="small">{{ h.last_item_count if h and h.last_item_count is not none else '—' }}</td>
         <td>
-          <form method="post" action="/operations/run/{{ c.collector_id }}" style="display:inline">
-            <button type="submit" class="btn" {{ 'disabled' if not is_loopback else '' }}>RUN NOW</button>
+          <form class="collector-form" method="post" action="/operations/run/{{ c.collector_id }}" style="display:inline">
+            <button type="submit" class="btn" {{ 'disabled' if not is_loopback else '' }}>{{ 'COLLECT' if field_test else 'RUN NOW' }}</button>
           </form>
         </td>
       </tr>
@@ -61,4 +70,12 @@
     </tbody>
   </table>
 </div>
+{% if field_test %}
+<script>
+const forms=[...document.querySelectorAll('.collector-form')], buttons=forms.map(f=>f.querySelector('button')), statusBox=document.getElementById('collection-status');
+function show(s){buttons.forEach(b=>b.disabled=!!s.running);let lines=[`Status: ${s.status}${s.collector_id?` · ${s.collector_id}`:''}${s.elapsed_seconds!==undefined?` · ${s.elapsed_seconds}s`:''}`];if(s.result)lines.push(`Items discovered ${s.result.discovered}; parsed ${s.result.parsed}; new watches ${s.result.new_watches}; observations ${s.result.observations}; events ${s.result.events??'—'}; warnings ${s.result.warnings}; failures ${s.result.failures}`);if(s.error)lines.push(s.error);statusBox.innerHTML=lines.map(v=>`<div>${v}</div>`).join('');return s}
+async function poll(reload=false){const s=show(await(await fetch('/operations/status',{cache:'no-store'})).json());if(s.running)setTimeout(()=>poll(true),700);else if(reload)setTimeout(()=>location.reload(),900)}
+forms.forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();buttons.forEach(b=>b.disabled=true);const response=await fetch(form.action,{method:'POST'});show(await response.json());poll(true)}));poll();
+</script>
+{% endif %}
 {% endblock %}

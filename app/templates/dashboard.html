@@ -3,6 +3,22 @@
 {% block content %}
 <h1>Overview</h1>
 
+{% if field_test and total_watches == 0 and total_observations == 0 and total_events == 0 and total_specialist_leads == 0 %}
+<div class="card section" style="border-color: var(--accent)">
+  <h2>No local Watch Clank data yet.</h2>
+  <p>Run a collector to populate this field-test database.</p>
+  <form id="first-collect-form">
+    <select id="first-collector" class="btn" aria-label="Choose source">
+      {% for c in collector_controls %}<option value="{{ c.collector_id }}">{{ c.display_name }}</option>{% endfor %}
+    </select>
+    <button class="btn btn-primary" type="submit">COLLECT</button>
+  </form>
+</div>
+<script>
+document.getElementById('first-collect-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('first-collector').value;await fetch(`/operations/run/${id}`,{method:'POST'});location.href='/operations'});
+</script>
+{% endif %}
+
 <div class="section">
   <div class="grid">
     <div class="card">
