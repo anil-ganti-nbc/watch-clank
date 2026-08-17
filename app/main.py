@@ -24,6 +24,7 @@ from app.models import (
     Event,
     PipelineLedger,
     ReleaseLead,
+    SnapshotFetch,
     SourceObservation,
     SpecialistLead,
     Watch,
@@ -450,7 +451,8 @@ class _LocalCollectionController:
             detail = None if latest is None else {
                 "run_id": latest.id, "status": latest.status, "discovered": latest.discovered_count,
                 "parsed": latest.parsed_count, "new_watches": latest.new_watch_count,
-                "observations": latest.observation_count, "events": (latest.summary_metadata or {}).get("events_created"),
+                "observations": latest.observation_count,
+                "events": len((latest.summary_metadata or {}).get("events", [])) if isinstance((latest.summary_metadata or {}).get("events"), list) else (latest.summary_metadata or {}).get("events_created"),
                 "warnings": latest.warning_count, "failures": latest.failure_count,
                 "summary": latest.summary_metadata or {},
             }
@@ -565,6 +567,36 @@ def run_history(
             "filter_status": status,
             "filter_layer": layer,
         },
+    )
+
+
+@app.get("/evidence", response_class=HTMLResponse)
+def evidence_index(request: Request, db: Session = Depends(get_db)):
+    fetches = db.scalars(
+        select(SnapshotFetch)
+        .options(joinedload(SnapshotFetch.blob))
+        .order_by(desc(SnapshotFetch.fetched_at))
+        .limit(100)
+    ).all()
+    return templates.TemplateResponse(request, "evidence.html", {"active_nav": "evidence", "fetches": fetches})
+
+
+@app.get("/evidence/{fetch_id}", response_class=HTMLResponse)
+def evidence_detail(fetch_id: int, request: Request, db: Session = Depends(get_db)):
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    fetch = db.scalar(
+        select(SnapshotFetch).options(joinedload(SnapshotFetch.blob)).where(SnapshotFetch.id == fetch_id)
+    )
+    if not fetch:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    try:
+        payload = SnapshotStorageService().read(fetch.blob.filepath, fetch.blob.compression_type)
+        preview = payload.decode(fetch.blob.encoding or "utf-8", errors="replace")[:20000]
+    except Exception as error:
+        preview = f"Evidence preview unavailable: {error}"
+    return templates.TemplateResponse(
+        request, "evidence_detail.html", {"active_nav": "evidence", "fetch": fetch, "preview": preview}
     )
 
 

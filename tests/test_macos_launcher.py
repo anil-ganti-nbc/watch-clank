@@ -52,3 +52,13 @@ def test_empty_dashboard_has_selected_collector_cta():
     assert "No local Watch Clank data yet." in template
     assert "first-collector" in template
     assert "COLLECT" in template
+
+
+def test_evidence_views_are_local_snapshot_drilldown():
+    root = Path(__file__).parents[1]
+    index = (root / "app/templates/evidence.html").read_text()
+    detail = (root / "app/templates/evidence_detail.html").read_text()
+    assert "/evidence/{{ f.id }}" in index
+    assert "fetch.blob.filepath" in detail
+    launcher = (root / "native/macos/launcher.py").read_text()
+    assert 'SNAPSHOT_STORAGE_ROOT=str(root / "snapshots")' in launcher
