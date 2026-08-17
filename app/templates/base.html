@@ -63,11 +63,15 @@
     <div class="header-top">
       <div class="logo">⌚ Watch Clank</div>
       <div class="instance-banner">
+        {% if inst.field_test %}<span class="instance-pill labeled">FIELD TEST · READ ONLY</span>{% endif %}
         <span class="instance-pill {{ 'labeled' if inst.instance_configured else 'unlabeled' }}">
           Instance: {{ inst.instance_label }}
         </span>
         <span class="authority-pill" title="Which instance would actually send an editorial Discord alert right now">
           Editorial authority: {{ inst.notification_authority }}
+        </span>
+        <span class="authority-pill" title="Packaged build provenance">
+          v{{ inst.version }} · {{ inst.channel }} · {{ inst.revision }} · {{ inst.state_root }}
         </span>
       </div>
     </div>

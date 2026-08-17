@@ -1,5 +1,7 @@
 """FastAPI application entrypoint for Watch Clank dashboard and API."""
 
+import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,8 +30,9 @@ setup_logging()
 logger = get_logger(__name__)
 settings = get_settings()
 
-TEMPLATES_DIR = Path(__file__).parent / "templates"
-STATIC_DIR = Path(__file__).parent / "static"
+_RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent.parent))
+TEMPLATES_DIR = _RESOURCE_ROOT / "app" / "templates"
+STATIC_DIR = _RESOURCE_ROOT / "app" / "static"
 
 _jinja_env = Environment(
     loader=FileSystemLoader(str(TEMPLATES_DIR)),
@@ -53,6 +56,11 @@ def _instance_context() -> dict:
         "instance_label": label or "UNLABELED",
         "instance_configured": bool(label),
         "notification_authority": notifier.notification_authority(),
+        "field_test": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
+        "version": app.version,
+        "channel": os.getenv("WATCH_CLANK_RELEASE_CHANNEL", "production"),
+        "revision": os.getenv("WATCH_CLANK_BUILD_REVISION", "local development build"),
+        "state_root": os.getenv("WATCH_CLANK_STATE_ROOT", "default server paths"),
     }
 
 
@@ -140,6 +148,27 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def field_test_read_only(request: Request, call_next):
+    """Make the packaged field-test dashboard observational only.
+
+    The switch is opt-in, so existing Windows/Hetzner behavior is unchanged.
+    """
+    if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" and request.method not in {
+        "GET", "HEAD", "OPTIONS"
+    }:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            {"detail": "Watch Clank FIELD TEST is read-only; collection is disabled."},
+            status_code=403,
+        )
+    response = await call_next(request)
+    if os.getenv("WATCH_CLANK_FIELD_TEST") == "1":
+        response.headers["X-Watch-Clank-Mode"] = "FIELD TEST / READ ONLY"
+    return response
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -742,3 +771,17 @@ def health(db: Session = Depends(get_db)):
     }
     code = 200 if not issues else 503
     return JSONResponse(content=body, status_code=code)
+
+
+@app.get("/api/runtime")
+def runtime_provenance():
+    """Non-secret build/state provenance for operator verification."""
+    return {
+        "service": "Watch Clank",
+        "version": app.version,
+        "mode": "FIELD TEST" if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" else "default",
+        "channel": os.getenv("WATCH_CLANK_RELEASE_CHANNEL", "production"),
+        "revision": os.getenv("WATCH_CLANK_BUILD_REVISION", "local development build"),
+        "state_root": os.getenv("WATCH_CLANK_STATE_ROOT", "default server paths"),
+        "read_only": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
+    }

@@ -80,4 +80,9 @@ temp/
 # Windows-machine-specific GUI source, PyInstaller config, and build output.
 local_windows/
 *.spec
+!native/macos/*.spec
 WatchClank*.exe
+
+# Native launcher build products
+native/macos/build/
+native/macos/dist/
