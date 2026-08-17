@@ -30,7 +30,20 @@ KNOWN_COLLECTORS = [
     "casio_uk_sitemap",
     "citizen_news",
     "citizen_products",
-    "citizen_de_products",
+    # citizen_de_products retired 2026-08-17 (owner directive: proved too
+    # noisy/problematic to keep relying on) -- see
+    # ai/handoff/RETIREMENT_CITIZEN_DE.md. Deliberately removed from this
+    # list, not just disabled by a flag: this list is the single source of
+    # truth SAFE_COLLECTOR_IDS/all_controls()/render_units.py all derive
+    # from, so removal here is what actually keeps it out of "RUN ALL SAFE
+    # COLLECTORS", the dashboard, health checks, and any future systemd
+    # unit regeneration -- it cannot silently reappear by being rebuilt
+    # from a stale default. The collector/parser code and its existing
+    # tests are left intact (historical correctness, not deleted) -- only
+    # its production reachability is removed. Hetzner's already-deployed
+    # citizen_de_products systemd timer is UNCHANGED by this commit (not
+    # touched, per the standing Hetzner freeze) and will keep running
+    # there until a future, separately-authorized redeploy.
     "seiko_jp_news",
     "seiko_products",
     "seiko_jp_products",
@@ -60,7 +73,6 @@ EXPECTED_CADENCE_MINUTES = {
     "casio_uk_sitemap": 720,
     "citizen_news": 90,
     "citizen_products": 360,
-    "citizen_de_products": 720,
     "seiko_jp_news": 90,
     "seiko_products": 360,
     "seiko_jp_products": 360,

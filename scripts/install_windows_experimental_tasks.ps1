@@ -1,9 +1,13 @@
-# Install or update the five EXPERIMENTAL Watch Clank scheduled tasks
-# (citizen_news, seiko_jp_news, citizen_products, citizen_de_products,
-# seiko_products) alongside
+# Install or update the four EXPERIMENTAL Watch Clank scheduled tasks
+# (citizen_news, seiko_jp_news, citizen_products, seiko_products) alongside
 # the existing WatchClank-CasioJapan task. Same interactive-logon model, no
 # stored credentials. Each task is independently named/registered so any one
 # can be disabled without affecting the others or Casio.
+#
+# citizen_de_products retired 2026-08-17 (see
+# ai/handoff/RETIREMENT_CITIZEN_DE.md) -- deliberately removed from the
+# $Lanes list below, not merely commented out, so re-running this
+# installer cannot silently reinstall it.
 #
 # Usage:
 #   .\scripts\install_windows_experimental_tasks.ps1
@@ -22,7 +26,6 @@ $Lanes = @(
     @{ Name = "citizen-news";     Task = "WatchClank-CitizenNews";     Interval = 90 },
     @{ Name = "seiko-news";       Task = "WatchClank-SeikoNews";       Interval = 90 },
     @{ Name = "citizen-products"; Task = "WatchClank-CitizenProducts"; Interval = 360 },
-    @{ Name = "citizen-de-products"; Task = "WatchClank-CitizenGermanyProducts"; Interval = 720 },
     @{ Name = "seiko-products";   Task = "WatchClank-SeikoProducts";   Interval = 360 }
 )
 

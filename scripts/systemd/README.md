@@ -126,7 +126,6 @@ cd /opt/watch-clank
 .venv/bin/python -m scripts.run_pipeline --experimental-brand citizen --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-brand seiko --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-product citizen --force-baseline
-.venv/bin/python -m scripts.run_pipeline --experimental-product citizen_de --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-product seiko --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-specialist casioblog --force-baseline
 .venv/bin/python -m scripts.run_pipeline --experimental-specialist gcentral --force-baseline

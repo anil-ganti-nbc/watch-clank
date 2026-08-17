@@ -100,6 +100,24 @@ class Settings(BaseSettings):
     # no real relationship to when a product actually launched.
     product_baseline_freshness_window_hours: int = Field(default=72)
 
+    # Catalogue-backfill burst context (see
+    # ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md). A single
+    # product-observation-pipeline run whose NEW_REFERENCE count clears
+    # BOTH of these bars is annotated (never suppressed) as a probable
+    # catalogue backfill rather than a wave of individual launches --
+    # e.g. a source that was never given a genuine one-time full-catalogue
+    # baseline still working through a large backlog of real, pre-existing
+    # references it simply hadn't discovered yet. Both conditions required
+    # deliberately: min_count alone would flag any large healthy catalogue;
+    # min_ratio alone would flag a normal run that happens to have a tiny
+    # discovered_count. Chosen empirically against real historical runs of
+    # this exact incident (genuine steady-state Timex runs found at most 7
+    # new references per run; the anomalous run found 300 of 300
+    # discovered) -- comfortably conservative on both sides, not a
+    # scientific constant.
+    catalogue_backfill_burst_min_count: int = Field(default=15)
+    catalogue_backfill_burst_min_ratio: float = Field(default=0.5, gt=0, le=1)
+
     # Web catch-up sprint (Phase 1): there are two independent Watch Clank
     # deployments/databases by design (local Windows field-test, Hetzner
     # cloud) and the web UI must never let an operator mistake one for the

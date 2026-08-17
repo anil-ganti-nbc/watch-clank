@@ -64,7 +64,6 @@ run --scheduled --force-baseline
 run --experimental-brand citizen --force-baseline
 run --experimental-brand seiko --force-baseline
 run --experimental-product citizen --force-baseline
-run --experimental-product citizen_de --force-baseline
 run --experimental-product seiko --force-baseline
 run --experimental-product seiko_jp --force-baseline
 run --experimental-product casio_uk --force-baseline

@@ -202,6 +202,147 @@ def test_official_event_appears_in_intelligence(web_client: TestClient, db: Sess
     assert "GWR-B3000-1A" in resp.text
 
 
+# --- 2026-08-17 production-reset sprint: LISTING column ----------------------
+
+
+def _make_event_for_watch(db: Session, watch: Watch) -> Event:
+    event = Event(
+        event_type="NEW_REFERENCE",
+        title=f"{watch.manufacturer} {watch.reference_raw}: NEW_REFERENCE",
+        status="DRAFT",
+        story_score=50.0,
+        extra={"region": "US", "editorial_eligible": True},
+    )
+    db.add(event)
+    db.flush()
+    db.add(EventWatch(event_id=event.id, watch_id=watch.id, role="subject"))
+    db.commit()
+    return event
+
+
+def test_listing_column_renders_manufacturer_url_for_reference_with_observation(
+    web_client: TestClient, db: Session
+):
+    """A reference with a real manufacturer SourceObservation gets a
+    Listing link whose href is exactly that stored URL."""
+    from app.models import SourceObservation
+
+    watch = _make_watch(db, reference_raw="TW2V47400VQ", reference_canonical="TW2V47400VQ", manufacturer="Timex", brand="Timex")
+    db.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="timex_products", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="US",
+            source_url="https://www.timex.com/products/peanuts-x-timex-legacy-34mm-stainless-steel-bracelet-watch-tw2v47400",
+            overall_confidence=90.0,
+        )
+    )
+    db.commit()
+    _make_event_for_watch(db, watch)
+
+    resp = web_client.get("/intelligence")
+    assert resp.status_code == 200
+    assert "Listing" in resp.text
+    assert 'href="https://www.timex.com/products/peanuts-x-timex-legacy-34mm-stainless-steel-bracelet-watch-tw2v47400"' in resp.text
+    # Reference's own internal-detail link must remain unchanged, alongside it.
+    assert f'href="/watches/{watch.id}"' in resp.text
+    assert "TW2V47400VQ" in resp.text
+
+
+def test_listing_link_opens_in_new_tab_with_safe_rel(web_client: TestClient, db: Session):
+    from app.models import SourceObservation
+
+    watch = _make_watch(db)
+    db.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="casio_multi", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="INTL",
+            source_url="https://www.casio.com/products/gwr-b3000-1a/",
+            overall_confidence=90.0,
+        )
+    )
+    db.commit()
+    _make_event_for_watch(db, watch)
+
+    resp = web_client.get("/intelligence")
+    assert resp.status_code == 200
+    # The Listing anchor specifically must carry target="_blank" + rel="noopener".
+    assert 'href="https://www.casio.com/products/gwr-b3000-1a/" target="_blank" rel="noopener"' in resp.text
+
+
+def test_listing_shows_em_dash_when_no_manufacturer_observation_exists(
+    web_client: TestClient, db: Session
+):
+    """A watch with an Event but no SourceObservation at all (e.g. a
+    correlation-only path) must show '—', never a guessed/reconstructed URL."""
+    watch = _make_watch(db, reference_raw="NO-OBS-REF", reference_canonical="NO-OBS-REF")
+    _make_event_for_watch(db, watch)
+
+    resp = web_client.get("/intelligence")
+    assert resp.status_code == 200
+    assert "NO-OBS-REF" in resp.text
+    # No stray manufacturer-looking href should be present for this row.
+    assert "casio.com" not in resp.text and "timex.com" not in resp.text
+
+
+def test_listing_does_not_use_editorial_or_specialist_urls(web_client: TestClient, db: Session):
+    """SpecialistLead rows (Fratello/Deployant/etc.) are a structurally
+    separate table from SourceObservation and are never consulted for
+    Listing -- proven end-to-end: a specialist lead for the SAME watch,
+    with an editorial URL, must not leak into the Listing href, and a
+    real manufacturer SourceObservation must win when both exist."""
+    from app.models import SourceObservation
+
+    watch = _make_watch(db, reference_raw="EDITORIAL-VS-MFR", reference_canonical="EDITORIAL-VS-MFR")
+    db.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="casio_multi", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="INTL",
+            source_url="https://www.casio.com/products/editorial-vs-mfr/",
+            overall_confidence=90.0,
+        )
+    )
+    db.add(
+        SpecialistLead(
+            source_id="fratello_rss", source_type="SPECIALIST_BLOG", lead_type="POSSIBLE_NEW_REFERENCE",
+            title="Fratello covers EDITORIAL-VS-MFR",
+            source_url="https://www.fratellowatches.com/editorial-vs-mfr-coverage/",
+            manufacturer="Casio", confidence=40.0, ingestion_method="collector",
+        )
+    )
+    db.commit()
+    _make_event_for_watch(db, watch)
+
+    resp = web_client.get("/intelligence")
+    assert resp.status_code == 200
+    assert 'href="https://www.casio.com/products/editorial-vs-mfr/" target="_blank" rel="noopener"' in resp.text
+    assert "fratellowatches.com" not in resp.text
+
+
+def test_listing_anchor_has_no_row_click_handler_to_intercept(web_client: TestClient, db: Session):
+    """This app has no row-level click-to-navigate JS anywhere (verified
+    by inspection of app/templates/ and app/static/ -- every navigation
+    is a plain <a> tag), so the Listing link cannot accidentally trigger
+    internal navigation by construction. Proven here by confirming the
+    rendered table row contains no onclick attribute at all."""
+    from app.models import SourceObservation
+
+    watch = _make_watch(db, reference_raw="ROW-CLICK-CHECK", reference_canonical="ROW-CLICK-CHECK")
+    db.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="casio_multi", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="INTL",
+            source_url="https://www.casio.com/products/row-click-check/",
+            overall_confidence=90.0,
+        )
+    )
+    db.commit()
+    _make_event_for_watch(db, watch)
+
+    resp = web_client.get("/intelligence")
+    assert resp.status_code == 200
+    assert "onclick" not in resp.text.lower()
+
+
 # --- Phase 13: Operations mapping + RUN NOW safety ---------------------------
 
 

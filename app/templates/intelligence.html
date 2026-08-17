@@ -16,14 +16,16 @@
   <h2><span class="badge badge-official">OFFICIAL</span> Events</h2>
   {% if current_events %}
   <table>
-    <thead><tr><th>When</th><th>Manufacturer</th><th>Reference</th><th>Event</th><th>Region</th><th>Score</th></tr></thead>
+    <thead><tr><th>When</th><th>Manufacturer</th><th>Reference</th><th>Listing</th><th>Event</th><th>Region</th><th>Score</th></tr></thead>
     <tbody>
     {% for e in current_events %}
       {% set w = e.watches[0].watch if e.watches else None %}
+      {% set latest_obs = (w.observations|sort(attribute='observed_at'))[-1] if w and w.observations else None %}
       <tr>
         <td class="small">{{ e.created_at|humantime }}<br><span class="muted">{{ e.created_at|relative }}</span></td>
         <td>{{ w.manufacturer if w else '—' }}</td>
         <td>{% if w %}<a href="/watches/{{ w.id }}">{{ w.reference_raw }}</a>{% else %}—{% endif %}</td>
+        <td class="small">{% if latest_obs %}<a href="{{ latest_obs.source_url }}" target="_blank" rel="noopener">Listing ↗</a>{% else %}—{% endif %}</td>
         <td><span class="badge badge-official">{{ e.event_type }}</span></td>
         <td class="muted">{{ (e.extra or {}).get('region') or '—' }}</td>
         <td class="small">{{ e.story_score|round(0) if e.story_score is not none else '—' }}</td>

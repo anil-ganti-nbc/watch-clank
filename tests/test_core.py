@@ -689,9 +689,17 @@ def test_scheduled_casio_new_product_creates_event_and_notifies(db_session: Sess
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
     from app.collectors.casio_japan import CasioJapanCollector
     from app.core.config import Settings
-    from app.models import Event
+    from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
+
+    # An established source, not a first-ever run -- see
+    # PipelineService._auto_baseline_for_first_run: a genuinely first-ever
+    # casio_multi run on a database with no epoch is now itself a silent
+    # baseline (2026-08-17 production-reset fix), which this test is not
+    # exercising (that's covered separately).
+    db_session.add(CollectorRun(collector_id="casio_multi", collector_version="0.1", status="SUCCESS"))
+    db_session.flush()
 
     list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
     detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
@@ -726,9 +734,12 @@ def test_scheduled_casio_no_webhook_creates_event_no_crash(db_session: Session, 
 
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
     from app.collectors.casio_japan import CasioJapanCollector
-    from app.models import Event
+    from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(CollectorRun(collector_id="casio_multi", collector_version="0.1", status="SUCCESS"))
+    db_session.flush()
 
     list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
     detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
@@ -757,9 +768,12 @@ def test_scheduled_casio_notifier_failure_does_not_fail_the_run(db_session: Sess
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
     from app.collectors.casio_japan import CasioJapanCollector
     from app.core.config import Settings
-    from app.models import Event
+    from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(CollectorRun(collector_id="casio_multi", collector_version="0.1", status="SUCCESS"))
+    db_session.flush()
 
     list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
     detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
@@ -799,7 +813,7 @@ def test_scheduled_casio_catalog_known_watch_new_region_creates_event_and_notifi
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
     from app.collectors.casio_japan import CasioJapanCollector
     from app.core.config import Settings
-    from app.models import Event, SourceObservation, Watch
+    from app.models import CollectorRun, Event, SourceObservation, Watch
     from app.parsers.base import ParsedWatch, ParseResult
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
@@ -814,6 +828,7 @@ def test_scheduled_casio_catalog_known_watch_new_region_creates_event_and_notifi
             overall_confidence=90.0,
         )
     )
+    db_session.add(CollectorRun(collector_id="casio_multi", collector_version="0.1", status="SUCCESS"))
     db_session.commit()
 
     def news_run_empty(self, *, max_items=None, index_html=None):
@@ -1307,9 +1322,12 @@ def test_brand_news_pipeline_citizen_creates_lead_watch_and_event(db_session: Se
     from app.collectors.base import CollectorRunResult
     from app.collectors.base import FetchResult as CitizenFetchResult
     from app.collectors.citizen_news import CitizenNewsCollector
-    from app.models import Event, ReleaseLead, Watch
+    from app.models import CollectorRun, Event, ReleaseLead, Watch
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(CollectorRun(collector_id="citizen_news", collector_version="0.1", status="SUCCESS"))
+    db_session.flush()
 
     list_html = (FIXTURES / "citizen_news_list.html").read_bytes()
     detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
@@ -4525,7 +4543,7 @@ def test_casio_uk_sitemap_known_gd350s1_from_japan_emits_new_region(
     first observed via the UK sitemap -- must fire NEW_REGION, never a
     fabricated price/availability event, since none exists in this source."""
     from app.collectors.base import FetchResult
-    from app.models import Event, SourceObservation, Watch
+    from app.models import CollectorRun, Event, SourceObservation, Watch
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
 
@@ -4539,6 +4557,7 @@ def test_casio_uk_sitemap_known_gd350s1_from_japan_emits_new_region(
             price=None, currency=None, availability_status=None, overall_confidence=70.0,
         )
     )
+    db_session.add(CollectorRun(collector_id="casio_uk_sitemap", collector_version="0.1", status="SUCCESS"))
     db_session.commit()
 
     xml = (FIXTURES / "casio_uk_sitemap.xml").read_bytes()
@@ -4565,7 +4584,7 @@ def test_citizen_de_first_normal_listing_of_known_us_reference_emits_new_region(
     reference first listed by the official German lane is regional evidence,
     never a cross-currency price change."""
     from app.collectors.base import FetchResult
-    from app.models import Event, SourceObservation, Watch
+    from app.models import CollectorRun, Event, SourceObservation, Watch
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
 
@@ -4582,6 +4601,7 @@ def test_citizen_de_first_normal_listing_of_known_us_reference_emits_new_region(
             price=525.0, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
         )
     )
+    db_session.add(CollectorRun(collector_id="citizen_de_products", collector_version="0.1", status="SUCCESS"))
     db_session.commit()
     product = (FIXTURES / "citizen_de_product_nj0230.html").read_bytes()
     sitemap = (FIXTURES / "citizen_de_products_sitemap.xml").read_bytes()
@@ -4599,6 +4619,40 @@ def test_citizen_de_first_normal_listing_of_known_us_reference_emits_new_region(
     assert len(events) == 1
     assert events[0].extra["region"] == "DE"
     assert db_session.scalar(select(Event).where(Event.event_type == "PRICE_CHANGE")) is None
+
+
+def test_citizen_de_products_is_retired_from_the_active_production_source_set():
+    """citizen_de retired 2026-08-17 (owner directive -- see
+    ai/handoff/RETIREMENT_CITIZEN_DE.md): proved too noisy/problematic to
+    keep relying on. This must stay true even if health.py's
+    KNOWN_COLLECTORS or collector_registry.py's _CONTROLS is rebuilt from
+    a stale copy/paste in the future -- both are checked directly, not
+    inferred. The underlying collector/parser code and its own tests
+    (test_citizen_de_product_parser_uses_first_party_jsonld,
+    test_citizen_de_sitemap_discovery_is_bounded_and_skips_known_urls,
+    the two tests immediately above) are deliberately left intact and
+    still passing -- only production reachability is removed, not the
+    implementation or its history."""
+    from app.services.collector_registry import SAFE_COLLECTOR_IDS, all_controls
+    from app.services.health import EXPECTED_CADENCE_MINUTES, KNOWN_COLLECTORS
+
+    assert "citizen_de_products" not in KNOWN_COLLECTORS
+    assert "citizen_de_products" not in SAFE_COLLECTOR_IDS
+    assert "citizen_de_products" not in EXPECTED_CADENCE_MINUTES
+    assert "citizen_de_products" not in {c.collector_id for c in all_controls()}
+
+    # The CLI surface itself must refuse "citizen_de" too, not just the
+    # production registry -- argparse's own choices validation is the
+    # existing, established rejection mechanism (scripts/run_pipeline.py).
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.run_pipeline", "--experimental-product", "citizen_de"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
 
 
 def test_timex_news_pipeline_baseline_then_repeat_creates_no_duplicate_leads(db_session: Session, tmp_settings: Settings):
@@ -4917,6 +4971,287 @@ def test_watchbench_weekender_fresh_baseline_no_webhook_creates_event_no_crash(
     event = db_session.scalar(select(Event))
     assert event is not None
     assert event.extra["alerted"] is False  # no webhook -> clean no-op, not a crash
+
+
+# --- Incident: 2026-08-17 Timex NEW_REFERENCE catalogue-backfill burst on
+# the local macOS dev database -- see
+# ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md. NOT the same
+# incident as the baseline-absorption fix above: this database had never
+# been given ANY epoch/baseline at all, and ~20 real, pre-existing (per
+# external verification: 2024/2025-model-year) Timex references surfaced
+# as NEW_REFERENCE in a single run because this local DB simply hadn't
+# discovered them yet -- genuine, correct detections, individually true,
+# collectively misleading without context. These are the real references
+# from that incident.
+_REAL_BACKFILL_BURST_REFS = [
+    ("TW2Y46100JR", "Timex x Fortnite T80 36mm Stainless Steel Bracelet Watch", "YGroup_FortniteT80"),
+    ("TW2Y46000JR", "Timex x Fortnite T80 36mm Stainless Steel Bracelet Watch", "YGroup_FortniteT80"),
+    ("TW2Y46400JR", "Timex x Fortnite Weekender 37mm Fabric Strap Watch", "YGroup_FortniteWeekender"),
+    ("TW2Y46300JR", "Timex x Fortnite Acadia 40mm Fabric Strap Watch", "YGroup_FortniteAcadia"),
+    ("TW2Y46200JR", "Timex x Fortnite Acadia 40mm Fabric Strap Watch", "YGroup_FortniteAcadia"),
+    ("TW2Y36200VQ", "Q Timex® Chronograph 40mm Stainless Steel Bracelet Watch", "YGroup_QTimexChronograph"),
+    ("TW2Y36100VQ", "Q Timex® Chronograph 40mm Leather Strap Watch", "YGroup_QTimexChronograph"),
+    ("TW2Y07400VQ", "Timex® Automatic 1983 E Line 34mm Stainless Steel Expansion Band Watch", None),
+    ("TW2Y07500VQ", "Timex® Automatic 1983 E Line 34mm Leather Strap Watch", None),
+    ("TW2Y07800VQ", "MK1® Automatic 40mm Fabric Strap Watch", None),
+    ("TW2W70600JR", "Timex x seconde/seconde/ Loser 38mm Stainless Steel Bracelet Watch", None),
+    ("TW2Y725004A", "Timex Atelier Marine M1a 41mm Swiss Made Automatic Stainless Steel Bracelet", None),
+    ("TW2Y18500VQ", "Waterbury Traditional Chronograph 41mm Stainless Steel Bracelet Watch", "YGroup_WaterburyTraditionalChronograph"),
+    ("TW2Y32300JT", "Timex Grand Canyon National Park 40mm Fabric Strap Watch", "YGroup_NationalParks"),
+    ("TW2Y32200JT", "Timex Rocky Mountain National Park 40mm Fabric Strap Watch", "YGroup_NationalParks"),
+    ("TW2Y32100JT", "Timex Great Smoky Mountains National Park 40mm Fabric Strap Watch", "YGroup_NationalParks"),
+    ("TW2Y32500JT", "Timex Zion National Park 40mm Fabric Strap Watch", "YGroup_NationalParks"),
+    ("TW2Y32000JT", "Timex Acadia National Park 40mm Fabric Strap Watch", "YGroup_NationalParks"),
+    ("TW2Y40400VQ", "Deepwater Meridian 200 38mm HNBR Rubber Strap Watch", "YGroup_DeepwaterMeridian"),
+    ("TW2Y39900VQ", "Deepwater Meridian 200 Automatic 44mm HNBR Rubber Strap Watch", "YGroup_DeepwaterMeridian"),
+]
+
+
+def _timex_listing_page(products: list[tuple[str, str, str | None]]) -> bytes:
+    """Build a synthetic Shopify products.json listing page from
+    (sku, title, ygroup_tag) tuples, matching the real shape
+    app/parsers/timex_products.py expects."""
+    import json
+
+    payload = {
+        "products": [
+            {
+                "product_type": "Watch",
+                "handle": sku.lower(),
+                "title": title,
+                "tags": [ygroup] if ygroup else [],
+                "published_at": None,
+                "variants": [{"sku": sku, "price": "99.00", "available": True}],
+            }
+            for sku, title, ygroup in products
+        ]
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def test_timex_catalogue_backfill_burst_on_first_run_is_silently_baselined(
+    db_session: Session, tmp_settings: Settings
+):
+    """WatchBench regression for the real 2026-08-17 burst, superseded by
+    the 2026-08-17 production-reset fix (see
+    ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md's addendum):
+    20 genuinely pre-existing (per this incident's own external
+    verification), never-before-locally-seen Timex references arriving in
+    one run, on a database with no epoch and no prior timex_products run
+    at all, is now the exact "uninitialized DB" case the auto-baseline
+    invariant exists to catch -- this is Case A from the production-reset
+    brief (fresh baseline -> zero actionable current NEW_REFERENCE).
+
+    Every Watch/SourceObservation is still persisted (this is baseline
+    evidence, not a discard), but zero Events fire -- a stronger
+    protection than the prior "annotate but still fire" design, which is
+    still exercised for a genuine non-first-run burst by
+    test_timex_catalogue_backfill_burst_on_established_source_still_annotates
+    below."""
+    from app.models import Event, SourceObservation
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    page1 = _timex_listing_page(_REAL_BACKFILL_BURST_REFS)
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert run.new_watch_count == len(_REAL_BACKFILL_BURST_REFS)  # baseline evidence still persisted
+    assert (
+        db_session.query(SourceObservation).count() == len(_REAL_BACKFILL_BURST_REFS)
+    )
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all()
+    assert len(events) == 0  # nothing actionable from a first-ever baseline sweep
+    assert run.summary_metadata["auto_baseline_applied"] is True
+
+
+def test_timex_catalogue_backfill_burst_on_established_source_still_annotates(
+    db_session: Session, tmp_settings: Settings
+):
+    """The pre-existing burst-context annotation (_annotate_new_reference_
+    burst) is still correct and still useful for the narrower case this
+    auto-baseline fix does NOT cover by design: a large simultaneous batch
+    arriving on a collector that has already run before (so auto-baseline
+    deliberately does not fire -- e.g. a genuine bulk catalogue update on
+    an established source). Seed one prior timex_products run first so
+    this is not a first-ever run, then replay the same real burst."""
+    from app.models import CollectorRun, Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(CollectorRun(collector_id="timex_products", collector_version="0.1", status="SUCCESS"))
+    db_session.flush()
+
+    page1 = _timex_listing_page(_REAL_BACKFILL_BURST_REFS)
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert run.new_watch_count == len(_REAL_BACKFILL_BURST_REFS)
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all()
+    assert len(events) == len(_REAL_BACKFILL_BURST_REFS)  # every detection retained, nothing discarded
+
+    for evt in events:
+        assert evt.extra["probable_catalogue_backfill"] is True
+        assert evt.extra["same_run_new_reference_count"] == len(_REAL_BACKFILL_BURST_REFS)
+        assert evt.extra["same_run_discovered_count"] == len(_REAL_BACKFILL_BURST_REFS)
+        assert evt.event_type == "NEW_REFERENCE"
+        assert evt.story_score is not None
+
+    assert run.summary_metadata["backfill_context"]["probable_catalogue_backfill"] is True
+    assert run.summary_metadata["auto_baseline_applied"] is False
+
+
+def test_isolated_new_timex_reference_not_flagged_as_backfill(db_session: Session, tmp_settings: Settings):
+    """A genuinely isolated new reference on an established source (the
+    common, everyday case -- not a first-ever run, so auto-baseline does
+    not apply) must NOT be flagged as a probable backfill -- burst
+    detection must not cry wolf on ordinary discovery."""
+    from app.models import CollectorRun, Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(CollectorRun(collector_id="timex_products", collector_version="0.1", status="SUCCESS"))
+    db_session.flush()
+
+    page1 = _timex_listing_page(_REAL_BACKFILL_BURST_REFS[:1])
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert run.new_watch_count == 1
+    event = db_session.scalar(select(Event).where(Event.event_type == "NEW_REFERENCE"))
+    assert event is not None
+    assert "probable_catalogue_backfill" not in event.extra  # not patched -- not a burst
+    assert run.summary_metadata["backfill_context"]["probable_catalogue_backfill"] is False
+
+
+def test_timex_backfill_burst_repeat_run_no_phantom_duplicates(db_session: Session, tmp_settings: Settings):
+    """Rerunning the exact same first-ever-burst state must not create a
+    second wave of Events for references already discovered. The first
+    run auto-baselines silently (0 events, per the production-reset fix);
+    the second run must stay at 0 events too, both because it is now a
+    steady-state repeat (dedup) and because nothing was ever actionable in
+    the first place -- this is Case A+B from the production-reset brief
+    (fresh baseline, then an unchanged second run) proven together."""
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    page1 = _timex_listing_page(_REAL_BACKFILL_BURST_REFS)
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    first = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+    second = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+
+    assert first.new_watch_count == len(_REAL_BACKFILL_BURST_REFS)
+    assert first.summary_metadata["auto_baseline_applied"] is True
+    assert second.new_watch_count == 0
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 0  # no events from the silent baseline, no phantom second wave either
+
+
+def test_backfill_burst_annotation_does_not_affect_other_brands(db_session: Session, tmp_settings: Settings):
+    """A Timex backfill burst in one run must not leak burst context onto
+    an unrelated brand processed separately -- _annotate_new_reference_burst
+    is scoped to exactly the event_ids its own caller passes it, by
+    construction, but this proves it end to end rather than by inspection
+    alone. A single genuinely-new Citizen reference, discovered completely
+    independently of the Timex burst, must come out with a clean extra."""
+    from app.models import Event, EventWatch, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    timex_page = _timex_listing_page(_REAL_BACKFILL_BURST_REFS)
+    timex_empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    pipeline.run_product_observation_pipeline("timex", offline_fixture=[timex_page, timex_empty])
+
+    citizen_watch = Watch(manufacturer="Citizen", brand="Citizen", reference_raw="AW1234-56W", reference_canonical="AW1234-56W")
+    db_session.add(citizen_watch)
+    db_session.flush()
+    citizen_observation = SourceObservation(
+        watch_id=citizen_watch.id, collector_id="citizen_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://citizenwatch.com/us/en/product/AW1234-56W",
+        price=395.0, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(citizen_observation)
+    db_session.flush()
+    pipeline._record_product_transition(watch=citizen_watch, new_obs=citizen_observation, is_new_watch=True)
+
+    citizen_event = db_session.scalar(
+        select(Event)
+        .join(EventWatch, EventWatch.event_id == Event.id)
+        .where(EventWatch.watch_id == citizen_watch.id, Event.event_type == "NEW_REFERENCE")
+    )
+    assert citizen_event is not None
+    assert "probable_catalogue_backfill" not in citizen_event.extra
+    assert "same_run_new_reference_count" not in citizen_event.extra
+
+
+def test_genuine_future_delta_is_detected_after_auto_baseline_but_repeat_is_quiet(
+    db_session: Session, tmp_settings: Settings
+):
+    """2026-08-17 production-reset acceptance proof (the exact story from
+    the operation's own brief): a fresh database, operated with NO manual
+    epoch and NO explicit --force-baseline flag anywhere -- exactly how a
+    real user/dashboard button operates it -- must still:
+
+    1. baseline references A/B/C on the first-ever run: persisted, but
+       zero actionable NEW_REFERENCE (via auto-baseline, not force_baseline).
+    2. a later, genuinely healthy observation of A/B/C/D must NOT re-flag
+       A/B/C (already known) -- only D, which is genuinely absent from
+       the baseline, becomes a real, current NEW_REFERENCE.
+    3. repeating that same A/B/C/D observation again must not re-fire a
+       phantom second NEW_REFERENCE for D.
+    """
+    from app.models import CollectorRun, Event
+    from app.services.epoch import get_active_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    a, b, c, d = _REAL_BACKFILL_BURST_REFS[0], _REAL_BACKFILL_BURST_REFS[1], _REAL_BACKFILL_BURST_REFS[2], _REAL_BACKFILL_BURST_REFS[3]
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+
+    # Step 1: genuine first-ever run, A/B/C only. No epoch anywhere in this
+    # test, no force_baseline argument passed -- the exact "normal
+    # operation" condition this whole invariant exists to protect.
+    assert get_active_epoch(db_session) is None
+    baseline_run = pipeline.run_product_observation_pipeline(
+        "timex", offline_fixture=[_timex_listing_page([a, b, c]), empty]
+    )
+    assert baseline_run.new_watch_count == 3
+    assert baseline_run.summary_metadata["auto_baseline_applied"] is True
+    assert db_session.query(Event).count() == 0
+
+    # Step 2: a later, healthy observation of A/B/C/D. Not a first run
+    # anymore (step 1 already created a timex_products CollectorRun), so
+    # auto-baseline correctly does NOT apply -- this is genuine current
+    # operation, and D is genuinely new.
+    assert db_session.query(CollectorRun).filter(CollectorRun.collector_id == "timex_products").count() == 1
+    delta_run = pipeline.run_product_observation_pipeline(
+        "timex", offline_fixture=[_timex_listing_page([a, b, c, d]), empty]
+    )
+    assert delta_run.summary_metadata["auto_baseline_applied"] is False
+    assert delta_run.new_watch_count == 1  # only D is new; A/B/C already known
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all()
+    assert len(events) == 1
+    d_event = events[0]
+    assert d_event.title.split(":")[0].strip().endswith(d[0])  # the NEW_REFERENCE is genuinely about D
+
+    # Step 3: repeat the same A/B/C/D observation. D must not phantom-fire
+    # a second time; no new watches, no new events at all.
+    repeat_run = pipeline.run_product_observation_pipeline(
+        "timex", offline_fixture=[_timex_listing_page([a, b, c, d]), empty]
+    )
+    assert repeat_run.new_watch_count == 0
+    assert db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all() == [d_event]
 
 
 def test_timex_news_baseline_leads_classify_baseline_not_fresh(db_session: Session, tmp_settings: Settings):

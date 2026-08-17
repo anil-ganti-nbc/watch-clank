@@ -41,9 +41,6 @@ _CONTROLS: dict[str, CollectorControl] = {
     "citizen_products": CollectorControl(
         "citizen_products", "Citizen products (US)", "OFFICIAL", ("--experimental-product", "citizen")
     ),
-    "citizen_de_products": CollectorControl(
-        "citizen_de_products", "Citizen products (Germany)", "OFFICIAL", ("--experimental-product", "citizen_de")
-    ),
     "seiko_jp_news": CollectorControl("seiko_jp_news", "Seiko news", "OFFICIAL", ("--experimental-brand", "seiko")),
     "seiko_products": CollectorControl(
         "seiko_products", "Seiko products", "OFFICIAL", ("--experimental-product", "seiko")

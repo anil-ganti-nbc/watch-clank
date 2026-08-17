@@ -273,6 +273,16 @@ def recent_intelligence(request: Request, show: str = "current", db: Session = D
       evidence must never masquerade as breaking news. ?show=historical
       reveals STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED
       leads explicitly -- never mixed into the default view.
+
+    The LISTING column (2026-08-17 production-reset sprint) reuses the
+    Watch's own existing `observations` relationship as its source of
+    truth for a manufacturer product-page link -- SourceObservation rows
+    are, by construction, only ever written by official/manufacturer-
+    facing collectors (product AND news lanes), never by specialist/
+    editorial sources (those write to SpecialistLead.source_url instead,
+    a structurally separate table/column already excluded from this
+    query). No new URL storage, no manufacturer-specific URL builder --
+    see intelligence.html for the "most recent observation" selection.
     """
     from app.models import EventWatch
     from app.services.editorial import event_row_is_editorially_eligible
@@ -282,7 +292,7 @@ def recent_intelligence(request: Request, show: str = "current", db: Session = D
 
     all_events = db.scalars(
         select(Event)
-        .options(joinedload(Event.watches).joinedload(EventWatch.watch))
+        .options(joinedload(Event.watches).joinedload(EventWatch.watch).joinedload(Watch.observations))
         .order_by(desc(Event.created_at))
         .limit(200)
     ).unique().all()

@@ -92,6 +92,32 @@ class PipelineService:
             "is_baseline": force_baseline or bool(epoch and is_baseline_active(self.session)),
         }
 
+    def _auto_baseline_for_first_run(self, collector_id: str) -> bool:
+        """Uninitialized-DB safety invariant (2026-08-17 production reset --
+        see ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md's
+        addendum). A genuinely first-ever run for a collector, on a
+        database that has never had an epoch, must not be able to flood
+        NEW_REFERENCE/NEW_REGION events just because whoever triggered it
+        (a script, a dashboard "RUN ALL SAFE COLLECTORS" click) didn't
+        know to pass --force-baseline -- this is exactly how both the
+        local dev database and a fresh field-test database independently
+        reproduced the same Timex flood.
+
+        Deliberately narrow: only True when BOTH conditions hold, so it
+        can never change behavior for a collector that has already run at
+        least once (every currently-active Hetzner source has real run
+        history, so this is always False there) or on a database with a
+        real epoch (where is_baseline_active() already governs baseline
+        state correctly, and should keep doing so unchanged).
+        """
+        from app.services.epoch import get_active_epoch
+
+        if get_active_epoch(self.session) is not None:
+            return False
+        return (
+            self.session.query(CollectorRun).filter(CollectorRun.collector_id == collector_id).first() is None
+        )
+
     def _stale_official_announcement(self, lead) -> str | None:
         """Sprint 10 hardening: returns a suppression reason if `lead`
         (a ReleaseLead) is from a source in _ISO_TIMESTAMP_NEWS_SOURCES
@@ -949,6 +975,48 @@ class PipelineService:
             window_hours=get_settings().product_baseline_freshness_window_hours,
         )
 
+    def _annotate_new_reference_burst(
+        self, *, new_reference_event_ids: list[int], discovered_count: int
+    ) -> dict[str, Any] | None:
+        """Stamp same-run burst context onto every NEW_REFERENCE Event this
+        run created -- never suppresses, never rescopes, never rescoreds
+        anything. See ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md.
+
+        A single run's NEW_REFERENCE events are individually scored/
+        persisted/notified inside the fetch loop above, before the run's
+        true final count is known -- this runs once, after that loop, and
+        patches the Event rows already created rather than restructuring
+        the live per-item notify path (which real, non-burst runs also use
+        every day in production; not touched here). Discord alerts for
+        events in this run were already sent by the time this executes, so
+        this only affects what a human reviewing the DB/dashboard sees
+        after the fact -- a real, disclosed limitation, not an oversight.
+        """
+        count = len(new_reference_event_ids)
+        if count == 0:
+            return None
+
+        settings = get_settings()
+        ratio = count / discovered_count if discovered_count else 0.0
+        probable_backfill = (
+            count >= settings.catalogue_backfill_burst_min_count
+            and ratio >= settings.catalogue_backfill_burst_min_ratio
+        )
+        context = {
+            "same_run_new_reference_count": count,
+            "same_run_discovered_count": discovered_count,
+            "probable_catalogue_backfill": probable_backfill,
+        }
+        if not probable_backfill:
+            return context
+
+        from app.models import Event
+
+        rows = self.session.query(Event).filter(Event.id.in_(new_reference_event_ids)).all()
+        for event in rows:
+            event.extra = {**(event.extra or {}), **context}
+        return context
+
     def _record_product_transition(
         self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False,
         experimental: bool = False, force_baseline: bool = False,
@@ -1586,6 +1654,16 @@ class PipelineService:
         emit_events=False default -- Casio's production path could
         discover a genuinely new watch and never create an Event for it,
         regardless of Discord configuration.
+
+        auto_baseline (added 2026-08-17, see
+        ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md): unlike
+        run_brand_news_pipeline/run_product_observation_pipeline, this
+        function has never accepted an explicit force_baseline parameter
+        (there is no supported way to pass one from the CLI or dashboard).
+        `_auto_baseline_for_first_run("casio_multi")` closes that gap: a
+        genuinely first-ever casio_multi run, on a database with no
+        epoch, is treated as a silent baseline automatically -- see that
+        method's docstring for the exact, narrow conditions.
         """
         from app.collectors.casio_intl_news import (
             COLLECTOR_ID as NEWS_ID,
@@ -1599,6 +1677,7 @@ class PipelineService:
         from app.collectors.casio_japan import COLLECTOR_ID as CAT_ID
 
         settings = get_settings()
+        auto_baseline = self._auto_baseline_for_first_run("casio_multi")
         lock = RunLockService(self.session, settings, collector_id="casio_multi")
         if not skip_lock:
             lock_result = lock.acquire()
@@ -1625,7 +1704,7 @@ class PipelineService:
             collector_version="0.2.0",
             started_at=started,
             status="RUNNING",
-            **self._epoch_fields(),
+            **self._epoch_fields(force_baseline=auto_baseline),
         )
         self.session.add(run)
         self.session.commit()
@@ -1663,6 +1742,7 @@ class PipelineService:
                     collector_version=NEWS_VER,
                     emit_events=emit_events,
                     notify=emit_events,
+                    force_baseline=auto_baseline,
                 )
                 if out["success"]:
                     parsed += 1
@@ -1699,7 +1779,8 @@ class PipelineService:
                                 failures += 1
                                 continue
                             out = self.process_fetch_result(
-                                fr, run_id=run.id, emit_events=emit_events, notify=emit_events
+                                fr, run_id=run.id, emit_events=emit_events, notify=emit_events,
+                                force_baseline=auto_baseline,
                             )
                             if out["success"]:
                                 parsed += 1
@@ -1742,6 +1823,7 @@ class PipelineService:
                 "components": components,
                 "new_leads": new_leads,
                 "new_watches": new_watches,
+                "auto_baseline_applied": auto_baseline,
             }
             self.session.commit()
             logger.info(
@@ -1789,6 +1871,11 @@ class PipelineService:
 
         force_baseline (Sprint 9): source-scoped silent baseline for a
         brand joining an already-baselined epoch -- see _epoch_fields.
+        Automatically also applied (2026-08-17, see
+        ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md) on a
+        genuinely first-ever run for this brand's collector on a database
+        with no epoch, regardless of the caller-supplied value -- see
+        `_auto_baseline_for_first_run`.
         """
         if not self._BRAND_REGISTRY:
             from app.collectors.citizen_news import (
@@ -1857,6 +1944,7 @@ class PipelineService:
         if brand not in self._BRAND_REGISTRY:
             raise ValueError(f"unsupported experimental brand: {brand!r}")
         cfg = self._BRAND_REGISTRY[brand]
+        effective_force_baseline = force_baseline or self._auto_baseline_for_first_run(cfg["collector_id"])
 
         # Isolated overlap protection: distinct collector_id AND distinct
         # lock file per brand, so this can never interact with the Casio
@@ -1889,7 +1977,7 @@ class PipelineService:
             collector_version=cfg["collector_version"],
             started_at=started,
             status="RUNNING",
-            **self._epoch_fields(force_baseline=force_baseline),
+            **self._epoch_fields(force_baseline=effective_force_baseline),
         )
         self.session.add(run)
         self.session.commit()
@@ -1922,7 +2010,7 @@ class PipelineService:
                     emit_events=emit_events,
                     notify=emit_events,
                     experimental=True,
-                    force_baseline=force_baseline,
+                    force_baseline=effective_force_baseline,
                 )
                 if out["success"]:
                     parsed += 1
@@ -1949,6 +2037,7 @@ class PipelineService:
                 "new_leads": new_leads,
                 "new_watches": new_watches,
                 "events": events,
+                "auto_baseline_applied": effective_force_baseline and not force_baseline,
             }
             self.session.commit()
             logger.info(
@@ -1997,6 +2086,14 @@ class PipelineService:
 
         force_baseline (Sprint 9): source-scoped silent baseline for a
         brand joining an already-baselined epoch -- see _epoch_fields.
+        Automatically also applied (2026-08-17, see
+        ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md) on a
+        genuinely first-ever run for this brand's collector on a database
+        with no epoch, regardless of the caller-supplied value -- this is
+        the exact mechanism that failed both the local dev database and a
+        fresh field-test database, each independently reproducing a
+        several-hundred-event Timex NEW_REFERENCE flood. See
+        `_auto_baseline_for_first_run`.
         """
         if not self._PRODUCT_REGISTRY:
             from app.collectors.casio_uk_sitemap import (
@@ -2141,6 +2238,7 @@ class PipelineService:
         if brand not in self._PRODUCT_REGISTRY:
             raise ValueError(f"unsupported experimental product brand: {brand!r}")
         cfg = self._PRODUCT_REGISTRY[brand]
+        effective_force_baseline = force_baseline or self._auto_baseline_for_first_run(cfg["collector_id"])
 
         settings = get_settings()
         lock_path = settings.resolved_lock_path.parent / f"{cfg['collector_id']}.run.lock"
@@ -2168,7 +2266,7 @@ class PipelineService:
             collector_version=cfg["collector_version"],
             started_at=started,
             status="RUNNING",
-            **self._epoch_fields(force_baseline=force_baseline),
+            **self._epoch_fields(force_baseline=effective_force_baseline),
         )
         self.session.add(run)
         self.session.commit()
@@ -2179,7 +2277,7 @@ class PipelineService:
             effective_max_items = (
                 max_items
                 if max_items is not None
-                else (None if force_baseline else cfg.get("default_max_items", 300))
+                else (None if effective_force_baseline else cfg.get("default_max_items", 300))
             )
             run_kwargs = {"max_items": effective_max_items}
             if offline_fixture is not None:
@@ -2212,7 +2310,7 @@ class PipelineService:
                     emit_events=emit_events,
                     notify=emit_events,
                     experimental=True,
-                    force_baseline=force_baseline,
+                    force_baseline=effective_force_baseline,
                 )
                 if out["success"]:
                     parsed += 1
@@ -2223,6 +2321,13 @@ class PipelineService:
                         events.append(pe)
                 else:
                     failures += 1
+
+            backfill_context = self._annotate_new_reference_burst(
+                new_reference_event_ids=[
+                    pe["event_id"] for pe in events if pe.get("event_type") == "NEW_REFERENCE" and pe.get("event_id")
+                ],
+                discovered_count=len(result.discovered),
+            )
 
             completed = datetime.now(UTC)
             run.completed_at = completed
@@ -2238,6 +2343,8 @@ class PipelineService:
                 "component_status": status,
                 "new_watches": new_watches,
                 "events": events,
+                "auto_baseline_applied": effective_force_baseline and not force_baseline,
+                **({"backfill_context": backfill_context} if backfill_context else {}),
             }
             self.session.commit()
             logger.info(

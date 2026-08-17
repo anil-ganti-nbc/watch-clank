@@ -299,7 +299,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--experimental-product",
-        choices=["casio_uk", "citizen", "citizen_de", "seiko", "seiko_jp", "timex"],
+        # citizen_de retired 2026-08-17 -- see ai/handoff/RETIREMENT_CITIZEN_DE.md.
+        # Removed from the CLI surface (not just the production registry) so
+        # it cannot be invoked as a live collection lane by accident; the
+        # underlying pipeline method remains reachable directly from Python
+        # for tests/archaeology only.
+        choices=["casio_uk", "citizen", "seiko", "seiko_jp", "timex"],
         default=None,
         help="Run an EXPERIMENTAL product/catalogue-observation lane instead of Casio",
     )

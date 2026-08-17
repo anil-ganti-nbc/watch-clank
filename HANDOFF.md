@@ -15,6 +15,61 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 
 # Checkpoint log
 
+## 2026-08-17 — Production-state audit, clean-baseline reset, uninitialized-DB invariant, Listing column, citizen_de retired
+
+The field-test macOS app (`~/Library/Application Support/Watch Clank/` —
+a genuinely separate database from both `.mac-dev` and Hetzner) flooded
+300 Timex `NEW_REFERENCE` events on its first-ever `timex_products` RUN
+NOW click, for the same root reason as the `.mac-dev` incident diagnosed
+earlier the same day (`ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md`):
+no epoch, no `--force-baseline`, and (newly discovered) field-test mode's
+dashboard has no bulk-run button at all, only a per-collector RUN NOW,
+so there was never a "run all with baseline" ritual available to begin
+with. Fixed at the actual structural cause this time, not just
+documented: **`PipelineService._auto_baseline_for_first_run()`** — a
+genuinely first-ever run for any collector, on a database with no epoch,
+now auto-baselines itself (persists watches/observations, suppresses
+Events) with zero flags/rituals required, wired into all three
+production entrypoints that were missing it
+(`run_multi_source_pipeline`/casio_multi had no `force_baseline`
+parameter at all before this). The specialist/RSS lane was deliberately
+left alone — already correctly protected by Sprint 8's
+`editorial_freshness` classification, a structurally different and
+already-sufficient mechanism.
+
+Proven with a real two-pass acceptance test against the actual rebuilt
+packaged app (a first attempt was mistakenly run against the pre-fix
+binary and correctly reproduced the original flood — caught, discarded,
+redone against a real rebuild): Pass 1 (genuinely fresh DB, no manual
+epoch, every collector triggered one at a time via the real `RUN NOW`
+endpoint) → 3,837 watches persisted, only 12 events, every one
+individually explained by the pre-existing `classify_baseline_product_freshness`
+72-hour safety valve (genuinely recent first-party-confirmed launches,
+not noise). Pass 2 (unchanged repeat) → 0 new watches, 0 new events, DB
+integrity `ok`, 0 stale runs/locks. Old field-test DB archived via the
+project's own `scripts/db_backup.py` (checksum/integrity/row-counts
+recorded) before the reset; old `.mac-dev`-style repair playbook not
+needed this time since the invariant now self-applies.
+
+Also this session: **`citizen_de` retired** from every production
+surface (owner directive — proved too noisy) — registry/CLI/scheduler
+scripts, code and its 4 tests left intact, historical DB rows preserved
+(`ai/handoff/RETIREMENT_CITIZEN_DE.md`). **LISTING column** added to the
+`/intelligence` Events table (`WHEN | MANUFACTURER | REFERENCE | LISTING
+| EVENT | REGION | SCORE`) — reuses the Watch's existing `observations`
+relationship as its only source of truth, no new URL storage; verified
+live against the real rebuilt app (Reference → internal detail page
+unchanged, Listing → real `timex.com` product URL, new tab, `—` when no
+manufacturer observation exists). The previously-pending Timex-backfill-
+burst-annotation patch (`_annotate_new_reference_burst`,
+`ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md`) is committed as
+part of this same operation — it's complementary to, not a substitute
+for, the new invariant (it annotates a burst on an *already-baselined*
+source; the new fix prevents the burst from ever reaching a first-run
+source at all). Full writeup: `ai/handoff/PRODUCTION_RESET_20260817.md`.
+Hetzner: completely untouched (frozen per explicit instruction). 272
+tests (was 245), Ruff clean.
+
 ## 2026-08-17 — New specialist source: Gear Patrol (Waterbury Heritage Chronograph source-gap specimen) — local macOS only, NOT deployed
 
 **Trigger:** Gear Patrol covered the Timex Waterbury Heritage

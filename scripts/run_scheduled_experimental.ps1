@@ -16,7 +16,6 @@
 #   .\scripts\run_scheduled_experimental.ps1 -Lane citizen-news
 #   .\scripts\run_scheduled_experimental.ps1 -Lane seiko-news
 #   .\scripts\run_scheduled_experimental.ps1 -Lane citizen-products
-#   .\scripts\run_scheduled_experimental.ps1 -Lane citizen-de-products
 #   .\scripts\run_scheduled_experimental.ps1 -Lane seiko-products
 #   .\scripts\run_scheduled_experimental.ps1 -Lane casioblog
 #   .\scripts\run_scheduled_experimental.ps1 -Lane gcentral
@@ -26,17 +25,19 @@
 
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "citizen-de-products", "seiko-products", "casioblog", "gcentral", "plus9time", "monochrome", "deployant", "fratello", "watchtime", "timex-news", "timex-products")]
+    [ValidateSet("citizen-news", "seiko-news", "citizen-products", "seiko-products", "casioblog", "gcentral", "plus9time", "monochrome", "deployant", "fratello", "watchtime", "timex-news", "timex-products")]
     [string]$Lane
 )
 
 $ErrorActionPreference = "Stop"
 
+# citizen-de-products retired 2026-08-17 -- see
+# ai/handoff/RETIREMENT_CITIZEN_DE.md. Removed from ValidateSet above too,
+# not just this table, so it cannot be invoked at all anymore.
 $LaneArgs = @{
     "citizen-news"      = @("--experimental-brand", "citizen")
     "seiko-news"        = @("--experimental-brand", "seiko")
     "citizen-products"  = @("--experimental-product", "citizen")
-    "citizen-de-products" = @("--experimental-product", "citizen_de")
     "seiko-products"    = @("--experimental-product", "seiko")
     "casioblog"         = @("--experimental-specialist", "casioblog")
     "gcentral"          = @("--experimental-specialist", "gcentral")
