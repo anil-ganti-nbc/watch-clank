@@ -20,7 +20,9 @@ be active) rather than surfacing it immediately and loudly.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -37,7 +39,13 @@ class SchemaStatus:
 
 
 def _expected_head(alembic_ini_path: str = "alembic.ini") -> str:
+    packaged_ini = None
+    if alembic_ini_path == "alembic.ini":
+        packaged_ini = os.getenv("WATCH_CLANK_ALEMBIC_INI")
+        alembic_ini_path = packaged_ini or alembic_ini_path
     config = Config(alembic_ini_path)
+    if packaged_ini:
+        config.set_main_option("script_location", str(Path(packaged_ini).parent / "alembic"))
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
     if len(heads) != 1:
