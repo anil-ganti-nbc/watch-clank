@@ -248,6 +248,30 @@ def test_sqlite_wal(tmp_settings: Settings):
         assert conn.execute(text("PRAGMA journal_mode")).scalar().lower() == "wal"
 
 
+def test_application_sqlite_engine_sets_configured_busy_timeout(tmp_path: Path, monkeypatch):
+    """Natural timer fan-out must wait for an in-progress SQLite writer.
+
+    This is deliberately tested through the application engine, rather than
+    a standalone sqlite connection, because the Hetzner failure was caused by
+    the application's connection configuration.
+    """
+    import app.db.session as session_module
+
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'busy-timeout.db'}",
+        sqlite_busy_timeout_seconds=60.0,
+    )
+    monkeypatch.setattr(session_module, "_settings", settings)
+    monkeypatch.setattr(session_module, "_engine", None)
+    monkeypatch.setattr(session_module, "_SessionLocal", None)
+
+    engine = session_module.get_engine()
+    with engine.connect() as conn:
+        assert conn.execute(text("PRAGMA busy_timeout")).scalar() == 60_000
+
+    engine.dispose()
+
+
 # ── Operations / overlap / blocked ──────────────────────────────────────────
 
 
