@@ -304,7 +304,7 @@ def main() -> None:
         # it cannot be invoked as a live collection lane by accident; the
         # underlying pipeline method remains reachable directly from Python
         # for tests/archaeology only.
-        choices=["casio_uk", "citizen", "seiko", "seiko_jp", "timex"],
+        choices=["casio_uk", "casio_europe", "citizen", "seiko", "seiko_jp", "timex"],
         default=None,
         help="Run an EXPERIMENTAL product/catalogue-observation lane instead of Casio",
     )

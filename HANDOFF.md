@@ -15,6 +15,73 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 
 # Checkpoint log
 
+## 2026-08-17 — Post-repair Hall of Shame autopsy: 10 specimens, real Hetzner forensics, one genuine fix
+
+Forensic autopsy of 10 new post-repair editorial misses (Timex x6, Casio
+x4, Citizen x1 for comparison), full method: `ai/handoff/HALL_OF_SHAME_AUTOPSY_20260817_POSTREPAIR.md`.
+**Method note:** for the first time, this investigation read Hetzner's
+real production database directly (read-only, via an ephemeral Docker
+container mounting the named volume read-only — never mutated), not just
+local dev DBs — giving ground-truth `is_baseline`/event/notification state
+for the actual, currently-alerting production instance. Also discovered
+`/home/deploy/staging/watch-clank/.deployed-id` (still reading `fcb5e91`)
+is a stale, unused artifact of the disabled legacy cron path — the real
+deployed image is `~/.config/watch-clank/docker.env`'s `WATCH_CLANK_IMAGE`
+(currently `cadaac4`), confirmed via `docker images`/`docker.env`, not
+that file.
+
+**Finding: 7 of 10 specimens trace to one already-diagnosed, already-
+correctly-tuned mechanism** — the 2026-08-14 Hetzner redeploy's
+full-catalogue force-baseline sweep (see 2026-08-17's earlier
+baseline-absorption checkpoint below). Checked every Timex specimen's
+real Shopify `published_at` against the already-shipped 72-hour freshness
+override: every real gap (7.6-22 days) exceeds the window, so **none
+would be saved even by replaying the existing fix** — confirmed as the
+deliberate, evidence-tuned boundary already chosen, not a residual bug.
+Checked Casio's `<lastmod>` sitemap evidence for the two ABL-100WE
+specimens: all values weeks-to-months stale, so extending the freshness
+override to `lastmod` would not help and risks false positives on
+routine catalogue maintenance -- correctly not done. **1 specimen
+(Citizen Luke Skywalker) is not a failure at all** -- real, successful
+Discord delivery 2 days before the competitor, confirmed via Hetzner's
+own event/notification history. **1 specimen (GCW-B5000) is already
+fixed going forward** -- Great G-Shock World is live on Hetzner
+(`cadaac4`, 45min timer, confirmed firing); the exact triggering article
+is permanently grandfathered because it was that source's own onboarding
+sweep, one day after publication.
+
+**1 genuine, currently-open gap found and fixed: Casio EU-mainland
+product coverage.** GBA-950 (5 real colourways) is live today on
+`casio.com/europe/sitemap.xml` and `/de/sitemap.xml` but **absent
+entirely** from the already-covered UK sitemap -- confirmed by fetching
+both live. Same proven, already-approved pattern as `casio_uk_sitemap`
+(direct product pages Cloudflare-blocked, sitemap is not, no
+crawler-specific robots.txt disallow). New collector
+`casio_europe_sitemap` added, wired through the existing
+`_PRODUCT_REGISTRY`/`collector_registry`/`health`/CLI surfaces --
+protected automatically and silently on its first-ever run by the prior
+sprint's `_auto_baseline_for_first_run` invariant, zero extra wiring
+needed. Live-validated against the real feed (2,016 real watches
+including all 5 GBA-950 colourways, 0 events on first pass, 0 new on
+repeat, DB integrity `ok`). 6 new tests, real fixture (not fabricated).
+278 tests (was 272), Ruff clean.
+
+**Specialist-source research (Seiko/Orient follow-up, as flagged by the
+Great G-Shock World sprint):** found real, working, previously-unchecked
+candidates -- PR TIMES' official Seiko Watch Corp and Epson Sales Corp
+(Orient's current corporate home since its Feb 2026 legal absorption)
+company feeds, both verified live RDF/RSS with real timestamps, plus
+Orient Place (Blogspot Atom feed, genuine but infrequent release detail).
+**None implemented this session** -- no specimen in this corpus is
+Seiko/Orient-related, so building one wouldn't explain or fix any of the
+10 misses under investigation; flagged as a strong candidate for a
+dedicated future sprint instead of forced in here.
+
+Deployed to Hetzner: `casio_europe_sitemap` only, force-baselined,
+repeat-verified 0/0, one new systemd timer
+(`watch-clank-casio-europe-sitemap.timer`). No other Hetzner collector,
+timer, secret, or config touched; `citizen_de` remains retired.
+
 ## 2026-08-17 — Production-state audit, clean-baseline reset, uninitialized-DB invariant, Listing column, citizen_de retired
 
 The field-test macOS app (`~/Library/Application Support/Watch Clank/` —

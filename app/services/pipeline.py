@@ -2096,6 +2096,16 @@ class PipelineService:
         `_auto_baseline_for_first_run`.
         """
         if not self._PRODUCT_REGISTRY:
+            from app.collectors.casio_europe_sitemap import (
+                COLLECTOR_ID as CASIO_EU_ID,
+            )
+            from app.collectors.casio_europe_sitemap import (
+                COLLECTOR_VERSION as CASIO_EU_VER,
+            )
+            from app.collectors.casio_europe_sitemap import (
+                REGION as CASIO_EU_REGION,
+            )
+            from app.collectors.casio_europe_sitemap import CasioEuropeSitemapCollector
             from app.collectors.casio_uk_sitemap import (
                 COLLECTOR_ID as CASIO_UK_ID,
             )
@@ -2164,6 +2174,7 @@ class PipelineService:
             from app.collectors.timex_products import (
                 TimexProductsCollector,
             )
+            from app.parsers.casio_europe_sitemap import parse_casio_europe_sitemap_item
             from app.parsers.casio_uk_sitemap import parse_casio_uk_sitemap_item
             from app.parsers.citizen_de_products import parse_citizen_de_product_html
             from app.parsers.citizen_products import parse_citizen_search_hit
@@ -2179,6 +2190,16 @@ class PipelineService:
                         "collector_version": CASIO_UK_VER,
                         "parse_fn": parse_casio_uk_sitemap_item,
                         "default_region": CASIO_UK_REGION,
+                        "offline_kwarg": "sitemap_payload",
+                        "default_max_items": 300,
+                        "known_urls_from_observations": True,
+                    },
+                    "casio_europe": {
+                        "collector_cls": CasioEuropeSitemapCollector,
+                        "collector_id": CASIO_EU_ID,
+                        "collector_version": CASIO_EU_VER,
+                        "parse_fn": parse_casio_europe_sitemap_item,
+                        "default_region": CASIO_EU_REGION,
                         "offline_kwarg": "sitemap_payload",
                         "default_max_items": 300,
                         "known_urls_from_observations": True,

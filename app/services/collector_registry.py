@@ -37,6 +37,10 @@ _CONTROLS: dict[str, CollectorControl] = {
         "casio_uk_sitemap", "Casio products (UK sitemap-delta, no price/availability)", "OFFICIAL",
         ("--experimental-product", "casio_uk"),
     ),
+    "casio_europe_sitemap": CollectorControl(
+        "casio_europe_sitemap", "Casio products (Europe sitemap-delta, no price/availability)", "OFFICIAL",
+        ("--experimental-product", "casio_europe"),
+    ),
     "citizen_news": CollectorControl("citizen_news", "Citizen news", "OFFICIAL", ("--experimental-brand", "citizen")),
     "citizen_products": CollectorControl(
         "citizen_products", "Citizen products (US)", "OFFICIAL", ("--experimental-product", "citizen")

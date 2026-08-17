@@ -4577,6 +4577,158 @@ def test_casio_uk_sitemap_known_gd350s1_from_japan_emits_new_region(
     assert db_session.scalar(select(Event).where(Event.event_type == "SOLD_OUT")) is None
 
 
+# --- 2026-08-17 post-repair Hall-of-Shame autopsy: Casio Europe sitemap ------
+# Real specimen: GBA-950 (colourways -1A/-2A/-7A/-7A2/-9A3), confirmed live
+# on www.casio.com/europe/sitemap.xml and /de/sitemap.xml but ABSENT from
+# the UK sitemap entirely -- a genuine, evidence-confirmed EU-mainland
+# regional coverage gap distinct from the already-covered UK. Same
+# technically-proven pattern as casio_uk_sitemap: direct product pages
+# Cloudflare-blocked (HTTP 403, confirmed live), sitemap is not.
+
+
+def test_casio_europe_sitemap_discovery_extracts_gba950_references_and_lastmod():
+    """Real specimen: GBA-950 colourways, captured live from
+    www.casio.com/europe/sitemap.xml 2026-08-17 -- absent from the UK
+    sitemap entirely, confirming this is genuinely additive regional
+    coverage, not redundant with casio_uk_sitemap."""
+    from app.collectors.casio_europe_sitemap import CasioEuropeSitemapCollector
+
+    xml = (FIXTURES / "casio_europe_sitemap.xml").read_bytes()
+    items = CasioEuropeSitemapCollector().discover_from_sitemap_xml(xml)
+    refs = {i.reference_hint for i in items}
+    assert {"GBA-950-1A", "GBA-950-2A", "GBA-950-7A", "GBA-950-7A2", "GBA-950-9A3"} <= refs
+    gba = next(i for i in items if i.reference_hint == "GBA-950-7A2")
+    assert gba.metadata["lastmod"] == "2026-07-15T08:48:13.764Z"
+    # deduped: casio/ and gshock/ sitemap sections both list the same refs
+    assert len(refs) == len(items)
+
+
+def test_casio_europe_sitemap_run_prioritizes_unknown_urls_under_cap():
+    from app.collectors.casio_europe_sitemap import CasioEuropeSitemapCollector
+
+    xml = (FIXTURES / "casio_europe_sitemap.xml").read_bytes()
+    full = CasioEuropeSitemapCollector().run(sitemap_payload=xml).discovered
+    assert len(full) >= 5
+    new_item = full[-1]
+    known_urls = {i.url for i in full if i.url != new_item.url}
+    capped = CasioEuropeSitemapCollector().run(sitemap_payload=xml, max_items=1, known_product_urls=known_urls).discovered
+    assert len(capped) == 1
+    assert capped[0].url == new_item.url
+
+
+def test_casio_europe_sitemap_parser_never_fabricates_price_or_availability():
+    from app.parsers.casio_europe_sitemap import parse_casio_europe_sitemap_item
+
+    result = parse_casio_europe_sitemap_item(
+        {"reference": "GBA-950-1A", "lastmod": "2025-05-13T22:26:14.002+09:00"}, source_url="x"
+    )
+    assert result.success
+    w = result.watches[0]
+    assert w.reference_raw == "GBA-950-1A"
+    assert w.price is None and w.currency is None and w.availability_status is None
+    assert w.extra_specs["lastmod"] == "2025-05-13T22:26:14.002+09:00"
+
+
+def test_casio_europe_sitemap_new_reference_gba950_is_editorially_current(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """The actual Hall-of-Shame recall proof: GBA-950 was previously
+    invisible to Watch Clank (absent from casio_uk_sitemap, absent from
+    casio_multi's JP catalogue -- confirmed by direct query against the
+    real Hetzner production database during this autopsy). On an
+    established source (not a first-ever run -- see
+    _auto_baseline_for_first_run), discovering it via this new collector
+    must produce a real, current NEW_REFERENCE, not silence."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(CollectorRun(collector_id="casio_europe_sitemap", collector_version="0.1", status="SUCCESS"))
+    db_session.commit()
+
+    xml = (FIXTURES / "casio_europe_sitemap.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_europe_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline("casio_europe")
+
+    assert run.status == "SUCCESS"
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all()
+    gba_event = next((e for e in events if "GBA-950" in e.title), None)
+    assert gba_event is not None
+    assert gba_event.extra["editorial_eligible"] is True
+
+
+def test_casio_europe_sitemap_known_reference_from_intl_news_emits_new_region(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """A reference already known from casio_intl_news/casio_multi, newly
+    observed via the Europe sitemap, must fire NEW_REGION -- the same
+    known-watch/new-market mechanism already proven for UK (Case 8)."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GBA-950-1A", reference_canonical="GBA-950-1A")
+    db_session.add(watch)
+    db_session.flush()
+    db_session.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="casio_multi", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="JP", source_url="https://example.test/jp/gba950-1a",
+            price=None, currency=None, availability_status=None, overall_confidence=70.0,
+        )
+    )
+    db_session.add(CollectorRun(collector_id="casio_europe_sitemap", collector_version="0.1", status="SUCCESS"))
+    db_session.commit()
+
+    xml = (FIXTURES / "casio_europe_sitemap.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_europe_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline("casio_europe")
+
+    assert run.status == "SUCCESS"
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REGION")).all()
+    gba_event = next((e for e in events if e.title.startswith("Casio GBA-950-1A")), None)
+    assert gba_event is not None
+    assert gba_event.extra["region"] == "EU"
+
+
+def test_casio_europe_sitemap_first_run_auto_baselines_silently_then_repeat_is_quiet(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """Onboarding this brand-new collector on a database with no epoch must
+    not flood -- the exact production-reset invariant this whole sprint's
+    earlier work exists to guarantee, proven here for the specific new
+    source this investigation adds."""
+    from app.collectors.base import FetchResult
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    xml = (FIXTURES / "casio_europe_sitemap.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_europe_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+
+    first = pipeline.run_product_observation_pipeline("casio_europe")
+    assert first.summary_metadata["auto_baseline_applied"] is True
+    assert db_session.query(Event).count() == 0
+
+    second = pipeline.run_product_observation_pipeline("casio_europe")
+    assert second.new_watch_count == 0
+    assert db_session.query(Event).count() == 0
+
+
 def test_citizen_de_first_normal_listing_of_known_us_reference_emits_new_region(
     db_session: Session, tmp_settings: Settings, monkeypatch
 ):

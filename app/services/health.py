@@ -28,6 +28,7 @@ from app.models import CollectorRun, Event, SourceObservation, SpecialistLead, W
 KNOWN_COLLECTORS = [
     "casio_multi",
     "casio_uk_sitemap",
+    "casio_europe_sitemap",
     "citizen_news",
     "citizen_products",
     # citizen_de_products retired 2026-08-17 (owner directive: proved too
@@ -71,6 +72,7 @@ SUCCESS_STATUSES = {"SUCCESS", "PARTIAL", "ZERO_ITEMS"}
 EXPECTED_CADENCE_MINUTES = {
     "casio_multi": 90,
     "casio_uk_sitemap": 720,
+    "casio_europe_sitemap": 720,
     "citizen_news": 90,
     "citizen_products": 360,
     "seiko_jp_news": 90,
