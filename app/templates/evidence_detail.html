@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Evidence {{ fetch.id }} – Watch Clank{% endblock %}
+{% block content %}
+<h1>Evidence #{{ fetch.id }}</h1>
+<div class="card section"><p><strong>{{ fetch.collector_id }}</strong> · HTTP {{ fetch.http_status or '—' }}</p><p><a href="{{ fetch.source_url }}" target="_blank" rel="noreferrer">Open original source ↗</a></p><p class="muted small">Snapshot: {{ fetch.blob.filepath }} · {{ fetch.blob.byte_size }} bytes · {{ fetch.blob.compression_type or 'uncompressed' }}</p></div>
+<h2>Stored evidence preview</h2><pre class="card" style="white-space:pre-wrap;overflow-wrap:anywhere">{{ preview }}</pre>
+{% endblock %}

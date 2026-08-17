@@ -2,7 +2,10 @@
 
 import os
 import sys
+import threading
+import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -21,6 +24,7 @@ from app.models import (
     Event,
     PipelineLedger,
     ReleaseLead,
+    SnapshotFetch,
     SourceObservation,
     SpecialistLead,
     Watch,
@@ -151,23 +155,19 @@ app = FastAPI(
 
 
 @app.middleware("http")
-async def field_test_read_only(request: Request, call_next):
-    """Make the packaged field-test dashboard observational only.
-
-    The switch is opt-in, so existing Windows/Hetzner behavior is unchanged.
-    """
-    if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" and request.method not in {
-        "GET", "HEAD", "OPTIONS"
-    }:
+async def field_test_mutation_boundary(request: Request, call_next):
+    """Allow only explicit local collection writes in field-test mode."""
+    field_test_collection = request.method == "POST" and request.url.path.startswith("/operations/run/")
+    if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" and request.method not in {"GET", "HEAD", "OPTIONS"} and not field_test_collection:
         from fastapi.responses import JSONResponse
 
         return JSONResponse(
-            {"detail": "Watch Clank FIELD TEST is read-only; collection is disabled."},
+            {"detail": "Watch Clank FIELD TEST permits local collection only."},
             status_code=403,
         )
     response = await call_next(request)
     if os.getenv("WATCH_CLANK_FIELD_TEST") == "1":
-        response.headers["X-Watch-Clank-Mode"] = "FIELD TEST / READ ONLY"
+        response.headers["X-Watch-Clank-Mode"] = "FIELD TEST / LOCAL COLLECTION / DELIVERY DISABLED"
     return response
 
 if STATIC_DIR.exists():
@@ -183,6 +183,7 @@ def overview(request: Request, db: Session = Depends(get_db)):
     web catch-up sprint -- the old dashboard queried SourceComponentState
     directly instead, a separate, divergent source of truth)."""
     from app.db.session import get_engine
+    from app.services.collector_registry import all_controls
     from app.services.health import get_health_snapshot
 
     settings = get_settings()
@@ -246,6 +247,8 @@ def overview(request: Request, db: Session = Depends(get_db)):
             "never_run_sources": never_run_sources,
             "latest_success": latest_success,
             "latest_failure": latest_failure,
+            "collector_controls": all_controls(),
+            "field_test": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
         },
     )
 
@@ -381,6 +384,7 @@ def operations(
             "ran_all": ran_all,
             "ok_count": ok_count,
             "total": total,
+            "field_test": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
         },
     )
 
@@ -394,11 +398,12 @@ def _run_collector_subprocess(cli_args: tuple[str, ...], timeout_seconds: int = 
     import sys
 
     settings = get_settings()
-    cmd = [sys.executable, "-m", "scripts.run_pipeline", "--live", *cli_args]
+    frozen = bool(getattr(sys, "frozen", False))
+    cmd = [sys.executable, "--collector-worker", "--live", *cli_args] if frozen else [sys.executable, "-m", "scripts.run_pipeline", "--live", *cli_args]
     try:
         result = subprocess.run(
             cmd,
-            cwd=str(settings.project_root),
+            cwd=None if frozen else str(settings.project_root),
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -413,6 +418,62 @@ def _run_collector_subprocess(cli_args: tuple[str, ...], timeout_seconds: int = 
         return {"ok": False, "returncode": None, "stdout_tail": "", "stderr_tail": f"timed out after {timeout_seconds}s"}
 
 
+class _LocalCollectionController:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state: dict = {"status": "IDLE", "running": False}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            state = dict(self._state)
+        started = state.pop("started_monotonic", None)
+        if state.get("running") and started:
+            state["elapsed_seconds"] = round(time.monotonic() - started, 1)
+        return state
+
+    def start(self, collector_id: str, cli_args: tuple[str, ...]) -> bool:
+        with self._lock:
+            if self._state.get("running"):
+                return False
+            self._state = {
+                "status": "RUNNING", "running": True, "collector_id": collector_id,
+                "started_at": datetime.now(UTC).isoformat(), "started_monotonic": time.monotonic(),
+            }
+        threading.Thread(target=self._run, args=(collector_id, cli_args), name="watch-local-collection", daemon=True).start()
+        return True
+
+    def _run(self, collector_id: str, cli_args: tuple[str, ...]) -> None:
+        result = _run_collector_subprocess(cli_args, timeout_seconds=900)
+        latest = None
+        from app.db.session import session_scope
+        with session_scope() as session:
+            latest = session.scalar(select(CollectorRun).where(CollectorRun.collector_id == collector_id).order_by(desc(CollectorRun.started_at)).limit(1))
+            detail = None if latest is None else {
+                "run_id": latest.id, "status": latest.status, "discovered": latest.discovered_count,
+                "parsed": latest.parsed_count, "new_watches": latest.new_watch_count,
+                "observations": latest.observation_count,
+                "events": len((latest.summary_metadata or {}).get("events", [])) if isinstance((latest.summary_metadata or {}).get("events"), list) else (latest.summary_metadata or {}).get("events_created"),
+                "warnings": latest.warning_count, "failures": latest.failure_count,
+                "summary": latest.summary_metadata or {},
+            }
+        with self._lock:
+            self._state.update({
+                "running": False,
+                "status": detail["status"] if detail else ("FAILED" if not result["ok"] else "COMPLETED"),
+                "result": detail,
+                "error": result["stderr_tail"][-1000:] if not result["ok"] else None,
+                "output": result["stdout_tail"][-1000:],
+            })
+
+
+_local_collection = _LocalCollectionController()
+
+
+@app.get("/operations/status")
+def local_collection_status():
+    return _local_collection.snapshot()
+
+
 @app.post("/operations/run/{collector_id}")
 def run_collector_now(collector_id: str, request: Request):
     """RUN NOW for a single collector. Localhost-only (Phase 11)."""
@@ -423,6 +484,13 @@ def run_collector_now(collector_id: str, request: Request):
         control = get_control(collector_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown collector_id: {collector_id!r}")
+
+    if os.getenv("WATCH_CLANK_FIELD_TEST") == "1":
+        from fastapi.responses import JSONResponse
+
+        if not _local_collection.start(collector_id, control.cli_args):
+            return JSONResponse(_local_collection.snapshot(), status_code=409)
+        return JSONResponse(_local_collection.snapshot(), status_code=202)
 
     result = _run_collector_subprocess(control.cli_args)
     logger.info("web_run_now", collector_id=collector_id, ok=result["ok"], returncode=result["returncode"])
@@ -499,6 +567,36 @@ def run_history(
             "filter_status": status,
             "filter_layer": layer,
         },
+    )
+
+
+@app.get("/evidence", response_class=HTMLResponse)
+def evidence_index(request: Request, db: Session = Depends(get_db)):
+    fetches = db.scalars(
+        select(SnapshotFetch)
+        .options(joinedload(SnapshotFetch.blob))
+        .order_by(desc(SnapshotFetch.fetched_at))
+        .limit(100)
+    ).all()
+    return templates.TemplateResponse(request, "evidence.html", {"active_nav": "evidence", "fetches": fetches})
+
+
+@app.get("/evidence/{fetch_id}", response_class=HTMLResponse)
+def evidence_detail(fetch_id: int, request: Request, db: Session = Depends(get_db)):
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    fetch = db.scalar(
+        select(SnapshotFetch).options(joinedload(SnapshotFetch.blob)).where(SnapshotFetch.id == fetch_id)
+    )
+    if not fetch:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    try:
+        payload = SnapshotStorageService().read(fetch.blob.filepath, fetch.blob.compression_type)
+        preview = payload.decode(fetch.blob.encoding or "utf-8", errors="replace")[:20000]
+    except Exception as error:
+        preview = f"Evidence preview unavailable: {error}"
+    return templates.TemplateResponse(
+        request, "evidence_detail.html", {"active_nav": "evidence", "fetch": fetch, "preview": preview}
     )
 
 
@@ -783,5 +881,7 @@ def runtime_provenance():
         "channel": os.getenv("WATCH_CLANK_RELEASE_CHANNEL", "production"),
         "revision": os.getenv("WATCH_CLANK_BUILD_REVISION", "local development build"),
         "state_root": os.getenv("WATCH_CLANK_STATE_ROOT", "default server paths"),
-        "read_only": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
+        "read_only": False,
+        "local_collection": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
+        "external_delivery": False if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" else "configured by server settings",
     }

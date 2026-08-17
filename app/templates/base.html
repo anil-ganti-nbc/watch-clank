@@ -63,7 +63,7 @@
     <div class="header-top">
       <div class="logo">⌚ Watch Clank</div>
       <div class="instance-banner">
-        {% if inst.field_test %}<span class="instance-pill labeled">FIELD TEST · READ ONLY</span>{% endif %}
+        {% if inst.field_test %}<span class="instance-pill labeled">FIELD TEST · LOCAL COLLECTION · DELIVERY DISABLED</span>{% endif %}
         <span class="instance-pill {{ 'labeled' if inst.instance_configured else 'unlabeled' }}">
           Instance: {{ inst.instance_label }}
         </span>
@@ -80,6 +80,7 @@
       <a href="/intelligence"{% if active_nav == 'intelligence' %} class="active"{% endif %}>Recent Intelligence</a>
       <a href="/operations"{% if active_nav == 'operations' %} class="active"{% endif %}>Operations</a>
       <a href="/runs"{% if active_nav == 'runs' %} class="active"{% endif %}>Run History</a>
+      <a href="/evidence"{% if active_nav == 'evidence' %} class="active"{% endif %}>Evidence</a>
       <a href="/scheduler"{% if active_nav == 'scheduler' %} class="active"{% endif %}>Scheduler</a>
       <a href="/diagnostics"{% if active_nav == 'diagnostics' %} class="active"{% endif %}>Health / Diagnostics</a>
     </nav>

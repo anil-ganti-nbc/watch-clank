@@ -1,4 +1,4 @@
-"""Finder entry point for the isolated, read-only Watch Clank field test."""
+"""Finder entry point for the isolated Watch Clank field test."""
 
 from __future__ import annotations
 
@@ -88,6 +88,16 @@ def main() -> int:
     root = state_root()
     configure_environment(root)
     migrate(root)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--collector-worker":
+        sys.argv = ["scripts.run_pipeline", *sys.argv[2:]]
+        try:
+            from scripts.run_pipeline import main as run_pipeline_main
+
+            run_pipeline_main()
+        except SystemExit as exit_status:
+            return int(exit_status.code or 0)
+        return 0
 
     import uvicorn
 

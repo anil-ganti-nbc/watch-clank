@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Evidence – Watch Clank{% endblock %}
+{% block content %}
+<h1>Local Evidence Snapshots</h1>
+<p class="muted small">Captured evidence stored beneath this instance’s configured snapshot root.</p>
+{% if fetches %}<table><thead><tr><th>ID</th><th>Collector</th><th>Source</th><th>Status</th><th>Captured</th></tr></thead><tbody>
+{% for f in fetches %}<tr><td><a href="/evidence/{{ f.id }}">{{ f.id }}</a></td><td>{{ f.collector_id }}</td><td><a href="/evidence/{{ f.id }}">{{ f.source_url }}</a></td><td>{{ f.http_status or '—' }}</td><td>{{ f.fetched_at|humantime }}</td></tr>{% endfor %}
+</tbody></table>{% else %}<div class="empty">No local evidence snapshots yet. Run a collector to capture evidence.</div>{% endif %}
+{% endblock %}
