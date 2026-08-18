@@ -61,6 +61,11 @@ SEARCH_PAGE_SIZE = 48
 # Safety cap per collection so a catalogue-size anomaly (e.g. a search bug
 # reporting an inflated total) cannot trigger unbounded pagination.
 MAX_CANDIDATES_PER_COLLECTION = 600
+# Safety cap on the per-run-new-item availability enrichment fetches added
+# by the 2026-08-18 Citizen stale/OOS flood autopsy -- see run()'s
+# docstring comment. A steady-state run typically has a few dozen new
+# items at most; this caps the worst case defensively.
+MAX_AVAILABILITY_ENRICHMENT_FETCHES = 60
 
 _PRODUCT_HREF_RE = re.compile(r'href="(/us/en/product/[A-Za-z0-9-]+)"')
 _SEARCH_ANCHOR_RE = re.compile(r'"data"\s*:\s*\{\s*"limit"\s*:\s*\d+\s*,\s*"effectiveSearchMode"')
@@ -196,6 +201,8 @@ class CitizenProductsCollector:
         max_items: int | None = 60,
         search_pages: dict[str, list[bytes]] | None = None,
         known_product_urls: set[str] | None = None,
+        fetch_availability_for_new: bool = True,
+        detail_pages: dict[str, bytes] | None = None,
     ) -> CollectorRunResult:
         result = CollectorRunResult(
             collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, region=REGION, trust_score=TRUST_SCORE
@@ -227,10 +234,65 @@ class CitizenProductsCollector:
         result.discovered = items
         result.metadata["discovered_count"] = len(items)
 
-        # No second HTTP fetch per product — each search hit already carries
-        # its full product record (see class docstring for why this is the
-        # deliberate breadth tradeoff).
+        # Availability enrichment (2026-08-18 Citizen stale/OOS flood
+        # autopsy): the cheap search-hit path above never carries real
+        # inventory data (see class docstring), so every first observation
+        # of a Citizen product used to record availability_status=UNKNOWN,
+        # indistinguishable from a genuinely current, in-stock launch. The
+        # individual product page DOES carry real inventory (see
+        # parse_citizen_product_html / _availability_from_inventory) --
+        # this was already fetched for the small Sprint-3 depth path, just
+        # never wired into the primary breadth path.
+        #
+        # Fix: for items not already known to this database -- i.e. exactly
+        # the ones that will actually produce a NEW_REFERENCE event -- do
+        # one extra real HTTP fetch of the product page and parse that
+        # instead of the cheap repackaged search hit. This is bounded (only
+        # genuinely-new items per run, never the full up-to-max_items
+        # catalogue slice -- typically a handful to a few dozen, not
+        # hundreds) and additive: on any fetch/parse failure it falls back
+        # to the pre-existing cheap record rather than dropping the item,
+        # so recall never regresses. Every already-known item (the large
+        # majority of any steady-state run) is untouched -- same zero-extra-
+        # fetch behavior as before. See parse_citizen_search_hit for how a
+        # real HTML payload here is distinguished from the repackaged JSON.
+        # Gated on max_items being bounded (a normal/steady-state run):
+        # pipeline.py passes max_items=None for a force-baseline/first-run
+        # sweep, where every item is "new" by definition (nothing has ever
+        # been observed) and every resulting event is baseline-suppressed
+        # anyway -- enriching hundreds of items nobody will ever see would
+        # only load the source for zero editorial benefit. A hard cap is
+        # kept regardless as defense in depth against known_product_urls
+        # unexpectedly coming back empty on a bounded run.
+        #
+        # Offline/fixture mode (search_pages is not None, the same signal
+        # discover_via_search already uses to avoid real network calls)
+        # never issues a real fetch here either -- only `detail_pages`
+        # (explicit {url: html_bytes} fixtures) can supply enrichment
+        # payloads offline. This keeps every pre-existing test byte-for-byte
+        # deterministic: passing search_pages alone continues to produce
+        # zero real HTTP calls, exactly as before this change.
+        known_urls = known_product_urls or set()
+        new_urls: set[str] = set()
+        if fetch_availability_for_new and max_items is not None:
+            new_urls = {i.url for i in items if i.url not in known_urls}
+            if len(new_urls) > MAX_AVAILABILITY_ENRICHMENT_FETCHES:
+                new_urls = set(list(new_urls)[:MAX_AVAILABILITY_ENRICHMENT_FETCHES])
+        offline = search_pages is not None
         for item in items:
+            if item.url in new_urls:
+                if offline:
+                    fixture_html = (detail_pages or {}).get(item.url)
+                    detail_fr = (
+                        FetchResult(url=item.url, success=True, status_code=200, content_type="text/html", payload=fixture_html)
+                        if fixture_html is not None
+                        else FetchResult(url=item.url, success=False, error="no detail fixture page")
+                    )
+                else:
+                    detail_fr = fetch_url(item.url)
+                if detail_fr.success and detail_fr.payload:
+                    result.fetched.append(detail_fr)
+                    continue
             product_dict = item.metadata.get("product_dict")
             result.fetched.append(
                 FetchResult(

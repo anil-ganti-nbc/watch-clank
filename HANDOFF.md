@@ -15,6 +15,83 @@ mission, and philosophy notes — omitted here for brevity, unchanged.)
 
 # Checkpoint log
 
+## 2026-08-18 — Citizen stale/out-of-stock flood autopsy + human QC feedback system
+
+Two-part sprint. **Part A (autopsy):** `citizen_products` run 61
+(2026-08-17 21:40-21:41 UTC, `is_baseline=0`, correctly non-baseline)
+produced 47 real `NEW_REFERENCE` events together, most old Citizen
+Promaster-family/dive/field SKUs. Root cause proven with live evidence,
+not guessed: citizenwatch.com's own `mens` catalogue total grew 348→396
+in one week, and the 47 references were genuinely absent from the
+collector's discoverable search-index result set at 16:21 UTC but
+genuinely present by 21:40 UTC — real upstream catalogue-visibility churn
+(most affected SKUs are the source's own `Promotion`/`DWS`/`Phase-Out`
+lifecycle tags), not a Watch Clank pagination/ordering bug. Secondary,
+closeable gap: the collector's primary discovery path (Sprint 4's
+breadth-over-depth search-hit tradeoff) never carried real inventory
+data, so every one of the 47 recorded `availability_status=UNKNOWN`
+regardless of true stock state — live-verified ground truth was 2/47
+genuinely available (JY8129-53H: 1 unit left; BN5058-07E, tagged
+`Phase-Out`, 7 units) and 45/47 genuinely sold out. Fix:
+`CitizenProductsCollector.run()` now does one bounded extra per-product
+fetch (capped at 60/run, gated off during baseline sweeps via the
+existing `max_items is None` signal) for items not already known to the
+database — i.e. exactly the ones that will produce a real event — using
+the individual product page's real `inventory.orderable`/`stockLevel`
+instead of the cheap search-hit record. Falls back to the pre-existing
+cheap record on any failure; recall cannot regress. No Citizen SKU/family
+special-casing anywhere; `market_status` proven unsafe as a filter
+(BN5058-07E disproves it) and kept as captured context only. Full
+writeup: `ai/handoff/CITIZEN_STALE_FLOOD_AUTOPSY_20260818.md`.
+
+**Part B (human QC system):** new `event_reviews` table
+(`alembic/versions/008_event_reviews.py`, purely additive, verified
+forward-safe against a real production-shaped copy of the field-test DB —
+3,887 watches / 70 events / 9,518 observations, all unchanged
+post-migration) + `app/models/review.py` + `app/services/qc.py`.
+Dispositions `USEFUL`/`NOT_USEFUL`/`FALSE_POSITIVE`/`OUT_OF_STOCK`, tied
+to one specific `event_id` (never a Watch/reference), so a past verdict
+never pre-suppresses a later, independent Event for the same reference —
+proven by dedicated tests. `/intelligence`'s Official Events section is
+now the QC active queue itself: true cursor pagination past the old fixed
+top-40 cap (the exact limitation that hid part of the Citizen burst from
+the dashboard viewport), `Unreviewed: N`/`Reviewed today: N` counters,
+inline compact 4-button triage, manufacturer/event-type/region/run-id
+filtering, and an inbox-style "next unreviewed row appears after review"
+flow via `/api/qc/queue`. `/qc/history` is the permanent, correctable
+archive. Full contract (why a Review is not a blacklist, what future
+ranking use is/isn't acceptable):
+`ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md`. 22 new tests (5 Citizen
+collector/parser, 17 QC system per the brief's explicit checklist), full
+Phase-17 local acceptance proven end-to-end with 55 synthetic events
+(exceeding the old 40-cap) plus a non-destructive smoke test against a
+real copy of the field-test DB (original untouched, verified still at
+migration `007` with no `event_reviews` table afterward). 300 tests (was
+278), Ruff clean.
+
+## 2026-08-17/18 — GitHub/Mac/Hetzner reconciliation pass: Gear Patrol deployed
+
+Explicit reconciliation task (not a bug hunt): classify every recent
+change as SHARED/MAC-SPECIFIC/LOCAL-STATE, verify GitHub is canonical,
+deploy every shared gap to Hetzner. Found local/origin/Hetzner all
+already reconciled at commit `938cc62` except one real drift: the **Gear
+Patrol specialist collector** (`b838618`, part of the prior sprint's
+Hall-of-Shame follow-up work) was already baked into Hetzner's running
+`02d925c` image — its code shipped there — but no systemd timer had ever
+been installed for it, so it had never actually run in production despite
+being "deployed" in the image sense. Fixed: rebuilt+redeployed the exact
+`938cc62` image (matching origin/main precisely,
+`org.opencontainers.image.revision` label verified), rendered and
+installed `watch-clank-gear-patrol-rss.{service,timer}` via the existing
+`render_units.py` registry-driven mechanism, force-baselined on the real
+production volume (9 real leads, all correctly classified `BASELINE`,
+none notified), repeat-verified 0/0, started the timer. All 19
+`KNOWN_COLLECTORS` now have exactly one active Hetzner timer each
+(`citizen_de_products` correctly remains disabled, not counted). DB
+backed up and integrity-checked before and after (`ok` throughout, 0
+stale runs/locks). No code changes, no commits — pure deployment/doc
+reconciliation.
+
 ## 2026-08-17 — Post-repair Hall of Shame autopsy: 10 specimens, real Hetzner forensics, one genuine fix
 
 Forensic autopsy of 10 new post-repair editorial misses (Timex x6, Casio

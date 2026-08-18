@@ -439,3 +439,267 @@ def test_operations_reflects_active_lock(web_client: TestClient, db: Session, tm
     resp = web_client.get("/operations")
     assert resp.status_code == 200
     assert "run lock is held" in resp.text.lower() or "SKIPPED_OVERLAP" in resp.text or "HELD" in resp.text
+
+
+# --- 2026-08-18 Citizen flood autopsy: human QC feedback system --------------
+#
+# EVENT != REVIEW. A Review is human editorial feedback about one Event
+# under one evidence state -- never a mutation of the Event, never a
+# permanent verdict on the underlying Watch/reference. See
+# ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md.
+
+
+@pytest.fixture()
+def qc_client(web_client: TestClient, monkeypatch):
+    """QC review submission is a mutating POST behind _require_loopback,
+    like /operations/run/*; TestClient's default host isn't loopback (see
+    test_run_now_rejects_non_loopback_client above), so tests that need to
+    actually submit a review use this fixture."""
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    return web_client
+
+
+def test_qc_review_useful_persists(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    resp = qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "USEFUL"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["disposition"] == "USEFUL"
+
+    from app.models import EventReview
+
+    review = db.query(EventReview).filter(EventReview.event_id == event.id).one()
+    assert review.disposition == "USEFUL"
+
+
+def test_qc_review_not_useful_persists(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    resp = qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "NOT_USEFUL"})
+    assert resp.status_code == 200
+    assert resp.json()["disposition"] == "NOT_USEFUL"
+
+
+def test_qc_review_false_positive_persists(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    resp = qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "FALSE_POSITIVE"})
+    assert resp.status_code == 200
+    assert resp.json()["disposition"] == "FALSE_POSITIVE"
+
+
+def test_qc_review_out_of_stock_persists(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    resp = qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "OUT_OF_STOCK"})
+    assert resp.status_code == 200
+    assert resp.json()["disposition"] == "OUT_OF_STOCK"
+
+
+def test_reviewed_event_disappears_from_active_queue(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+
+    before = qc_client.get("/intelligence")
+    assert watch.reference_raw in before.text
+
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "USEFUL"})
+
+    after = qc_client.get("/intelligence")
+    assert "Unreviewed: 0" in after.text
+    assert f"qc-row-{event.id}" not in after.text
+
+
+def test_reviewing_never_deletes_event_watch_or_provenance(qc_client: TestClient, db: Session):
+    from app.models import Event, SourceObservation, Watch
+
+    watch = _make_watch(db)
+    db.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="citizen_products", collector_version="0.1.0",
+            parser_id="citizen_products_html", parser_version="0.1.0", region="US",
+            source_url="https://citizenwatch.com/us/en/product/TEST-1", overall_confidence=90.0,
+        )
+    )
+    db.commit()
+    event = _make_event_for_watch(db, watch)
+    event_id, watch_id = event.id, watch.id
+
+    resp = qc_client.post(f"/api/qc/review/{event_id}", json={"disposition": "FALSE_POSITIVE"})
+    assert resp.status_code == 200
+
+    assert db.get(Event, event_id) is not None
+    assert db.get(Watch, watch_id) is not None
+    assert (
+        db.query(SourceObservation).filter(SourceObservation.watch_id == watch_id).count() == 1
+    )
+
+
+def test_next_unreviewed_event_becomes_available_after_review(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    e1 = _make_event_for_watch(db, watch)
+    e2 = _make_event_for_watch(db, watch)
+
+    resp = qc_client.get("/api/qc/queue")
+    ids_before = {i["event_id"] for i in resp.json()["items"]}
+    assert {e1.id, e2.id} <= ids_before
+
+    qc_client.post(f"/api/qc/review/{e1.id}", json={"disposition": "USEFUL"})
+
+    resp2 = qc_client.get("/api/qc/queue")
+    ids_after = {i["event_id"] for i in resp2.json()["items"]}
+    assert e1.id not in ids_after
+    assert e2.id in ids_after
+
+
+def test_entire_queue_traversable_beyond_page_limit(qc_client: TestClient, db: Session):
+    from app.services.qc import DEFAULT_PAGE_SIZE
+
+    watch = _make_watch(db)
+    total = DEFAULT_PAGE_SIZE + 7
+    event_ids = [_make_event_for_watch(db, watch).id for _ in range(total)]
+
+    seen: set[int] = set()
+    resp = qc_client.get("/api/qc/queue")
+    body = resp.json()
+    seen.update(i["event_id"] for i in body["items"])
+    assert len(body["items"]) == DEFAULT_PAGE_SIZE
+    assert body["unreviewed_count"] == total
+
+    cursor = body["next_cursor"]
+    assert cursor is not None
+    while cursor is not None:
+        page = qc_client.get(f"/api/qc/queue?before_id={cursor}").json()
+        seen.update(i["event_id"] for i in page["items"])
+        cursor = page["next_cursor"]
+
+    assert seen == set(event_ids)
+
+
+def test_qc_history_returns_archived_entries(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "OUT_OF_STOCK"})
+
+    resp = qc_client.get("/qc/history")
+    assert resp.status_code == 200
+    assert "OUT_OF_STOCK" in resp.text
+    assert watch.reference_raw in resp.text
+
+    api_resp = qc_client.get("/api/qc/history")
+    items = api_resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["event_id"] == event.id
+    assert items[0]["disposition"] == "OUT_OF_STOCK"
+
+
+def test_repeat_review_submission_corrects_in_place_not_duplicated(qc_client: TestClient, db: Session):
+    from app.models import EventReview
+
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "OUT_OF_STOCK"})
+    resp = qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "USEFUL"})
+    assert resp.status_code == 200
+    assert resp.json()["disposition"] == "USEFUL"
+
+    reviews = db.query(EventReview).filter(EventReview.event_id == event.id).all()
+    assert len(reviews) == 1  # correction, not a second row
+    assert reviews[0].disposition == "USEFUL"
+    history = (reviews[0].review_metadata or {}).get("correction_history") or []
+    assert len(history) == 1
+    assert history[0]["previous_disposition"] == "OUT_OF_STOCK"
+
+
+def test_repeat_review_same_disposition_is_idempotent(qc_client: TestClient, db: Session):
+    from app.models import EventReview
+
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "USEFUL"})
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "USEFUL"})
+
+    assert db.query(EventReview).filter(EventReview.event_id == event.id).count() == 1
+
+
+def test_invalid_disposition_rejected(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    resp = qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "MAYBE"})
+    assert resp.status_code == 400
+
+    from app.models import EventReview
+
+    assert db.query(EventReview).filter(EventReview.event_id == event.id).count() == 0
+
+
+def test_review_on_missing_event_returns_404(qc_client: TestClient):
+    resp = qc_client.post("/api/qc/review/999999999", json={"disposition": "USEFUL"})
+    assert resp.status_code == 404
+
+
+def test_later_event_for_same_reference_not_permanently_suppressed(qc_client: TestClient, db: Session):
+    """A past FALSE_POSITIVE verdict on one Event must never make a later,
+    independent Event for the same reference vanish from the queue."""
+    watch = _make_watch(db)
+    e1 = _make_event_for_watch(db, watch)
+    qc_client.post(f"/api/qc/review/{e1.id}", json={"disposition": "FALSE_POSITIVE"})
+
+    e2 = _make_event_for_watch(db, watch)  # a later, independent Event -- same watch
+    resp = qc_client.get("/api/qc/queue")
+    ids = {i["event_id"] for i in resp.json()["items"]}
+    assert e2.id in ids
+    assert e1.id not in ids
+
+
+def test_out_of_stock_review_does_not_suppress_later_restock_event(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    sold_out = _make_event_for_watch(db, watch)
+    qc_client.post(f"/api/qc/review/{sold_out.id}", json={"disposition": "OUT_OF_STOCK"})
+
+    restock = Event(
+        event_type="RESTOCK", title="restock", status="DRAFT", story_score=60.0,
+        extra={"region": "US", "editorial_eligible": True},
+    )
+    db.add(restock)
+    db.flush()
+    db.add(EventWatch(event_id=restock.id, watch_id=watch.id, role="subject"))
+    db.commit()
+
+    resp = qc_client.get("/api/qc/queue")
+    ids = {i["event_id"] for i in resp.json()["items"]}
+    assert restock.id in ids
+
+
+def test_qc_queue_excludes_baseline_suppressed_events(qc_client: TestClient, db: Session):
+    """Baseline safety (0a505dc) is orthogonal to and unaffected by QC: a
+    baseline-suppressed reference never produces an Event row at all, so it
+    was never in the queue to begin with -- this just proves the QC system
+    doesn't accidentally manufacture visibility for it."""
+    _make_watch(db)
+    resp = qc_client.get("/api/qc/queue")
+    assert resp.json()["items"] == []
+    assert resp.json()["unreviewed_count"] == 0
+
+
+def test_qc_manufacturer_filter_leaves_other_manufacturers_unaffected(qc_client: TestClient, db: Session):
+    citizen_watch = _make_watch(db, manufacturer="Citizen", brand="Citizen", reference_raw="JY8129-53H", reference_canonical="JY8129-53H")
+    casio_watch = _make_watch(db, manufacturer="Casio", brand="Casio", reference_raw="GA-2100-1A", reference_canonical="GA-2100-1A")
+    citizen_event = _make_event_for_watch(db, citizen_watch)
+    casio_event = _make_event_for_watch(db, casio_watch)
+
+    resp = qc_client.get("/api/qc/queue?manufacturer=Citizen")
+    ids = {i["event_id"] for i in resp.json()["items"]}
+    assert citizen_event.id in ids
+    assert casio_event.id not in ids
+
+    # Reviewing the filtered item must not touch the other manufacturer's queue.
+    qc_client.post(f"/api/qc/review/{citizen_event.id}", json={"disposition": "OUT_OF_STOCK"})
+    resp2 = qc_client.get("/api/qc/queue?manufacturer=Casio")
+    ids2 = {i["event_id"] for i in resp2.json()["items"]}
+    assert casio_event.id in ids2

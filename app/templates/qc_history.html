@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}QC History – Watch Clank{% endblock %}
+{% block content %}
+<h1>QC History</h1>
+<p class="muted small">Every human editorial verdict ever recorded — nothing here is deleted or overwritten silently. Correcting a disposition below updates the review in place and keeps the prior verdict in its audit trail; it never touches the underlying Event, Watch, or observation data.</p>
+
+<div class="qc-toolbar">
+  <form method="get" action="/qc/history" class="qc-filter-form" style="margin-left:0">
+    <select name="manufacturer">
+      <option value="">All manufacturers</option>
+      {% for m in manufacturer_choices %}<option value="{{ m }}" {{ 'selected' if qc_filters.manufacturer == m else '' }}>{{ m }}</option>{% endfor %}
+    </select>
+    <select name="event_type">
+      <option value="">All event types</option>
+      {% for t in event_type_choices %}<option value="{{ t }}" {{ 'selected' if qc_filters.event_type == t else '' }}>{{ t }}</option>{% endfor %}
+    </select>
+    <select name="disposition">
+      <option value="">All dispositions</option>
+      {% for d in dispositions %}<option value="{{ d }}" {{ 'selected' if qc_filters.disposition == d else '' }}>{{ d }}</option>{% endfor %}
+    </select>
+    <input type="text" name="region" placeholder="Region (e.g. US)" value="{{ qc_filters.region }}" size="10">
+    <input type="number" name="run_id" placeholder="Run ID" value="{{ qc_filters.run_id }}" size="6">
+    <button type="submit" class="btn small">Filter</button>
+    {% if qc_filters.manufacturer or qc_filters.event_type or qc_filters.region or qc_filters.disposition or qc_filters.run_id %}<a href="/qc/history" class="btn small">Clear</a>{% endif %}
+  </form>
+</div>
+
+{% if reviews %}
+<table id="qc-history-table">
+  <thead><tr><th>Reference</th><th>Manufacturer</th><th>Disposition</th><th>Reviewed</th><th>Event</th><th>Region</th><th>Listing</th><th>Discovered</th><th>Correct</th></tr></thead>
+  <tbody id="qc-history-tbody">
+  {% for r in reviews %}
+    <tr id="qc-hist-row-{{ r.id }}" data-event-id="{{ r.event_id }}">
+      <td>{% if r.watch_id %}<a href="/watches/{{ r.watch_id }}">{{ r.reference_canonical or '—' }}</a>{% else %}{{ r.reference_canonical or '—' }}{% endif %}</td>
+      <td>{{ r.manufacturer or '—' }}</td>
+      <td><span class="badge {{ 'badge-ok' if r.disposition == 'USEFUL' else 'badge-warn' if r.disposition in ('OUT_OF_STOCK','NOT_USEFUL') else 'badge-err' }}" data-disposition-badge>{{ r.disposition }}</span>{% if (r.review_metadata or {}).get('correction_history') %} <span class="muted small" title="disposition corrected at least once">(corrected)</span>{% endif %}</td>
+      <td class="small">{{ r.reviewed_at|humantime }}<br><span class="muted">{{ r.reviewed_at|relative }}</span></td>
+      <td><span class="badge badge-official">{{ r.event_type or '—' }}</span></td>
+      <td class="muted">{{ r.region or '—' }}</td>
+      <td class="small">{% if r.provenance_url %}<a href="{{ r.provenance_url }}" target="_blank" rel="noopener">Listing ↗</a>{% else %}—{% endif %}</td>
+      <td class="small">{{ r.event.created_at|humantime if r.event else '—' }}</td>
+      <td class="qc-controls">
+        <select class="qc-correct-select">
+          {% for d in dispositions %}<option value="{{ d }}" {{ 'selected' if d == r.disposition else '' }}>{{ d }}</option>{% endfor %}
+        </select>
+        <button class="qc-btn qc-correct-btn" title="Save correction">Save</button>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<div class="section" style="text-align:center">
+  <button id="qc-history-load-more" class="btn" {{ 'style=display:none' if not next_cursor else '' }} data-cursor="{{ next_cursor or '' }}">Load more</button>
+</div>
+{% else %}
+<div class="empty">No reviewed items yet{% if qc_filters.manufacturer or qc_filters.event_type or qc_filters.region or qc_filters.disposition or qc_filters.run_id %} matching these filters{% endif %}.</div>
+{% endif %}
+
+<script>
+(function(){
+  const tbody = document.getElementById('qc-history-tbody');
+  if (!tbody) return;
+  const loadMoreBtn = document.getElementById('qc-history-load-more');
+  const params = new URLSearchParams(window.location.search);
+  const filters = {manufacturer: params.get('manufacturer')||'', event_type: params.get('event_type')||'', region: params.get('region')||'', disposition: params.get('disposition')||'', run_id: params.get('run_id')||''};
+
+  function qs(extra){
+    const p = new URLSearchParams();
+    for (const [k,v] of Object.entries(filters)) if (v) p.set(k, v);
+    for (const [k,v] of Object.entries(extra||{})) if (v !== undefined && v !== null && v !== '') p.set(k, v);
+    return p.toString();
+  }
+
+  const DISPOSITIONS = {{ dispositions|tojson }};
+
+  function rowHtml(item){
+    const ref = item.watch_id ? `<a href="/watches/${item.watch_id}">${item.reference||'—'}</a>` : (item.reference||'—');
+    const listing = item.listing_url ? `<a href="${item.listing_url}" target="_blank" rel="noopener">Listing ↗</a>` : '—';
+    const badgeClass = item.disposition === 'USEFUL' ? 'badge-ok' : (item.disposition === 'OUT_OF_STOCK' || item.disposition === 'NOT_USEFUL' ? 'badge-warn' : 'badge-err');
+    const opts = DISPOSITIONS.map(d => `<option value="${d}" ${d===item.disposition?'selected':''}>${d}</option>`).join('');
+    return `<td>${ref}</td>`+
+      `<td>${item.manufacturer||'—'}</td>`+
+      `<td><span class="badge ${badgeClass}" data-disposition-badge>${item.disposition}</span>${item.corrected ? ' <span class="muted small">(corrected)</span>' : ''}</td>`+
+      `<td class="small">${item.reviewed_at_human}<br><span class="muted">${item.reviewed_at_relative}</span></td>`+
+      `<td><span class="badge badge-official">${item.event_type||'—'}</span></td>`+
+      `<td class="muted">${item.region||'—'}</td>`+
+      `<td class="small">${listing}</td>`+
+      `<td class="small">${item.discovered_at_human||'—'}</td>`+
+      `<td class="qc-controls"><select class="qc-correct-select">${opts}</select> <button class="qc-btn qc-correct-btn" title="Save correction">Save</button></td>`;
+  }
+
+  function wireRow(tr){
+    const btn = tr.querySelector('.qc-correct-btn');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const eventId = tr.dataset.eventId;
+      const select = tr.querySelector('.qc-correct-select');
+      const disposition = select.value;
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/qc/review/' + eventId, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({disposition: disposition}),
+        });
+        if (res.ok) {
+          const badge = tr.querySelector('[data-disposition-badge]');
+          badge.textContent = disposition;
+          badge.className = 'badge ' + (disposition === 'USEFUL' ? 'badge-ok' : (disposition === 'OUT_OF_STOCK' || disposition === 'NOT_USEFUL' ? 'badge-warn' : 'badge-err'));
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  tbody.querySelectorAll('tr').forEach(wireRow);
+
+  if (loadMoreBtn) loadMoreBtn.addEventListener('click', async () => {
+    const cursor = loadMoreBtn.dataset.cursor;
+    const res = await fetch('/api/qc/history?' + qs({before_id: cursor}), {cache:'no-store'});
+    const data = await res.json();
+    (data.items||[]).forEach(item => {
+      const tr = document.createElement('tr');
+      tr.id = 'qc-hist-row-' + item.review_id;
+      tr.dataset.eventId = item.event_id;
+      tr.innerHTML = rowHtml(item);
+      tbody.appendChild(tr);
+      wireRow(tr);
+    });
+    loadMoreBtn.dataset.cursor = data.next_cursor || '';
+    loadMoreBtn.style.display = data.next_cursor ? '' : 'none';
+  });
+})();
+</script>
+{% endblock %}

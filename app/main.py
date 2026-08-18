@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -29,10 +30,20 @@ from app.models import (
     SpecialistLead,
     Watch,
 )
+from app.models.review import DISPOSITIONS
+from app.services import qc as qc_service
+from app.services.editorial import VALID_EVENT_TYPES
 
 setup_logging()
 logger = get_logger(__name__)
 settings = get_settings()
+
+# QC filter-dropdown choices -- sourced from the same enums the rest of the
+# app already treats as canonical (app.services.editorial, app.models.review)
+# rather than re-typed here, so a future event type/disposition can't
+# silently drift out of sync with the filter UI.
+_EVENT_TYPE_CHOICES = sorted(VALID_EVENT_TYPES)
+_DISPOSITIONS_ORDERED = sorted(DISPOSITIONS)
 
 _RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent.parent))
 TEMPLATES_DIR = _RESOURCE_ROOT / "app" / "templates"
@@ -156,9 +167,19 @@ app = FastAPI(
 
 @app.middleware("http")
 async def field_test_mutation_boundary(request: Request, call_next):
-    """Allow only explicit local collection writes in field-test mode."""
+    """Allow only explicit local collection writes -- and, since the human
+    QC sprint, local editorial review writes -- in field-test mode. A QC
+    review never triggers a collector run, never calls out to Discord, and
+    never leaves this machine, so it belongs in the same "local-only, no
+    delivery" category as /operations/run/*, not the blocked category."""
     field_test_collection = request.method == "POST" and request.url.path.startswith("/operations/run/")
-    if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" and request.method not in {"GET", "HEAD", "OPTIONS"} and not field_test_collection:
+    field_test_review = request.method == "POST" and request.url.path.startswith("/api/qc/review/")
+    if (
+        os.getenv("WATCH_CLANK_FIELD_TEST") == "1"
+        and request.method not in {"GET", "HEAD", "OPTIONS"}
+        and not field_test_collection
+        and not field_test_review
+    ):
         from fastapi.responses import JSONResponse
 
         return JSONResponse(
@@ -254,7 +275,15 @@ def overview(request: Request, db: Session = Depends(get_db)):
 
 
 @app.get("/intelligence", response_class=HTMLResponse)
-def recent_intelligence(request: Request, show: str = "current", db: Session = Depends(get_db)):
+def recent_intelligence(
+    request: Request,
+    show: str = "current",
+    manufacturer: str | None = None,
+    event_type: str | None = None,
+    region: str | None = None,
+    run_id: int | None = None,
+    db: Session = Depends(get_db),
+):
     """The most important page: "did Watch Clank find anything worth
     writing?" Two genuinely different evidence classes, kept visually and
     structurally separate per the sprint brief:
@@ -265,14 +294,22 @@ def recent_intelligence(request: Request, show: str = "current", db: Session = D
       reasoning -- Events don't carry an independent publication timestamp
       the way a blog article does), availability events are filtered
       through the same editorial-eligibility read-side check the rest of
-      the app already uses.
+      the app already uses. Since the 2026-08-18 human-QC sprint, this
+      section IS the QC active queue: it only ever shows editorially
+      eligible Events with no EventReview yet (app.services.qc), true
+      cursor-paginated beyond the old fixed top-40/200 cap that caused the
+      Citizen flood autopsy's "additional entries beyond the viewport"
+      problem, and a reviewed Event disappears from this view the moment
+      it is triaged (see /api/qc/queue, /api/qc/review/{event_id}).
     - EARLY-WARNING / SPECIALIST LEADS (SpecialistLead model) -- filtered to
       editorial_freshness == FRESH by default. This is the exact protection
       Sprint 8 exists for (ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md):
       discovery novelty is not editorial freshness, and historical/baseline
       evidence must never masquerade as breaking news. ?show=historical
       reveals STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED
-      leads explicitly -- never mixed into the default view.
+      leads explicitly -- never mixed into the default view. Not part of
+      the QC system -- Review rows key off Event.id only (see
+      ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md for why).
 
     The LISTING column (2026-08-17 production-reset sprint) reuses the
     Watch's own existing `observations` relationship as its source of
@@ -284,28 +321,22 @@ def recent_intelligence(request: Request, show: str = "current", db: Session = D
     query). No new URL storage, no manufacturer-specific URL builder --
     see intelligence.html for the "most recent observation" selection.
     """
-    from app.models import EventWatch
-    from app.services.editorial import event_row_is_editorially_eligible
-
-    settings = get_settings()
     show_historical = show == "historical"
 
-    all_events = db.scalars(
-        select(Event)
-        .options(joinedload(Event.watches).joinedload(EventWatch.watch).joinedload(Watch.observations))
-        .order_by(desc(Event.created_at))
-        .limit(200)
-    ).unique().all()
-    current_events = [
-        e
-        for e in all_events
-        if event_row_is_editorially_eligible(
-            event_type=e.event_type,
-            story_score=e.story_score,
-            extra=e.extra,
-            availability_min_score=settings.availability_editorial_min_score,
-        )
-    ][:40]
+    qc_filters = qc_service.QueueFilters(
+        manufacturer=manufacturer or None,
+        event_type=event_type or None,
+        region=region or None,
+        run_id=run_id,
+    )
+    current_events = qc_service.fetch_queue_page(db, qc_filters, limit=qc_service.DEFAULT_PAGE_SIZE)
+    unreviewed_total = qc_service.unreviewed_count(db, qc_filters)
+    reviewed_today = qc_service.reviewed_today_count(db)
+    next_cursor = current_events[-1].id if len(current_events) == qc_service.DEFAULT_PAGE_SIZE else None
+
+    manufacturer_choices = [
+        m for (m,) in db.execute(select(Watch.manufacturer).distinct().order_by(Watch.manufacturer)).all()
+    ]
 
     if show_historical:
         specialist_leads = db.scalars(
@@ -334,8 +365,193 @@ def recent_intelligence(request: Request, show: str = "current", db: Session = D
             "specialist_leads": specialist_leads,
             "show_historical": show_historical,
             "historical_suppressed_count": historical_suppressed_count,
+            "unreviewed_total": unreviewed_total,
+            "reviewed_today": reviewed_today,
+            "next_cursor": next_cursor,
+            "qc_filters": {
+                "manufacturer": manufacturer or "",
+                "event_type": event_type or "",
+                "region": region or "",
+                "run_id": run_id or "",
+            },
+            "manufacturer_choices": manufacturer_choices,
+            "event_type_choices": _EVENT_TYPE_CHOICES,
+            "dispositions": _DISPOSITIONS_ORDERED,
         },
     )
+
+
+def _event_to_qc_dict(e: Event) -> dict:
+    w = e.watches[0].watch if e.watches else None
+    latest_obs = None
+    if w and w.observations:
+        latest_obs = max(w.observations, key=lambda o: o.observed_at)
+    return {
+        "event_id": e.id,
+        "created_at_human": _humantime(e.created_at),
+        "created_at_relative": _relative_time(e.created_at),
+        "manufacturer": w.manufacturer if w else None,
+        "watch_id": w.id if w else None,
+        "reference": w.reference_raw if w else None,
+        "listing_url": latest_obs.source_url if latest_obs else None,
+        "event_type": e.event_type,
+        "region": (e.extra or {}).get("region"),
+        "score": round(e.story_score) if e.story_score is not None else None,
+    }
+
+
+@app.get("/api/qc/queue")
+def qc_queue_api(
+    manufacturer: str | None = None,
+    event_type: str | None = None,
+    region: str | None = None,
+    run_id: int | None = None,
+    before_id: int | None = None,
+    limit: int = qc_service.DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+):
+    """Next page of the QC active queue (unreviewed, editorially eligible
+    Events), for the "Load more" button and for pulling in one replacement
+    row after a review action -- see Phase 10 of
+    ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md ("entire-run/entire-queue
+    access")."""
+    filters = qc_service.QueueFilters(
+        manufacturer=manufacturer or None,
+        event_type=event_type or None,
+        region=region or None,
+        run_id=run_id,
+    )
+    limit = max(1, min(limit, 100))
+    events = qc_service.fetch_queue_page(db, filters, before_id=before_id, limit=limit)
+    return {
+        "items": [_event_to_qc_dict(e) for e in events],
+        "next_cursor": events[-1].id if len(events) == limit else None,
+        "unreviewed_count": qc_service.unreviewed_count(db, filters),
+        "reviewed_today_count": qc_service.reviewed_today_count(db),
+    }
+
+
+class ReviewSubmission(BaseModel):
+    disposition: str
+    reason: str | None = None
+
+
+@app.post("/api/qc/review/{event_id}")
+def qc_submit_review(event_id: int, request: Request, payload: ReviewSubmission, db: Session = Depends(get_db)):
+    """Persist (or correct) one human editorial verdict. Never deletes the
+    Event, its Watch, or any observation/provenance -- see
+    app.services.qc.submit_review and
+    ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md."""
+    _require_loopback(request)
+    event = db.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    try:
+        review = qc_service.submit_review(db, event=event, disposition=payload.disposition, reason=payload.reason)
+    except qc_service.InvalidDispositionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    empty_filters = qc_service.QueueFilters()
+    return {
+        "ok": True,
+        "event_id": event_id,
+        "disposition": review.disposition,
+        "unreviewed_count": qc_service.unreviewed_count(db, empty_filters),
+        "reviewed_today_count": qc_service.reviewed_today_count(db),
+    }
+
+
+def _review_to_dict(r) -> dict:
+    e = r.event
+    return {
+        "review_id": r.id,
+        "event_id": r.event_id,
+        "manufacturer": r.manufacturer,
+        "reference": r.reference_canonical,
+        "watch_id": r.watch_id,
+        "disposition": r.disposition,
+        "reviewed_at_human": _humantime(r.reviewed_at),
+        "reviewed_at_relative": _relative_time(r.reviewed_at),
+        "event_type": r.event_type,
+        "region": r.region,
+        "availability_status": r.availability_status,
+        "listing_url": r.provenance_url,
+        "discovered_at_human": _humantime(e.created_at) if e else None,
+        "corrected": bool((r.review_metadata or {}).get("correction_history")),
+    }
+
+
+@app.get("/qc/history", response_class=HTMLResponse)
+def qc_history(
+    request: Request,
+    manufacturer: str | None = None,
+    event_type: str | None = None,
+    region: str | None = None,
+    disposition: str | None = None,
+    run_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Archived/reviewed QC entries -- Phase 11 of
+    ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md. Corrections happen from here
+    by re-submitting a different disposition through the same
+    /api/qc/review/{event_id} endpoint the active queue uses."""
+    filters = qc_service.QueueFilters(
+        manufacturer=manufacturer or None,
+        event_type=event_type or None,
+        region=region or None,
+        run_id=run_id,
+    )
+    reviews = qc_service.fetch_history_page(db, filters, disposition=disposition or None)
+    next_cursor = reviews[-1].id if len(reviews) == qc_service.DEFAULT_PAGE_SIZE else None
+    manufacturer_choices = [
+        m for (m,) in db.execute(select(Watch.manufacturer).distinct().order_by(Watch.manufacturer)).all()
+    ]
+    return templates.TemplateResponse(
+        request,
+        "qc_history.html",
+        {
+            "active_nav": "qc_history",
+            "reviews": reviews,
+            "next_cursor": next_cursor,
+            "qc_filters": {
+                "manufacturer": manufacturer or "",
+                "event_type": event_type or "",
+                "region": region or "",
+                "disposition": disposition or "",
+                "run_id": run_id or "",
+            },
+            "manufacturer_choices": manufacturer_choices,
+            "event_type_choices": _EVENT_TYPE_CHOICES,
+            "dispositions": _DISPOSITIONS_ORDERED,
+        },
+    )
+
+
+@app.get("/api/qc/history")
+def qc_history_api(
+    manufacturer: str | None = None,
+    event_type: str | None = None,
+    region: str | None = None,
+    disposition: str | None = None,
+    run_id: int | None = None,
+    before_id: int | None = None,
+    limit: int = qc_service.DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+):
+    filters = qc_service.QueueFilters(
+        manufacturer=manufacturer or None,
+        event_type=event_type or None,
+        region=region or None,
+        run_id=run_id,
+    )
+    limit = max(1, min(limit, 100))
+    reviews = qc_service.fetch_history_page(
+        db, filters, disposition=disposition or None, before_id=before_id, limit=limit
+    )
+    return {
+        "items": [_review_to_dict(r) for r in reviews],
+        "next_cursor": reviews[-1].id if len(reviews) == limit else None,
+    }
 
 
 def _require_loopback(request: Request) -> None:

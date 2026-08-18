@@ -2760,6 +2760,102 @@ def test_citizen_products_run_without_known_urls_keeps_positional_cap():
     assert [i.url for i in capped] == [i.url for i in full[:2]]
 
 
+def test_citizen_search_hit_parser_dispatches_real_html_to_depth_parser():
+    """A raw per-product HTML payload (from the 2026-08-18 availability
+    enrichment fetch) is not valid JSON -- parse_citizen_search_hit must
+    delegate to parse_citizen_product_html rather than fail closed, and the
+    result must carry a real availability_status, unlike the cheap path."""
+    from app.parsers.citizen_products import parse_citizen_search_hit
+
+    html = (FIXTURES / "citizen_product_at8294.html").read_bytes()
+    result = parse_citizen_search_hit(html, source_url="https://citizenwatch.com/us/en/product/AT8294-59E")
+    assert result.success
+    assert result.watches[0].availability_status == "AVAILABLE"
+    assert result.watches[0].reference_raw == "AT8294-59E"
+
+
+def test_citizen_search_hit_parser_still_handles_repackaged_json():
+    """Existing cheap-path behavior (a flattened search-hit dict) must be
+    completely unaffected by the new HTML-dispatch branch."""
+    from app.parsers.citizen_products import parse_citizen_search_hit
+
+    payload = {"id": "CC4107-80H", "name": "Attesa", "_hit_price": 2195, "_hit_currency": "USD"}
+    result = parse_citizen_search_hit(payload, source_url="https://citizenwatch.com/us/en/product/CC4107-80H")
+    assert result.success
+    assert result.watches[0].availability_status is None
+    assert "no_availability_in_source" in result.watches[0].parser_warnings
+
+
+def test_citizen_products_run_enriches_new_items_with_real_availability():
+    """The core 2026-08-18 fix: a genuinely new-to-this-database item gets
+    a real per-product availability fetch (via the detail_pages offline
+    fixture here), not the always-UNKNOWN cheap search-hit record."""
+    from app.collectors.citizen_products import CitizenProductsCollector
+    from app.parsers.citizen_products import parse_citizen_search_hit
+
+    p1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    p2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+    detail_html = (FIXTURES / "citizen_product_at8294.html").read_bytes()
+
+    result = CitizenProductsCollector().run(
+        search_pages={"mens": [p1, p2]},
+        max_items=300,
+        known_product_urls=set(),
+        detail_pages={"https://citizenwatch.com/us/en/product/AT8384-58E": detail_html},
+    )
+    enriched = [f for f in result.fetched if f.url.endswith("AT8384-58E")]
+    assert len(enriched) == 1
+    parsed = parse_citizen_search_hit(enriched[0].payload, source_url=enriched[0].url)
+    assert parsed.success
+    assert parsed.watches[0].availability_status == "AVAILABLE"
+
+    # A different, already-known item in the same run must stay on the
+    # cheap path -- untouched, zero extra fetch.
+    known_item = [f for f in result.fetched if f.url.endswith("CC4107-80H")]
+    assert len(known_item) == 1
+    assert known_item[0].content_type == "application/json"
+
+
+def test_citizen_products_run_enrichment_falls_back_when_no_detail_fixture():
+    """A new item with no detail_pages fixture available must fall back to
+    the pre-existing cheap record, never be dropped -- recall must never
+    regress from this change."""
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    p1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    p2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+
+    result = CitizenProductsCollector().run(
+        search_pages={"mens": [p1, p2]}, max_items=300, known_product_urls=set()
+    )
+    urls = {f.url for f in result.fetched}
+    assert any(u.endswith("AT8384-58E") for u in urls)  # still present
+    fallback = [f for f in result.fetched if f.url.endswith("AT8384-58E")][0]
+    assert fallback.content_type == "application/json"  # cheap record, not enriched
+
+
+def test_citizen_products_run_skips_enrichment_on_baseline_sweep():
+    """max_items=None (force-baseline/first-run, pipeline.py's own signal)
+    must never trigger per-item enrichment fetches -- every item is "new"
+    by definition on a baseline sweep and every resulting event is
+    baseline-suppressed anyway, so enriching would only add source load
+    for zero editorial benefit."""
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    p1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    p2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+    detail_html = (FIXTURES / "citizen_product_at8294.html").read_bytes()
+
+    result = CitizenProductsCollector().run(
+        search_pages={"mens": [p1, p2]},
+        max_items=None,
+        known_product_urls=set(),
+        detail_pages={"https://citizenwatch.com/us/en/product/AT8384-58E": detail_html},
+    )
+    fallback = [f for f in result.fetched if f.url.endswith("AT8384-58E")][0]
+    assert fallback.content_type == "application/json"  # never enriched during baseline
+
+
 def test_citizen_search_pagination_respects_safety_cap():
     """A collector bug or anomalous source reporting a huge total must not
     trigger unbounded pagination — the MAX_CANDIDATES_PER_COLLECTION cap

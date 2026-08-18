@@ -198,6 +198,16 @@ def parse_citizen_search_hit(payload: bytes | str | dict, *, source_url: str = "
     does not expose inventory/orderable state in listing results, only on
     the individual product page. This is a deliberate breadth-over-depth
     tradeoff for Sprint 4's catalogue-widening priority.
+
+    Since the 2026-08-18 Citizen stale/OOS flood autopsy, CollectorRun's
+    parse_fn is fixed per collector (app.services.pipeline always calls the
+    same configured parse_fn for every fetched item), so a genuinely new
+    item's real per-product HTML fetch (see CitizenProductsCollector.run's
+    availability-enrichment step) arrives here too, not through a separate
+    parser. A raw HTML payload fails json.loads outright (real HTML is
+    never valid JSON), which is exactly the signal used to delegate to the
+    depth parser instead of raising -- no content-type sniffing, no
+    guessing.
     """
     if isinstance(payload, dict):
         data = payload
@@ -207,8 +217,8 @@ def parse_citizen_search_hit(payload: bytes | str | dict, *, source_url: str = "
             return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="empty payload")
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=f"invalid JSON: {exc}")
+        except json.JSONDecodeError:
+            return parse_citizen_product_html(raw, source_url=source_url)
 
     reference_raw = data.get("id")
     if not reference_raw:
