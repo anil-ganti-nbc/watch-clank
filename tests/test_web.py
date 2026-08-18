@@ -501,6 +501,28 @@ def test_humantime_filter_handles_none():
     assert _humantime(None) == "—"
 
 
+def test_humantime_filter_appends_ist_bracket_alongside_utc():
+    from app.main import _humantime
+
+    # 07:12 UTC -> 12:42 IST (fixed +5:30, no DST on either side).
+    rendered = _humantime("2026-08-12T07:12:26.678550+00:00")
+    assert rendered == "12 Aug 2026, 07:12 UTC (12:42 IST)"
+
+
+def test_humantime_filter_suppresses_redundant_ist_bracket_when_ist_is_primary(monkeypatch):
+    from app.core.config import get_settings
+    from app.main import _humantime
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "Asia/Kolkata")
+    try:
+        rendered = _humantime("2026-08-12T07:12:26.678550+00:00")
+        assert rendered == "12 Aug 2026, 12:42 IST"
+        assert rendered.count("IST") == 1
+    finally:
+        get_settings.cache_clear()
+
+
 # --- Phase 13: instance label / notification authority never guessed --------
 
 

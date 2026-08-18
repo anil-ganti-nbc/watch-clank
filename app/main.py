@@ -86,12 +86,22 @@ def _instance_context() -> dict:
 _jinja_env.globals["instance"] = _instance_context
 
 
+_IST_ZONE = "Asia/Kolkata"
+
+
 def _humantime(value) -> str:
-    """Render any timestamp as '12 Aug 2026, 07:12 UTC' -- never a bare ISO
-    string. Always labeled with the zone abbreviation (Phase 7: a display
-    timezone must be labeled, never implicit). Falls back to raw str() on
-    anything that isn't a real timestamp rather than raising inside a
-    template, since a render failure here must never break the whole page.
+    """Render any timestamp as '12 Aug 2026, 07:12 UTC (12:42 IST)' -- never
+    a bare ISO string. Always labeled with the zone abbreviation (Phase 7: a
+    display timezone must be labeled, never implicit). The IST value in
+    brackets is a fixed second reading alongside whatever display_timezone
+    renders as the primary time -- not a config option, since the ask was
+    simply "keep the primary display, also show IST". No DST adjustment is
+    needed for either side: UTC has none by definition, and India abolished
+    DST decades ago, so IST is a flat UTC+5:30 year-round. Suppressed when
+    the primary display timezone already IS Asia/Kolkata, to avoid a
+    redundant "IST (12:42 IST)". Falls back to raw str() on anything that
+    isn't a real timestamp rather than raising inside a template, since a
+    render failure here must never break the whole page.
     """
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -111,7 +121,11 @@ def _humantime(value) -> str:
         # zoneinfo directly for Asia/Kolkata -- fall back to a GMT offset
         # label in that case so it's still explicit, never silently omitted).
         tzlabel = local.strftime("%Z") or local.strftime("GMT%z")
-        return local.strftime("%d %b %Y, %H:%M ") + tzlabel
+        rendered = local.strftime("%d %b %Y, %H:%M ") + tzlabel
+        if tz_name != _IST_ZONE:
+            ist = dt.astimezone(ZoneInfo(_IST_ZONE))
+            rendered += ist.strftime(" (%H:%M IST)")
+        return rendered
     except Exception:
         return str(value)
 
