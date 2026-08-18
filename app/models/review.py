@@ -20,6 +20,15 @@ it has no Review row of its own until independently reviewed, so a past
 verdict here never silently suppresses future evidence (see Phase 7 of the
 citizen-flood-autopsy brief: "a later Event for the same reference must
 NOT automatically inherit permanent dismissal").
+
+2026-08-19 (QC History correction UX addendum): `is_corrected` marks a row
+whose disposition has been changed at least once. The default `/qc/history`
+view excludes these -- once a verdict has been corrected, that item is
+"handled" and drops out of the working queue, matching the operator's
+explicit framing of QC History as a workable correction queue, not an
+immutable dump of every verdict ever recorded. The row and its full
+correction_history audit trail are never deleted; `include_corrected=1`
+(or the lead-review equivalent) reveals them again.
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -94,6 +104,9 @@ class EventReview(Base):
     # corrected_at} here rather than opening a second table -- see module
     # docstring.
     review_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Set True the first time this row's disposition is corrected -- see
+    # module docstring's 2026-08-19 addendum. Never reset back to False.
+    is_corrected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

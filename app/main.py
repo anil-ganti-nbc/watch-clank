@@ -606,6 +606,7 @@ def _review_to_dict(r) -> dict:
         "listing_url": r.provenance_url,
         "discovered_at_human": _humantime(e.created_at) if e else None,
         "corrected": bool((r.review_metadata or {}).get("correction_history")),
+        "is_corrected": r.is_corrected,
     }
 
 
@@ -617,11 +618,13 @@ def qc_history(
     region: str | None = None,
     disposition: str | None = None,
     run_id: int | None = None,
+    include_corrected: bool = False,
     lead_manufacturer: str | None = None,
     lead_type: str | None = None,
     lead_region: str | None = None,
     lead_disposition: str | None = None,
     lead_run_id: int | None = None,
+    lead_include_corrected: bool = False,
     db: Session = Depends(get_db),
 ):
     """Archived/reviewed QC entries -- Phase 11 of
@@ -630,14 +633,22 @@ def qc_history(
     /api/qc/review/{event_id} endpoint the active queue uses. Since the
     2026-08-19 QC + classifier hardening pass, also shows Specialist-lead
     reviews in their own section with their own filter bar/correction
-    control, reusing the same page/pattern rather than a parallel one."""
+    control, reusing the same page/pattern rather than a parallel one.
+
+    2026-08-19 correction UX addendum: the default view for BOTH sections
+    excludes already-corrected reviews (QC History is a workable
+    correction queue, not an immutable dump) -- `include_corrected`/
+    `lead_include_corrected` reveal them again. Nothing is ever deleted;
+    see qc_service.fetch_history_page's docstring."""
     filters = qc_service.QueueFilters(
         manufacturer=manufacturer or None,
         event_type=event_type or None,
         region=region or None,
         run_id=run_id,
     )
-    reviews = qc_service.fetch_history_page(db, filters, disposition=disposition or None)
+    reviews = qc_service.fetch_history_page(
+        db, filters, disposition=disposition or None, include_corrected=include_corrected
+    )
     next_cursor = reviews[-1].id if len(reviews) == qc_service.DEFAULT_PAGE_SIZE else None
     manufacturer_choices = [
         m for (m,) in db.execute(select(Watch.manufacturer).distinct().order_by(Watch.manufacturer)).all()
@@ -649,7 +660,9 @@ def qc_history(
         region=lead_region or None,
         run_id=lead_run_id,
     )
-    lead_reviews = qc_service.fetch_lead_history_page(db, lead_filters, disposition=lead_disposition or None)
+    lead_reviews = qc_service.fetch_lead_history_page(
+        db, lead_filters, disposition=lead_disposition or None, include_corrected=lead_include_corrected
+    )
     lead_next_cursor = lead_reviews[-1].id if len(lead_reviews) == qc_service.DEFAULT_PAGE_SIZE else None
     lead_manufacturer_choices = [
         m for (m,) in db.execute(select(SpecialistLead.manufacturer).distinct().order_by(SpecialistLead.manufacturer)).all() if m
@@ -662,6 +675,7 @@ def qc_history(
             "active_nav": "qc_history",
             "reviews": reviews,
             "next_cursor": next_cursor,
+            "include_corrected": include_corrected,
             "qc_filters": {
                 "manufacturer": manufacturer or "",
                 "event_type": event_type or "",
@@ -674,6 +688,7 @@ def qc_history(
             "dispositions": _DISPOSITIONS_ORDERED,
             "lead_reviews": lead_reviews,
             "lead_next_cursor": lead_next_cursor,
+            "lead_include_corrected": lead_include_corrected,
             "lead_qc_filters": {
                 "manufacturer": lead_manufacturer or "",
                 "lead_type": lead_type or "",
@@ -695,6 +710,7 @@ def qc_history_api(
     region: str | None = None,
     disposition: str | None = None,
     run_id: int | None = None,
+    include_corrected: bool = False,
     before_id: int | None = None,
     limit: int = qc_service.DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -707,7 +723,8 @@ def qc_history_api(
     )
     limit = max(1, min(limit, 100))
     reviews = qc_service.fetch_history_page(
-        db, filters, disposition=disposition or None, before_id=before_id, limit=limit
+        db, filters, disposition=disposition or None, include_corrected=include_corrected,
+        before_id=before_id, limit=limit,
     )
     return {
         "items": [_review_to_dict(r) for r in reviews],
@@ -731,6 +748,7 @@ def _lead_review_to_dict(r) -> dict:
         "region": r.region,
         "discovered_at_human": _humantime(lead.discovered_at) if lead else None,
         "corrected": bool((r.review_metadata or {}).get("correction_history")),
+        "is_corrected": r.is_corrected,
     }
 
 
@@ -741,6 +759,7 @@ def qc_lead_history_api(
     region: str | None = None,
     disposition: str | None = None,
     run_id: int | None = None,
+    include_corrected: bool = False,
     before_id: int | None = None,
     limit: int = qc_service.DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -753,7 +772,8 @@ def qc_lead_history_api(
     )
     limit = max(1, min(limit, 100))
     reviews = qc_service.fetch_lead_history_page(
-        db, filters, disposition=disposition or None, before_id=before_id, limit=limit
+        db, filters, disposition=disposition or None, include_corrected=include_corrected,
+        before_id=before_id, limit=limit,
     )
     return {
         "items": [_lead_review_to_dict(r) for r in reviews],

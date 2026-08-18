@@ -949,3 +949,115 @@ def test_lead_qc_manufacturer_filter_leaves_other_manufacturers_unaffected(qc_cl
     resp2 = qc_client.get("/api/qc/lead-queue?manufacturer=Casio")
     ids2 = {i["lead_id"] for i in resp2.json()["items"]}
     assert casio_lead.id in ids2
+
+
+# --- 2026-08-19 QC History correction UX addendum --------------------------
+# A corrected review must drop out of the *default* QC History view
+# immediately, stay retrievable via include_corrected=1, survive a refresh,
+# and never lose its underlying record or audit trail.
+
+
+def test_event_correction_removed_from_default_history_view(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "OUT_OF_STOCK"})
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "USEFUL"})  # the correction
+
+    default_api = qc_client.get("/api/qc/history")
+    assert event.id not in {i["event_id"] for i in default_api.json()["items"]}
+
+    default_page = qc_client.get("/qc/history")
+    assert f'data-event-id="{event.id}"' not in default_page.text
+
+
+def test_event_correction_visible_under_include_corrected(qc_client: TestClient, db: Session):
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "OUT_OF_STOCK"})
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "USEFUL"})
+
+    included_api = qc_client.get("/api/qc/history?include_corrected=1")
+    items = {i["event_id"]: i for i in included_api.json()["items"]}
+    assert event.id in items
+    assert items[event.id]["disposition"] == "USEFUL"
+    assert items[event.id]["is_corrected"] is True
+
+    included_page = qc_client.get("/qc/history?include_corrected=1")
+    assert f'data-event-id="{event.id}"' in included_page.text
+
+
+def test_event_correction_survives_refresh_and_keeps_underlying_record(qc_client: TestClient, db: Session):
+    from app.models import EventReview
+
+    watch = _make_watch(db)
+    event = _make_event_for_watch(db, watch)
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "OUT_OF_STOCK"})
+    qc_client.post(f"/api/qc/review/{event.id}", json={"disposition": "USEFUL"})
+
+    # Two independent "refreshes": the corrected row must not silently
+    # reappear in the default view on a later, stateless GET.
+    for _ in range(2):
+        resp = qc_client.get("/api/qc/history")
+        assert event.id not in {i["event_id"] for i in resp.json()["items"]}
+
+    review = db.query(EventReview).filter(EventReview.event_id == event.id).one()
+    assert review is not None  # never deleted
+    assert review.is_corrected is True
+    history = (review.review_metadata or {}).get("correction_history") or []
+    assert len(history) == 1
+    assert history[0]["previous_disposition"] == "OUT_OF_STOCK"  # audit trail preserved
+
+
+def test_lead_correction_removed_from_default_history_view(qc_client: TestClient, db: Session):
+    lead = _make_specialist_lead(db)
+    qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "NOT_USEFUL"})
+    qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "USEFUL"})  # the correction
+
+    default_api = qc_client.get("/api/qc/lead-history")
+    assert lead.id not in {i["lead_id"] for i in default_api.json()["items"]}
+
+    default_page = qc_client.get("/qc/history")
+    assert f'data-lead-id="{lead.id}"' not in default_page.text
+
+
+def test_lead_correction_visible_under_lead_include_corrected(qc_client: TestClient, db: Session):
+    lead = _make_specialist_lead(db)
+    qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "NOT_USEFUL"})
+    qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "USEFUL"})
+
+    included_api = qc_client.get("/api/qc/lead-history?include_corrected=1")
+    items = {i["lead_id"]: i for i in included_api.json()["items"]}
+    assert lead.id in items
+    assert items[lead.id]["disposition"] == "USEFUL"
+    assert items[lead.id]["is_corrected"] is True
+
+    included_page = qc_client.get("/qc/history?lead_include_corrected=1")
+    assert f'data-lead-id="{lead.id}"' in included_page.text
+
+
+def test_lead_correction_survives_refresh_and_keeps_underlying_record(qc_client: TestClient, db: Session):
+    from app.models import SpecialistLeadReview
+
+    lead = _make_specialist_lead(db)
+    qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "NOT_USEFUL"})
+    qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "USEFUL"})
+
+    for _ in range(2):
+        resp = qc_client.get("/api/qc/lead-history")
+        assert lead.id not in {i["lead_id"] for i in resp.json()["items"]}
+
+    review = db.query(SpecialistLeadReview).filter(SpecialistLeadReview.specialist_lead_id == lead.id).one()
+    assert review is not None
+    assert review.is_corrected is True
+    history = (review.review_metadata or {}).get("correction_history") or []
+    assert len(history) == 1
+    assert history[0]["previous_disposition"] == "NOT_USEFUL"
+
+
+def test_history_page_renders_toggle_links_for_both_sections(qc_client: TestClient, db: Session):
+    """The 'Include corrected' escape hatch must exist and be discoverable
+    on the default view, for both the Events and Specialist Lead sections."""
+    resp = qc_client.get("/qc/history")
+    assert resp.status_code == 200
+    assert "include_corrected=1" in resp.text
+    assert "lead_include_corrected=1" in resp.text

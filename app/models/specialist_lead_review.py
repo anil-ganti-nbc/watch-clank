@@ -26,6 +26,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -89,6 +90,10 @@ class SpecialistLeadReview(Base):
     # corrected_at} here -- same audit-trail convention as EventReview,
     # rather than a second history table.
     review_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Set True the first time this row's disposition is corrected -- see
+    # EventReview's identical field/rationale (2026-08-19 QC History
+    # correction UX addendum). Never reset back to False.
+    is_corrected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

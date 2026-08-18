@@ -23,6 +23,14 @@
     <button type="submit" class="btn small">Filter</button>
     {% if qc_filters.manufacturer or qc_filters.event_type or qc_filters.region or qc_filters.disposition or qc_filters.run_id %}<a href="/qc/history" class="btn small">Clear</a>{% endif %}
   </form>
+  {% set base_qs = 'manufacturer=' + (qc_filters.manufacturer|urlencode) + '&event_type=' + (qc_filters.event_type|urlencode) + '&region=' + (qc_filters.region|urlencode) + '&disposition=' + (qc_filters.disposition|urlencode) + '&run_id=' + (qc_filters.run_id|string|urlencode) %}
+  <div class="qc-history-toggle small" style="margin-top:0.5rem">
+    {% if include_corrected %}
+      <a href="/qc/history?{{ base_qs }}" class="btn small">Recent (hide corrected)</a> <span class="muted">Showing all history, including corrected reviews.</span>
+    {% else %}
+      <a href="/qc/history?{{ base_qs }}&include_corrected=1" class="btn small">Include corrected</a> <span class="muted">Corrected reviews are hidden from this default view.</span>
+    {% endif %}
+  </div>
 </div>
 
 {% if reviews %}
@@ -62,7 +70,8 @@
   if (!tbody) return;
   const loadMoreBtn = document.getElementById('qc-history-load-more');
   const params = new URLSearchParams(window.location.search);
-  const filters = {manufacturer: params.get('manufacturer')||'', event_type: params.get('event_type')||'', region: params.get('region')||'', disposition: params.get('disposition')||'', run_id: params.get('run_id')||''};
+  const includeCorrected = params.get('include_corrected') === '1';
+  const filters = {manufacturer: params.get('manufacturer')||'', event_type: params.get('event_type')||'', region: params.get('region')||'', disposition: params.get('disposition')||'', run_id: params.get('run_id')||'', include_corrected: includeCorrected ? '1' : ''};
 
   function qs(extra){
     const p = new URLSearchParams();
@@ -89,6 +98,24 @@
       `<td class="qc-controls"><select class="qc-correct-select">${opts}</select> <button class="qc-btn qc-correct-btn" title="Save correction">Save</button></td>`;
   }
 
+  async function fetchOneMore(){
+    if (!loadMoreBtn) return;
+    const cursor = loadMoreBtn.dataset.cursor;
+    if (!cursor) return;
+    const res = await fetch('/api/qc/history?' + qs({before_id: cursor, limit: 1}), {cache:'no-store'});
+    const data = await res.json();
+    (data.items||[]).forEach(item => {
+      const tr = document.createElement('tr');
+      tr.id = 'qc-hist-row-' + item.review_id;
+      tr.dataset.eventId = item.event_id;
+      tr.innerHTML = rowHtml(item);
+      tbody.appendChild(tr);
+      wireRow(tr);
+    });
+    loadMoreBtn.dataset.cursor = data.next_cursor || '';
+    loadMoreBtn.style.display = data.next_cursor ? '' : 'none';
+  }
+
   function wireRow(tr){
     const btn = tr.querySelector('.qc-correct-btn');
     if (!btn) return;
@@ -104,9 +131,14 @@
           body: JSON.stringify({disposition: disposition}),
         });
         if (res.ok) {
-          const badge = tr.querySelector('[data-disposition-badge]');
-          badge.textContent = disposition;
-          badge.className = 'badge ' + (disposition === 'USEFUL' ? 'badge-ok' : (disposition === 'OUT_OF_STOCK' || disposition === 'NOT_USEFUL' ? 'badge-warn' : 'badge-err'));
+          if (!includeCorrected) {
+            tr.remove();
+            fetchOneMore();
+          } else {
+            const badge = tr.querySelector('[data-disposition-badge]');
+            badge.textContent = disposition;
+            badge.className = 'badge ' + (disposition === 'USEFUL' ? 'badge-ok' : (disposition === 'OUT_OF_STOCK' || disposition === 'NOT_USEFUL' ? 'badge-warn' : 'badge-err'));
+          }
         }
       } finally {
         btn.disabled = false;
@@ -154,6 +186,14 @@
     <button type="submit" class="btn small">Filter</button>
     {% if lead_qc_filters.manufacturer or lead_qc_filters.lead_type or lead_qc_filters.region or lead_qc_filters.disposition or lead_qc_filters.run_id %}<a href="/qc/history" class="btn small">Clear</a>{% endif %}
   </form>
+  {% set lead_base_qs = 'lead_manufacturer=' + (lead_qc_filters.manufacturer|urlencode) + '&lead_type=' + (lead_qc_filters.lead_type|urlencode) + '&lead_region=' + (lead_qc_filters.region|urlencode) + '&lead_disposition=' + (lead_qc_filters.disposition|urlencode) + '&lead_run_id=' + (lead_qc_filters.run_id|string|urlencode) %}
+  <div class="qc-history-toggle small" style="margin-top:0.5rem">
+    {% if lead_include_corrected %}
+      <a href="/qc/history?{{ lead_base_qs }}" class="btn small">Recent (hide corrected)</a> <span class="muted">Showing all history, including corrected reviews.</span>
+    {% else %}
+      <a href="/qc/history?{{ lead_base_qs }}&lead_include_corrected=1" class="btn small">Include corrected</a> <span class="muted">Corrected reviews are hidden from this default view.</span>
+    {% endif %}
+  </div>
 </div>
 
 {% if lead_reviews %}
@@ -192,7 +232,8 @@
   if (!tbody) return;
   const loadMoreBtn = document.getElementById('lead-qc-history-load-more');
   const params = new URLSearchParams(window.location.search);
-  const filters = {manufacturer: params.get('lead_manufacturer')||'', lead_type: params.get('lead_type')||'', region: params.get('lead_region')||'', disposition: params.get('lead_disposition')||'', run_id: params.get('lead_run_id')||''};
+  const includeCorrected = params.get('lead_include_corrected') === '1';
+  const filters = {manufacturer: params.get('lead_manufacturer')||'', lead_type: params.get('lead_type')||'', region: params.get('lead_region')||'', disposition: params.get('lead_disposition')||'', run_id: params.get('lead_run_id')||'', include_corrected: includeCorrected ? '1' : ''};
 
   function qs(extra){
     const p = new URLSearchParams();
@@ -217,6 +258,24 @@
       `<td class="qc-controls"><select class="lead-qc-correct-select">${opts}</select> <button class="qc-btn lead-qc-correct-btn" title="Save correction">Save</button></td>`;
   }
 
+  async function fetchOneMore(){
+    if (!loadMoreBtn) return;
+    const cursor = loadMoreBtn.dataset.cursor;
+    if (!cursor) return;
+    const res = await fetch('/api/qc/lead-history?' + qs({before_id: cursor, limit: 1}), {cache:'no-store'});
+    const data = await res.json();
+    (data.items||[]).forEach(item => {
+      const tr = document.createElement('tr');
+      tr.id = 'lead-qc-hist-row-' + item.review_id;
+      tr.dataset.leadId = item.lead_id;
+      tr.innerHTML = rowHtml(item);
+      tbody.appendChild(tr);
+      wireRow(tr);
+    });
+    loadMoreBtn.dataset.cursor = data.next_cursor || '';
+    loadMoreBtn.style.display = data.next_cursor ? '' : 'none';
+  }
+
   function wireRow(tr){
     const btn = tr.querySelector('.lead-qc-correct-btn');
     if (!btn) return;
@@ -232,9 +291,14 @@
           body: JSON.stringify({disposition: disposition}),
         });
         if (res.ok) {
-          const badge = tr.querySelector('[data-disposition-badge]');
-          badge.textContent = disposition;
-          badge.className = 'badge ' + (disposition === 'USEFUL' ? 'badge-ok' : (disposition === 'DUPLICATE' || disposition === 'NOT_USEFUL' ? 'badge-warn' : 'badge-err'));
+          if (!includeCorrected) {
+            tr.remove();
+            fetchOneMore();
+          } else {
+            const badge = tr.querySelector('[data-disposition-badge]');
+            badge.textContent = disposition;
+            badge.className = 'badge ' + (disposition === 'USEFUL' ? 'badge-ok' : (disposition === 'DUPLICATE' || disposition === 'NOT_USEFUL' ? 'badge-warn' : 'badge-err'));
+          }
         }
       } finally {
         btn.disabled = false;

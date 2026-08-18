@@ -138,10 +138,16 @@ def fetch_history_page(
     filters: QueueFilters,
     *,
     disposition: str | None = None,
+    include_corrected: bool = False,
     before_id: int | None = None,
     limit: int = DEFAULT_PAGE_SIZE,
 ) -> list[EventReview]:
+    """Default view excludes already-corrected reviews -- QC History is a
+    workable correction queue, not an immutable dump (2026-08-19 addendum).
+    ``include_corrected=True`` reveals them again; nothing is ever deleted."""
     stmt = select(EventReview).options(joinedload(EventReview.event))
+    if not include_corrected:
+        stmt = stmt.where(EventReview.is_corrected.is_(False))
     if filters.manufacturer:
         stmt = stmt.where(EventReview.manufacturer == filters.manufacturer)
     if filters.event_type:
@@ -200,6 +206,7 @@ def submit_review(db: Session, *, event: Event, disposition: str, reason: str | 
             metadata["correction_history"] = history
             existing.review_metadata = metadata
             existing.disposition = disposition
+            existing.is_corrected = True
         existing.reason = reason or existing.reason
         db.flush()
         return existing
@@ -295,10 +302,14 @@ def fetch_lead_history_page(
     filters: QueueFilters,
     *,
     disposition: str | None = None,
+    include_corrected: bool = False,
     before_id: int | None = None,
     limit: int = DEFAULT_PAGE_SIZE,
 ) -> list[SpecialistLeadReview]:
+    """Same default-excludes-corrected behavior as `fetch_history_page`."""
     stmt = select(SpecialistLeadReview).options(joinedload(SpecialistLeadReview.lead))
+    if not include_corrected:
+        stmt = stmt.where(SpecialistLeadReview.is_corrected.is_(False))
     if filters.manufacturer:
         stmt = stmt.where(SpecialistLeadReview.manufacturer == filters.manufacturer)
     if filters.event_type:
@@ -342,6 +353,7 @@ def submit_lead_review(
             metadata["correction_history"] = history
             existing.review_metadata = metadata
             existing.disposition = disposition
+            existing.is_corrected = True
         existing.reason = reason or existing.reason
         db.flush()
         return existing
