@@ -31,6 +31,8 @@ from app.models import (
     Watch,
 )
 from app.models.review import DISPOSITIONS
+from app.models.specialist_lead import LEAD_TYPES
+from app.models.specialist_lead_review import LEAD_DISPOSITIONS
 from app.services import qc as qc_service
 from app.services.editorial import VALID_EVENT_TYPES
 
@@ -44,6 +46,8 @@ settings = get_settings()
 # silently drift out of sync with the filter UI.
 _EVENT_TYPE_CHOICES = sorted(VALID_EVENT_TYPES)
 _DISPOSITIONS_ORDERED = sorted(DISPOSITIONS)
+_LEAD_TYPE_CHOICES = sorted(LEAD_TYPES)
+_LEAD_DISPOSITIONS_ORDERED = sorted(LEAD_DISPOSITIONS)
 
 _RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent.parent))
 TEMPLATES_DIR = _RESOURCE_ROOT / "app" / "templates"
@@ -180,7 +184,9 @@ async def field_test_mutation_boundary(request: Request, call_next):
     field_test_collection = request.method == "POST" and (
         request.url.path.startswith("/operations/run/") or request.url.path == "/operations/run-all-safe"
     )
-    field_test_review = request.method == "POST" and request.url.path.startswith("/api/qc/review/")
+    field_test_review = request.method == "POST" and (
+        request.url.path.startswith("/api/qc/review/") or request.url.path.startswith("/api/qc/lead-review/")
+    )
     if (
         os.getenv("WATCH_CLANK_FIELD_TEST") == "1"
         and request.method not in {"GET", "HEAD", "OPTIONS"}
@@ -289,6 +295,10 @@ def recent_intelligence(
     event_type: str | None = None,
     region: str | None = None,
     run_id: int | None = None,
+    lead_manufacturer: str | None = None,
+    lead_type: str | None = None,
+    lead_region: str | None = None,
+    lead_run_id: int | None = None,
     db: Session = Depends(get_db),
 ):
     """The most important page: "did Watch Clank find anything worth
@@ -314,9 +324,19 @@ def recent_intelligence(
       discovery novelty is not editorial freshness, and historical/baseline
       evidence must never masquerade as breaking news. ?show=historical
       reveals STALE_PUBLICATION/BASELINE/UNKNOWN_TIMESTAMP/MANUAL_UNDATED
-      leads explicitly -- never mixed into the default view. Not part of
-      the QC system -- Review rows key off Event.id only (see
-      ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md for why).
+      leads explicitly -- never mixed into the default view, and (matching
+      "preserve current historical behaviour") is NOT QC-integrated: the
+      QC queue below only ever replaces the *current* (FRESH) list.
+      Since the 2026-08-19 QC + classifier hardening pass, the *current*
+      view is a second QC active queue exactly like Official Events above
+      -- unreviewed only, cursor-paginated, reviewed-count badges, own
+      filter bar (`lead_manufacturer`/`lead_type`/`lead_region`/
+      `lead_run_id` -- deliberately separate query params from the Events
+      filter bar above them, since "event_type" and "lead_type" are
+      different vocabularies and one dropdown controlling both would
+      silently break whichever table wasn't the one the operator meant).
+      See app.services.qc's SpecialistLead functions,
+      /api/qc/lead-queue, /api/qc/lead-review/{lead_id}.
 
     The LISTING column (2026-08-17 production-reset sprint) reuses the
     Watch's own existing `observations` relationship as its source of
@@ -345,23 +365,36 @@ def recent_intelligence(
         m for (m,) in db.execute(select(Watch.manufacturer).distinct().order_by(Watch.manufacturer)).all()
     ]
 
+    lead_qc_filters = qc_service.QueueFilters(
+        manufacturer=lead_manufacturer or None,
+        event_type=lead_type or None,
+        region=lead_region or None,
+        run_id=lead_run_id,
+    )
+
     if show_historical:
         specialist_leads = db.scalars(
             select(SpecialistLead).order_by(desc(SpecialistLead.discovered_at)).limit(60)
         ).all()
         historical_suppressed_count = 0
+        lead_unreviewed_total = lead_reviewed_today = 0
+        lead_next_cursor = None
     else:
-        specialist_leads = db.scalars(
-            select(SpecialistLead)
-            .where(SpecialistLead.editorial_freshness == "FRESH")
-            .order_by(desc(func.coalesce(SpecialistLead.published_at, SpecialistLead.discovered_at)))
-            .limit(60)
-        ).all()
+        specialist_leads = qc_service.fetch_lead_queue_page(db, lead_qc_filters, limit=qc_service.DEFAULT_PAGE_SIZE)
         historical_suppressed_count = db.scalar(
             select(func.count())
             .select_from(SpecialistLead)
             .where(SpecialistLead.editorial_freshness != "FRESH")
         ) or 0
+        lead_unreviewed_total = qc_service.unreviewed_lead_count(db, lead_qc_filters)
+        lead_reviewed_today = qc_service.reviewed_leads_today_count(db)
+        lead_next_cursor = (
+            specialist_leads[-1].id if len(specialist_leads) == qc_service.DEFAULT_PAGE_SIZE else None
+        )
+
+    lead_manufacturer_choices = [
+        m for (m,) in db.execute(select(SpecialistLead.manufacturer).distinct().order_by(SpecialistLead.manufacturer)).all() if m
+    ]
 
     return templates.TemplateResponse(
         request,
@@ -384,6 +417,18 @@ def recent_intelligence(
             "manufacturer_choices": manufacturer_choices,
             "event_type_choices": _EVENT_TYPE_CHOICES,
             "dispositions": _DISPOSITIONS_ORDERED,
+            "lead_unreviewed_total": lead_unreviewed_total,
+            "lead_reviewed_today": lead_reviewed_today,
+            "lead_next_cursor": lead_next_cursor,
+            "lead_qc_filters": {
+                "manufacturer": lead_manufacturer or "",
+                "lead_type": lead_type or "",
+                "region": lead_region or "",
+                "run_id": lead_run_id or "",
+            },
+            "lead_manufacturer_choices": lead_manufacturer_choices,
+            "lead_type_choices": _LEAD_TYPE_CHOICES,
+            "lead_dispositions": _LEAD_DISPOSITIONS_ORDERED,
         },
     )
 
@@ -468,6 +513,82 @@ def qc_submit_review(event_id: int, request: Request, payload: ReviewSubmission,
     }
 
 
+def _lead_to_qc_dict(lead: SpecialistLead) -> dict:
+    published_or_discovered = lead.published_at or lead.discovered_at
+    return {
+        "lead_id": lead.id,
+        "when_human": _humantime(published_or_discovered),
+        "when_relative": _relative_time(published_or_discovered),
+        "manufacturer": lead.manufacturer,
+        "title": lead.title,
+        "source_url": lead.source_url,
+        "lead_type": lead.lead_type,
+        "source_id": lead.source_id,
+        "source_authority_tier": lead.source_authority_tier,
+        "confidence": round(lead.confidence) if lead.confidence is not None else None,
+    }
+
+
+class LeadReviewSubmission(BaseModel):
+    disposition: str
+    reason: str | None = None
+
+
+@app.get("/api/qc/lead-queue")
+def qc_lead_queue_api(
+    manufacturer: str | None = None,
+    lead_type: str | None = None,
+    region: str | None = None,
+    run_id: int | None = None,
+    before_id: int | None = None,
+    limit: int = qc_service.DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+):
+    """Next page of the Specialist-lead QC active queue -- same "Load
+    more"/"reveal next after review" contract as /api/qc/queue, scoped to
+    SpecialistLead instead of Event."""
+    filters = qc_service.QueueFilters(
+        manufacturer=manufacturer or None,
+        event_type=lead_type or None,
+        region=region or None,
+        run_id=run_id,
+    )
+    limit = max(1, min(limit, 100))
+    leads = qc_service.fetch_lead_queue_page(db, filters, before_id=before_id, limit=limit)
+    return {
+        "items": [_lead_to_qc_dict(lead) for lead in leads],
+        "next_cursor": leads[-1].id if len(leads) == limit else None,
+        "unreviewed_count": qc_service.unreviewed_lead_count(db, filters),
+        "reviewed_today_count": qc_service.reviewed_leads_today_count(db),
+    }
+
+
+@app.post("/api/qc/lead-review/{lead_id}")
+def qc_submit_lead_review(
+    lead_id: int, request: Request, payload: LeadReviewSubmission, db: Session = Depends(get_db)
+):
+    """Persist (or correct) one human editorial verdict on a Specialist
+    lead. Never deletes the SpecialistLead or any of its fields -- see
+    app.services.qc.submit_lead_review."""
+    _require_loopback(request)
+    lead = db.get(SpecialistLead, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="specialist lead not found")
+    try:
+        review = qc_service.submit_lead_review(db, lead=lead, disposition=payload.disposition, reason=payload.reason)
+    except qc_service.InvalidDispositionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    empty_filters = qc_service.QueueFilters()
+    return {
+        "ok": True,
+        "lead_id": lead_id,
+        "disposition": review.disposition,
+        "unreviewed_count": qc_service.unreviewed_lead_count(db, empty_filters),
+        "reviewed_today_count": qc_service.reviewed_leads_today_count(db),
+    }
+
+
 def _review_to_dict(r) -> dict:
     e = r.event
     return {
@@ -496,12 +617,20 @@ def qc_history(
     region: str | None = None,
     disposition: str | None = None,
     run_id: int | None = None,
+    lead_manufacturer: str | None = None,
+    lead_type: str | None = None,
+    lead_region: str | None = None,
+    lead_disposition: str | None = None,
+    lead_run_id: int | None = None,
     db: Session = Depends(get_db),
 ):
     """Archived/reviewed QC entries -- Phase 11 of
     ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md. Corrections happen from here
     by re-submitting a different disposition through the same
-    /api/qc/review/{event_id} endpoint the active queue uses."""
+    /api/qc/review/{event_id} endpoint the active queue uses. Since the
+    2026-08-19 QC + classifier hardening pass, also shows Specialist-lead
+    reviews in their own section with their own filter bar/correction
+    control, reusing the same page/pattern rather than a parallel one."""
     filters = qc_service.QueueFilters(
         manufacturer=manufacturer or None,
         event_type=event_type or None,
@@ -513,6 +642,19 @@ def qc_history(
     manufacturer_choices = [
         m for (m,) in db.execute(select(Watch.manufacturer).distinct().order_by(Watch.manufacturer)).all()
     ]
+
+    lead_filters = qc_service.QueueFilters(
+        manufacturer=lead_manufacturer or None,
+        event_type=lead_type or None,
+        region=lead_region or None,
+        run_id=lead_run_id,
+    )
+    lead_reviews = qc_service.fetch_lead_history_page(db, lead_filters, disposition=lead_disposition or None)
+    lead_next_cursor = lead_reviews[-1].id if len(lead_reviews) == qc_service.DEFAULT_PAGE_SIZE else None
+    lead_manufacturer_choices = [
+        m for (m,) in db.execute(select(SpecialistLead.manufacturer).distinct().order_by(SpecialistLead.manufacturer)).all() if m
+    ]
+
     return templates.TemplateResponse(
         request,
         "qc_history.html",
@@ -530,6 +672,18 @@ def qc_history(
             "manufacturer_choices": manufacturer_choices,
             "event_type_choices": _EVENT_TYPE_CHOICES,
             "dispositions": _DISPOSITIONS_ORDERED,
+            "lead_reviews": lead_reviews,
+            "lead_next_cursor": lead_next_cursor,
+            "lead_qc_filters": {
+                "manufacturer": lead_manufacturer or "",
+                "lead_type": lead_type or "",
+                "region": lead_region or "",
+                "disposition": lead_disposition or "",
+                "run_id": lead_run_id or "",
+            },
+            "lead_manufacturer_choices": lead_manufacturer_choices,
+            "lead_type_choices": _LEAD_TYPE_CHOICES,
+            "lead_dispositions": _LEAD_DISPOSITIONS_ORDERED,
         },
     )
 
@@ -557,6 +711,52 @@ def qc_history_api(
     )
     return {
         "items": [_review_to_dict(r) for r in reviews],
+        "next_cursor": reviews[-1].id if len(reviews) == limit else None,
+    }
+
+
+def _lead_review_to_dict(r) -> dict:
+    lead = r.lead
+    return {
+        "review_id": r.id,
+        "lead_id": r.specialist_lead_id,
+        "manufacturer": r.manufacturer,
+        "title": r.lead_title,
+        "source_url": r.source_url,
+        "source_id": r.source_id,
+        "disposition": r.disposition,
+        "reviewed_at_human": _humantime(r.reviewed_at),
+        "reviewed_at_relative": _relative_time(r.reviewed_at),
+        "lead_type": r.lead_type,
+        "region": r.region,
+        "discovered_at_human": _humantime(lead.discovered_at) if lead else None,
+        "corrected": bool((r.review_metadata or {}).get("correction_history")),
+    }
+
+
+@app.get("/api/qc/lead-history")
+def qc_lead_history_api(
+    manufacturer: str | None = None,
+    lead_type: str | None = None,
+    region: str | None = None,
+    disposition: str | None = None,
+    run_id: int | None = None,
+    before_id: int | None = None,
+    limit: int = qc_service.DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+):
+    filters = qc_service.QueueFilters(
+        manufacturer=manufacturer or None,
+        event_type=lead_type or None,
+        region=region or None,
+        run_id=run_id,
+    )
+    limit = max(1, min(limit, 100))
+    reviews = qc_service.fetch_lead_history_page(
+        db, filters, disposition=disposition or None, before_id=before_id, limit=limit
+    )
+    return {
+        "items": [_lead_review_to_dict(r) for r in reviews],
         "next_cursor": reviews[-1].id if len(reviews) == limit else None,
     }
 

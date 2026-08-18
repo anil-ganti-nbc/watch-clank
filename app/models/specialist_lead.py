@@ -46,6 +46,14 @@ SOURCE_TYPES = frozenset(
 
 # Lead type vocabulary (Phase 11). These are LEADS, never official
 # product-state transitions.
+#
+# EDITORIAL_MENTION (2026-08-19 QC + classifier hardening pass): real
+# coverage of a tracked brand's product that makes no specific new-
+# reference/leak/collaboration/availability claim -- roundups, reviews,
+# mod tutorials, retrospectives. Added instead of one new type per
+# editorial sub-genre specifically because LEAKED_IMAGE had become a
+# silent default for "no reference number extracted", which is not leak
+# evidence. See app/services/specialist_leads.py::classify_lead_type.
 LEAD_TYPES = frozenset(
     {
         "POSSIBLE_NEW_REFERENCE",
@@ -57,6 +65,7 @@ LEAD_TYPES = frozenset(
         "POSSIBLE_LIMITED_EDITION",
         "LEAKED_IMAGE",
         "EARLY_RETAIL_LISTING",
+        "EDITORIAL_MENTION",
     }
 )
 
@@ -168,6 +177,17 @@ class SpecialistLead(Base):
 
     ingestion_method: Mapped[str] = mapped_column(String(16), nullable=False, default="collector")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 2026-08-19 QC + classifier hardening pass: the CollectorRun that
+    # discovered this lead, when the ingesting pipeline has one in scope
+    # (every current pipeline does -- see run_*_pipeline in
+    # app/services/specialist_leads.py). Nullable/SET NULL because this is
+    # provenance, not identity -- losing the run row must never cascade
+    # into losing the lead. Historical pre-existing rows are correctly
+    # NULL (the run association was never captured for them).
+    collector_run_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("collector_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     # Discord dedup (Sprint 6 Phase 4): set once an alert is actually sent so
     # a repeat pipeline run never re-notifies for the same lead.

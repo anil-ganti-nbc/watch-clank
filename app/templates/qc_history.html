@@ -133,4 +133,132 @@
   });
 })();
 </script>
+
+<h2 style="margin-top:2rem"><span class="badge badge-specialist">EARLY WARNING</span> Specialist lead reviews</h2>
+<div class="qc-toolbar">
+  <form method="get" action="/qc/history" class="qc-filter-form" style="margin-left:0">
+    <select name="lead_manufacturer">
+      <option value="">All manufacturers</option>
+      {% for m in lead_manufacturer_choices %}<option value="{{ m }}" {{ 'selected' if lead_qc_filters.manufacturer == m else '' }}>{{ m }}</option>{% endfor %}
+    </select>
+    <select name="lead_type">
+      <option value="">All lead types</option>
+      {% for t in lead_type_choices %}<option value="{{ t }}" {{ 'selected' if lead_qc_filters.lead_type == t else '' }}>{{ t }}</option>{% endfor %}
+    </select>
+    <select name="lead_disposition">
+      <option value="">All dispositions</option>
+      {% for d in lead_dispositions %}<option value="{{ d }}" {{ 'selected' if lead_qc_filters.disposition == d else '' }}>{{ d }}</option>{% endfor %}
+    </select>
+    <input type="text" name="lead_region" placeholder="Region" value="{{ lead_qc_filters.region }}" size="10">
+    <input type="number" name="lead_run_id" placeholder="Run ID" value="{{ lead_qc_filters.run_id }}" size="6">
+    <button type="submit" class="btn small">Filter</button>
+    {% if lead_qc_filters.manufacturer or lead_qc_filters.lead_type or lead_qc_filters.region or lead_qc_filters.disposition or lead_qc_filters.run_id %}<a href="/qc/history" class="btn small">Clear</a>{% endif %}
+  </form>
+</div>
+
+{% if lead_reviews %}
+<table id="lead-qc-history-table">
+  <thead><tr><th>Lead</th><th>Manufacturer</th><th>Disposition</th><th>Reviewed</th><th>Type</th><th>Source</th><th>Discovered</th><th>Correct</th></tr></thead>
+  <tbody id="lead-qc-history-tbody">
+  {% for r in lead_reviews %}
+    <tr id="lead-qc-hist-row-{{ r.id }}" data-lead-id="{{ r.specialist_lead_id }}">
+      <td class="small">{% if r.source_url %}<a href="{{ r.source_url }}" target="_blank" rel="noopener">{{ (r.lead_title or '—')[:70] }}</a>{% else %}{{ r.lead_title or '—' }}{% endif %}</td>
+      <td>{{ r.manufacturer or '—' }}</td>
+      <td><span class="badge {{ 'badge-ok' if r.disposition == 'USEFUL' else 'badge-warn' if r.disposition in ('DUPLICATE','NOT_USEFUL') else 'badge-err' }}" data-disposition-badge>{{ r.disposition }}</span>{% if (r.review_metadata or {}).get('correction_history') %} <span class="muted small" title="disposition corrected at least once">(corrected)</span>{% endif %}</td>
+      <td class="small">{{ r.reviewed_at|humantime }}<br><span class="muted">{{ r.reviewed_at|relative }}</span></td>
+      <td><span class="badge badge-specialist">{{ r.lead_type or '—' }}</span></td>
+      <td class="muted">{{ r.source_id or '—' }}</td>
+      <td class="small">{{ r.lead.discovered_at|humantime if r.lead else '—' }}</td>
+      <td class="qc-controls">
+        <select class="lead-qc-correct-select">
+          {% for d in lead_dispositions %}<option value="{{ d }}" {{ 'selected' if d == r.disposition else '' }}>{{ d }}</option>{% endfor %}
+        </select>
+        <button class="qc-btn lead-qc-correct-btn" title="Save correction">Save</button>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<div class="section" style="text-align:center">
+  <button id="lead-qc-history-load-more" class="btn" {{ 'style=display:none' if not lead_next_cursor else '' }} data-cursor="{{ lead_next_cursor or '' }}">Load more</button>
+</div>
+{% else %}
+<div class="empty">No reviewed specialist leads yet{% if lead_qc_filters.manufacturer or lead_qc_filters.lead_type or lead_qc_filters.region or lead_qc_filters.disposition or lead_qc_filters.run_id %} matching these filters{% endif %}.</div>
+{% endif %}
+
+<script>
+(function(){
+  const tbody = document.getElementById('lead-qc-history-tbody');
+  if (!tbody) return;
+  const loadMoreBtn = document.getElementById('lead-qc-history-load-more');
+  const params = new URLSearchParams(window.location.search);
+  const filters = {manufacturer: params.get('lead_manufacturer')||'', lead_type: params.get('lead_type')||'', region: params.get('lead_region')||'', disposition: params.get('lead_disposition')||'', run_id: params.get('lead_run_id')||''};
+
+  function qs(extra){
+    const p = new URLSearchParams();
+    for (const [k,v] of Object.entries(filters)) if (v) p.set(k, v);
+    for (const [k,v] of Object.entries(extra||{})) if (v !== undefined && v !== null && v !== '') p.set(k, v);
+    return p.toString();
+  }
+
+  const LEAD_DISPOSITIONS = {{ lead_dispositions|tojson }};
+
+  function rowHtml(item){
+    const title = item.source_url ? `<a href="${item.source_url}" target="_blank" rel="noopener">${(item.title||'—').slice(0,70)}</a>` : (item.title||'—');
+    const badgeClass = item.disposition === 'USEFUL' ? 'badge-ok' : (item.disposition === 'DUPLICATE' || item.disposition === 'NOT_USEFUL' ? 'badge-warn' : 'badge-err');
+    const opts = LEAD_DISPOSITIONS.map(d => `<option value="${d}" ${d===item.disposition?'selected':''}>${d}</option>`).join('');
+    return `<td class="small">${title}</td>`+
+      `<td>${item.manufacturer||'—'}</td>`+
+      `<td><span class="badge ${badgeClass}" data-disposition-badge>${item.disposition}</span>${item.corrected ? ' <span class="muted small">(corrected)</span>' : ''}</td>`+
+      `<td class="small">${item.reviewed_at_human}<br><span class="muted">${item.reviewed_at_relative}</span></td>`+
+      `<td><span class="badge badge-specialist">${item.lead_type||'—'}</span></td>`+
+      `<td class="muted">${item.source_id||'—'}</td>`+
+      `<td class="small">${item.discovered_at_human||'—'}</td>`+
+      `<td class="qc-controls"><select class="lead-qc-correct-select">${opts}</select> <button class="qc-btn lead-qc-correct-btn" title="Save correction">Save</button></td>`;
+  }
+
+  function wireRow(tr){
+    const btn = tr.querySelector('.lead-qc-correct-btn');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const leadId = tr.dataset.leadId;
+      const select = tr.querySelector('.lead-qc-correct-select');
+      const disposition = select.value;
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/qc/lead-review/' + leadId, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({disposition: disposition}),
+        });
+        if (res.ok) {
+          const badge = tr.querySelector('[data-disposition-badge]');
+          badge.textContent = disposition;
+          badge.className = 'badge ' + (disposition === 'USEFUL' ? 'badge-ok' : (disposition === 'DUPLICATE' || disposition === 'NOT_USEFUL' ? 'badge-warn' : 'badge-err'));
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  tbody.querySelectorAll('tr').forEach(wireRow);
+
+  if (loadMoreBtn) loadMoreBtn.addEventListener('click', async () => {
+    const cursor = loadMoreBtn.dataset.cursor;
+    const res = await fetch('/api/qc/lead-history?' + qs({before_id: cursor}), {cache:'no-store'});
+    const data = await res.json();
+    (data.items||[]).forEach(item => {
+      const tr = document.createElement('tr');
+      tr.id = 'lead-qc-hist-row-' + item.review_id;
+      tr.dataset.leadId = item.lead_id;
+      tr.innerHTML = rowHtml(item);
+      tbody.appendChild(tr);
+      wireRow(tr);
+    });
+    loadMoreBtn.dataset.cursor = data.next_cursor || '';
+    loadMoreBtn.style.display = data.next_cursor ? '' : 'none';
+  });
+})();
+</script>
 {% endblock %}

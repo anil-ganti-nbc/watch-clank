@@ -3524,6 +3524,171 @@ def test_gear_patrol_does_not_affect_existing_sources_and_url_canonicalized(
     assert len(monochrome_leads) == 1  # untouched by anything Gear Patrol-related
 
 
+# --- 2026-08-19: Watch Clank QC + classifier hardening pass -----------------
+#
+# Manufacturer attribution + LEAKED_IMAGE overclassification regression
+# fixtures. Real production data found dozens of gear_patrol/fratello/
+# great_gshock_world/watchtime leads silently defaulting to LEAKED_IMAGE
+# (roundups, deals, mod tutorials, "favorite watches" posts), plus a real
+# Gear Patrol article about a Boldr x Windup Watch Shop collaboration
+# classified manufacturer="Seiko" purely because its description mentions
+# the watch uses a "Seiko NH35" movement.
+
+
+def _gear_patrol_entry(url_slug: str, headline: str, description: str = "New reference announced.") -> bytes:
+    """Single-item, Watches-category Gear Patrol RSS feed with a
+    controllable description -- needed to exercise incidental-mention
+    (movement/comparison) suppression, which only ever appears in body
+    text, never the headline."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"
+        xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+    <title>Gear Patrol</title>
+    <item>
+        <title><![CDATA[{headline}]]></title>
+        <link>https://www.gearpatrol.com/watches/{url_slug}/</link>
+        <dc:creator><![CDATA[Sean Tirman]]></dc:creator>
+        <pubDate>Wed, 19 Aug 2026 12:00:00 +0000</pubDate>
+        <category><![CDATA[Watches]]></category>
+        <description><![CDATA[{description}]]></description>
+    </item>
+    </channel></rss>""".encode()
+
+
+def test_manufacturer_boldr_collab_not_misattributed_to_seiko_movement_supplier():
+    """Regression fixture for the real production bug: a Boldr x Windup
+    Watch Shop collaboration, described as using a "Seiko NH35" movement,
+    must not become a Seiko-manufacturer lead -- and, since Gear Patrol is
+    explicitly a multi-brand source (required_category, not brand-gated),
+    the real subject (Boldr) is recoverable from the title's own
+    collaboration structure rather than being silently discarded."""
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    xml = _gear_patrol_entry(
+        "boldr-windup-automatic-titanium-field-watch",
+        "Boldr and Windup's Automatic Titanium Field Watch Collab Only Costs $429",
+        "This collaboration pairs Boldr's rugged case with a Seiko NH35 automatic movement inside.",
+    )
+    result = parse_specialist_publication_feed(xml, required_category="Watches")
+    assert result.success
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.brand == "Boldr"
+    assert item.brand != "Seiko"
+    assert item.is_collaboration is True
+    assert item.collaborator == "Windup"
+
+
+def test_manufacturer_timex_article_comparing_to_seiko_stays_timex():
+    """A Timex article that only mentions Seiko for a price comparison in
+    the body must keep manufacturer=Timex -- the comparison brand must
+    never override the subject brand stated in the headline."""
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    xml = _gear_patrol_entry(
+        "timex-expedition-field-watch-review",
+        "Timex's New Expedition Field Watch Undercuts the Price of a Comparable Seiko 5",
+        "At $150, it's a fraction of what you'd pay for a similar Seiko 5 automatic.",
+    )
+    result = parse_specialist_publication_feed(xml, required_category="Watches")
+    assert result.success
+    assert len(result.items) == 1
+    assert result.items[0].brand == "Timex"
+
+
+def test_manufacturer_retailer_article_for_seiko_watch_retailer_not_promoted():
+    """A retailer name appearing alongside a real Seiko headline must never
+    become the manufacturer -- Watch Clank's brand vocabulary is closed to
+    the four tracked manufacturers plus (for multi-brand sources)
+    collaboration-named entities, so an untracked retailer name can never
+    match at all, but this fixture proves it explicitly rather than
+    relying on that being merely incidental."""
+    from app.parsers.specialist_publications import parse_specialist_publication_feed
+
+    xml = _gear_patrol_entry(
+        "costco-seiko-panda-chronograph-deal",
+        "Costco Is Quietly Selling a Seiko Panda Chronograph for Way Below Retail",
+        "The warehouse retailer has the automatic chronograph in stock for a fraction of MSRP.",
+    )
+    result = parse_specialist_publication_feed(xml, required_category="Watches")
+    assert result.success
+    assert len(result.items) == 1
+    assert result.items[0].brand == "Seiko"
+    assert result.items[0].brand != "Costco"
+
+
+def test_event_typing_editorial_article_with_photos_not_leaked_image():
+    """An editorial hands-on/review article (real photos, a real
+    reference) must not become LEAKED_IMAGE -- the mere presence of
+    product photography is not leak evidence."""
+    from app.services.specialist_leads import classify_lead_type
+
+    lead_type = classify_lead_type(
+        title="Hands-On: The Casio Oceanus OCW-S6000 in Photos",
+        claim_text="We spent a week with Casio's latest Oceanus, shot here in full studio photography.",
+        reference_candidates=["OCW-S6000"],
+    )
+    assert lead_type != "LEAKED_IMAGE"
+    assert lead_type == "POSSIBLE_NEW_REFERENCE"
+
+
+def test_event_typing_modification_howto_not_leaked_image():
+    """A modification/how-to article (real production example: fitting a
+    sapphire case back to a King Seiko) must not become LEAKED_IMAGE --
+    no reference match, no leak language, so it correctly falls to the
+    honest EDITORIAL_MENTION bucket instead of the old silent default."""
+    from app.services.specialist_leads import classify_lead_type
+
+    lead_type = classify_lead_type(
+        title="Buying A Watch Tool Kit And Fitting A Sapphire Case Back To A King Seiko 44-9990",
+        claim_text="Step by step, here's how I replaced the case back on my vintage King Seiko.",
+        reference_candidates=[],
+    )
+    assert lead_type != "LEAKED_IMAGE"
+    assert lead_type == "EDITORIAL_MENTION"
+
+
+def test_event_typing_genuine_leak_still_classifies_as_leaked_image():
+    """An actual unreleased-watch image leak, with genuine leak language,
+    must still classify as LEAKED_IMAGE -- the fix tightens the gate, it
+    does not remove the category."""
+    from app.services.specialist_leads import classify_lead_type
+
+    lead_type = classify_lead_type(
+        title="Leaked Images Reveal an Unreleased Casio G-Shock Successor Before Its Official Announcement",
+        claim_text="A retailer listing image, since taken down, appears to show the unannounced model.",
+        reference_candidates=[],
+    )
+    assert lead_type == "LEAKED_IMAGE"
+
+
+def test_event_typing_collaboration_launch_classifies_as_collaboration():
+    """A genuine collaboration launch must still classify as
+    POSSIBLE_COLLABORATION -- unaffected by the LEAKED_IMAGE gating fix."""
+    from app.services.specialist_leads import classify_lead_type
+
+    lead_type = classify_lead_type(
+        title="G-SHOCK x Kanoa Igarashi G-LIDE Collaboration Revealed",
+        claim_text="Casio and surfer Kanoa Igarashi team up for a new G-LIDE colorway.",
+        reference_candidates=["GBX-H5600KI"],
+        is_collaboration=True,
+    )
+    assert lead_type == "POSSIBLE_COLLABORATION"
+
+
+def test_deal_article_becomes_early_retail_listing_not_leaked_image():
+    """A deal/discount article (real production example: the Costco Seiko
+    Panda) becomes EARLY_RETAIL_LISTING -- the brief's explicit "closest
+    valid type" guidance over inventing a dedicated deal/discount type."""
+    from app.services.specialist_leads import classify_lead_type
+
+    lead_type = classify_lead_type(
+        title="Costco Is Quietly Selling a Seiko Panda Chronograph for Way Below Retail",
+        claim_text="The warehouse retailer has it in stock for a fraction of MSRP.",
+        reference_candidates=[],
+    )
+    assert lead_type == "EARLY_RETAIL_LISTING"
+
+
 def test_specialist_cross_source_exact_reference_preserves_leads_but_alerts_once(db_session: Session):
     from datetime import UTC, datetime
     from unittest.mock import patch

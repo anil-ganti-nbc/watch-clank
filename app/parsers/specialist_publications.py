@@ -43,6 +43,39 @@ specimen-specific:
   empirically against the real specimen article before this was added.
   Benefits every source equally; URLs are already-trusted first-party
   data, not scraped free text.
+
+2026-08-19 manufacturer-attribution hardening (Watch Clank QC + classifier
+hardening pass). Real production data surfaced a Gear Patrol article about
+a Boldr x Windup Watch Shop collaboration classified with
+manufacturer="Seiko" -- the article's description mentions the watch uses
+a "Seiko NH35" movement, and the old `_brand_from_blob` scanned title +
+categories + description as one flat bag of text with no notion of
+"subject" vs. "incidental component/comparison mention". Two independent
+fixes, both general-purpose (verified against every pre-existing fixture,
+none of which regress):
+
+1. Title-first hierarchy: a brand mentioned in the TITLE is authoritative
+   and short-circuits before the description is even considered -- this
+   alone fixes "Timex article that mentions Seiko only for a price
+   comparison in the body" (the title-only scan never sees the
+   comparison brand at all).
+2. Context-aware incidental-mention suppression (`_INCIDENTAL_CONTEXT_RE`,
+   `_brand_candidates`): a brand token is excluded from candidacy if a
+   movement/caliber/comparison trigger word appears in a small window
+   around it -- "Seiko NH35 movement" is filtered out project-wide
+   (title or body), not just for the Boldr specimen.
+
+Neither Boldr nor Windup Watch Shop is one of Watch Clank's four tracked
+manufacturers -- the article was never going to become a normal
+brand-scoped lead. `required_category`-gated sources (currently only Gear
+Patrol) are explicitly designed to admit any watch brand, not just the
+tracked four (see the class docstring above), so for a *detected
+collaboration* on such a source, `_collab_pair_from_title` extracts the
+two named participants directly from the title's own "X and/x Y" seam,
+independent of the tracked-brand vocabulary. This is deliberately scoped
+to collaborations on multi-brand sources only -- it does not turn every
+Gear Patrol article into a free-text brand-name generator, only ones the
+article itself already flags as a named collaboration.
 """
 
 from __future__ import annotations
@@ -74,6 +107,53 @@ _REFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
 _LIMITED_RE = re.compile(r"\b(?:limited edition|limited to|limited-run)\b", re.IGNORECASE)
 _COLLAB_RE = re.compile(r"\b(?:collaboration|collab| x )\b", re.IGNORECASE)
 
+# Movement supplier, caliber, and comparison language -- a brand token
+# found near one of these is an incidental mention, not the article's
+# subject manufacturer. Window-based (checked around each individual
+# match, not blob-wide) so a genuinely-subject brand elsewhere in the
+# same text is unaffected.
+_INCIDENTAL_CONTEXT_RE = re.compile(
+    r"\b(?:movement|caliber|calibre|module|powered by|compared? (?:to|with)|comparable(?: to)?|"
+    r"\bvs\.?\b|versus|rival(?:s|ed)?|alternative(?: to)?|similar(?: to)?|cheaper than|"
+    r"instead of|rather than|like the|reminiscent of)\b",
+    re.IGNORECASE | re.ASCII,
+)
+_INCIDENTAL_WINDOW = 45
+
+_COLLAB_SPLIT_RE = re.compile(r"\s+(?:and|x|×)\s+", re.IGNORECASE | re.ASCII)
+_LEADING_ENTITY_RE = re.compile(r"^(?:The\s+)?([A-Z][\w&]*(?:\s+[A-Z][\w&]*){0,2})", re.ASCII)
+
+
+def _brand_candidates(text: str) -> set[str]:
+    """Tracked-brand tokens in `text` that are NOT sitting next to
+    incidental (movement/caliber/comparison) language -- see module
+    docstring's 2026-08-19 entry."""
+    found: set[str] = set()
+    for brand, pattern in _BRAND_TERMS:
+        for m in pattern.finditer(text):
+            start, end = max(0, m.start() - _INCIDENTAL_WINDOW), min(len(text), m.end() + _INCIDENTAL_WINDOW)
+            if _INCIDENTAL_CONTEXT_RE.search(text[start:end]):
+                continue
+            found.add(brand)
+    return found
+
+
+def _collab_pair_from_title(title: str) -> tuple[str, str] | None:
+    """For a title shaped like "X and Y('s) ..." or "X x Y ...", return
+    (primary, collaborator) -- deterministic leading-entity extraction,
+    no brand-vocabulary restriction (a multi-brand source's collaboration
+    can legitimately name a brand Watch Clank doesn't otherwise track,
+    e.g. "Boldr"). Returns None if the title doesn't have this shape."""
+    parts = _COLLAB_SPLIT_RE.split(title, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    left, right = parts
+    m1 = _LEADING_ENTITY_RE.match(left.strip())
+    m2 = _LEADING_ENTITY_RE.match(right.strip())
+    if not m1 or not m2:
+        return None
+    return m1.group(1).strip(), m2.group(1).strip()
+
 
 @dataclass
 class PublicationLeadCandidate:
@@ -85,6 +165,7 @@ class PublicationLeadCandidate:
     reference_candidates: list[str]
     is_limited_edition: bool
     is_collaboration: bool
+    collaborator: str | None = None
 
 
 @dataclass
@@ -95,8 +176,28 @@ class PublicationFeedParseResult:
 
 
 def _brand_from_blob(blob: str) -> str | None:
+    """Legacy whole-blob scan, kept for direct callers/tests that still
+    want the original behavior. `parse_specialist_publication_feed` itself
+    uses the title-first hierarchy below instead."""
     matches = [brand for brand, pattern in _BRAND_TERMS if pattern.search(blob)]
     return matches[0] if len(matches) == 1 else None
+
+
+def _determine_brand(*, title: str, rest: str) -> str | None:
+    """Entity hierarchy: title first (a brand mentioned in the headline is
+    the subject; an incidentally-mentioned comparison/movement-supplier
+    brand there is already excluded by `_brand_candidates`), then the
+    combined title+categories+description blob as a fallback for sources
+    that don't restate the brand in the headline. Ambiguous (0 or >1
+    tracked-brand candidates) at both levels returns None -- unchanged
+    from the original single-match-only discipline."""
+    title_candidates = _brand_candidates(title)
+    if len(title_candidates) == 1:
+        return next(iter(title_candidates))
+    full_candidates = _brand_candidates(f"{title} {rest}")
+    if len(full_candidates) == 1:
+        return next(iter(full_candidates))
+    return None
 
 
 def _canonicalize_url(url: str) -> str:
@@ -131,17 +232,39 @@ def parse_specialist_publication_feed(
                 continue
 
         url = _canonicalize_url(raw.url)
-        blob = f"{raw.title} {' '.join(raw.categories)} {raw.claim_text or ''}"
-        brand = _brand_from_blob(blob)
-        # A general-publication article outside the four approved brands is
-        # irrelevant to Watch Clank and must not become an undifferentiated lead.
+        rest = f"{' '.join(raw.categories)} {raw.claim_text or ''}"
+        blob = f"{raw.title} {rest}"
+        is_collaboration = bool(_COLLAB_RE.search(blob))
+
+        brand = _determine_brand(title=raw.title, rest=rest)
+        collaborator: str | None = None
+        # A detected collaboration on a multi-brand source (required_category
+        # set -- currently only Gear Patrol, see class docstring) may name a
+        # brand Watch Clank doesn't otherwise track (e.g. "Boldr"). Extract
+        # the two named parties from the title's own structure rather than
+        # falling back to whatever tracked brand happens to be mentioned
+        # incidentally (the original Boldr/Seiko-NH35-movement bug).
+        if brand is None and is_collaboration and required_category is not None:
+            pair = _collab_pair_from_title(raw.title)
+            if pair is not None:
+                brand, collaborator = pair
+
+        # A general-publication article with no determinable subject brand
+        # (tracked or, for multi-brand sources, collaboration-named) is
+        # irrelevant to Watch Clank and must not become an undifferentiated
+        # lead.
         if brand is None:
             continue
         # URL included for reference extraction only (see module docstring):
         # some sources put the model number only in the slug, never in the
-        # human-readable title/description.
-        refs = sorted(
-            {match.group(1).upper() for match in _REFERENCE_PATTERNS[brand].finditer(f"{blob} {url}")}
+        # human-readable title/description. Only the four tracked brands
+        # have a reference pattern -- a collaboration-extracted brand
+        # outside that vocabulary (e.g. "Boldr") has no known reference
+        # shape, so it correctly yields no candidates rather than guessing.
+        refs = (
+            sorted({match.group(1).upper() for match in _REFERENCE_PATTERNS[brand].finditer(f"{blob} {url}")})
+            if brand in _REFERENCE_PATTERNS
+            else []
         )
         items.append(
             PublicationLeadCandidate(
@@ -152,7 +275,8 @@ def parse_specialist_publication_feed(
                 brand=brand,
                 reference_candidates=refs,
                 is_limited_edition=bool(_LIMITED_RE.search(blob)),
-                is_collaboration=bool(_COLLAB_RE.search(blob)),
+                is_collaboration=is_collaboration,
+                collaborator=collaborator,
             )
         )
     return PublicationFeedParseResult(success=True, items=items)

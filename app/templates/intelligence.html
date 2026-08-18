@@ -169,13 +169,33 @@
 </script>
 
 <div class="section">
-  <h2><span class="badge badge-specialist">EARLY WARNING</span> Specialist leads {% if not show_historical %}<span class="small muted">(fresh only)</span>{% endif %}</h2>
+  <h2><span class="badge badge-specialist">EARLY WARNING</span> Specialist leads {% if not show_historical %}— QC Queue{% endif %}</h2>
+  {% if not show_historical %}
+  <div class="qc-toolbar">
+    <span class="badge badge-warn" id="lead-qc-unreviewed-badge">Unreviewed: {{ lead_unreviewed_total }}</span>
+    <span class="badge badge-ok" id="lead-qc-reviewed-today-badge">Reviewed today: {{ lead_reviewed_today }}</span>
+    <form method="get" action="/intelligence" class="qc-filter-form">
+      <select name="lead_manufacturer">
+        <option value="">All manufacturers</option>
+        {% for m in lead_manufacturer_choices %}<option value="{{ m }}" {{ 'selected' if lead_qc_filters.manufacturer == m else '' }}>{{ m }}</option>{% endfor %}
+      </select>
+      <select name="lead_type">
+        <option value="">All lead types</option>
+        {% for t in lead_type_choices %}<option value="{{ t }}" {{ 'selected' if lead_qc_filters.lead_type == t else '' }}>{{ t }}</option>{% endfor %}
+      </select>
+      <input type="text" name="lead_region" placeholder="Region" value="{{ lead_qc_filters.region }}" size="10">
+      <input type="number" name="lead_run_id" placeholder="Run ID" value="{{ lead_qc_filters.run_id }}" size="6">
+      <button type="submit" class="btn small">Filter</button>
+      {% if lead_qc_filters.manufacturer or lead_qc_filters.lead_type or lead_qc_filters.region or lead_qc_filters.run_id %}<a href="/intelligence" class="btn small">Clear</a>{% endif %}
+    </form>
+  </div>
+  {% endif %}
   {% if specialist_leads %}
-  <table>
-    <thead><tr><th>Published / observed</th><th>Manufacturer</th><th>Lead</th><th>Type</th><th>Source</th><th>Tier</th><th>Confidence</th>{% if show_historical %}<th>Freshness</th>{% endif %}</tr></thead>
-    <tbody>
+  <table id="lead-qc-table">
+    <thead><tr><th>Published / observed</th><th>Manufacturer</th><th>Lead</th><th>Type</th>{% if not show_historical %}<th>QC</th>{% endif %}<th>Source</th><th>Tier</th><th>Confidence</th>{% if show_historical %}<th>Freshness</th>{% endif %}</tr></thead>
+    <tbody id="lead-qc-tbody">
     {% for L in specialist_leads %}
-      <tr>
+      <tr id="lead-qc-row-{{ L.id }}" data-lead-id="{{ L.id }}">
         <td class="small">
           {% if L.published_at %}{{ L.published_at|humantime }}<br><span class="muted">{{ L.published_at|relative }}</span>
           {% else %}<span class="muted">discovered {{ L.discovered_at|humantime }}</span>{% endif %}
@@ -183,6 +203,14 @@
         <td>{{ L.manufacturer or '—' }}</td>
         <td><a href="{{ L.source_url }}" target="_blank" rel="noopener">{{ L.title[:90] }}</a></td>
         <td><span class="badge badge-specialist">{{ L.lead_type }}</span></td>
+        {% if not show_historical %}
+        <td class="qc-controls">
+          <button class="lead-qc-btn" data-disposition="USEFUL" title="Useful">U</button>
+          <button class="lead-qc-btn" data-disposition="NOT_USEFUL" title="Not useful">NU</button>
+          <button class="lead-qc-btn" data-disposition="DUPLICATE" title="Duplicate">DUP</button>
+          <button class="lead-qc-btn" data-disposition="FALSE_POSITIVE" title="False positive">FP</button>
+        </td>
+        {% endif %}
         <td class="muted">{{ L.source_id }}</td>
         <td class="small">tier {{ L.source_authority_tier }}</td>
         <td class="small">{{ L.confidence|round(0) }}</td>
@@ -191,11 +219,118 @@
     {% endfor %}
     </tbody>
   </table>
+  {% if not show_historical %}
+  <div class="section" style="text-align:center">
+    <button id="lead-qc-load-more" class="btn" {{ 'style=display:none' if not lead_next_cursor else '' }} data-cursor="{{ lead_next_cursor or '' }}">Load more</button>
+    <div id="lead-qc-exhausted" class="muted small" style="display:none">Queue exhausted — nothing else unreviewed matches these filters.</div>
+  </div>
+  {% endif %}
   {% else %}
   <div class="empty">
     {% if show_historical %}No specialist leads in the database yet.
-    {% else %}No fresh specialist leads right now. This is expected if nothing genuinely new has been published within the freshness window — not a bug.{% endif %}
+    {% else %}No unreviewed fresh specialist leads right now{% if lead_qc_filters.manufacturer or lead_qc_filters.lead_type or lead_qc_filters.region or lead_qc_filters.run_id %} matching these filters{% endif %}. This is expected if nothing genuinely new has been published within the freshness window — not a bug.{% endif %}
   </div>
   {% endif %}
 </div>
+
+{% if not show_historical %}
+<script>
+(function(){
+  const tbody = document.getElementById('lead-qc-tbody');
+  if (!tbody) return;
+  const loadMoreBtn = document.getElementById('lead-qc-load-more');
+  const exhausted = document.getElementById('lead-qc-exhausted');
+  const unreviewedBadge = document.getElementById('lead-qc-unreviewed-badge');
+  const reviewedBadge = document.getElementById('lead-qc-reviewed-today-badge');
+  const params = new URLSearchParams(window.location.search);
+  const filters = {manufacturer: params.get('lead_manufacturer')||'', lead_type: params.get('lead_type')||'', region: params.get('lead_region')||'', run_id: params.get('lead_run_id')||''};
+
+  function qs(extra){
+    const p = new URLSearchParams();
+    for (const [k,v] of Object.entries(filters)) if (v) p.set(k, v);
+    for (const [k,v] of Object.entries(extra||{})) if (v !== undefined && v !== null && v !== '') p.set(k, v);
+    return p.toString();
+  }
+
+  function rowHtml(item){
+    return `<td class="small">${item.when_human}<br><span class="muted">${item.when_relative}</span></td>`+
+      `<td>${item.manufacturer||'—'}</td>`+
+      `<td><a href="${item.source_url}" target="_blank" rel="noopener">${(item.title||'').slice(0,90)}</a></td>`+
+      `<td><span class="badge badge-specialist">${item.lead_type}</span></td>`+
+      `<td class="qc-controls">`+
+        `<button class="lead-qc-btn" data-disposition="USEFUL" title="Useful">U</button>`+
+        `<button class="lead-qc-btn" data-disposition="NOT_USEFUL" title="Not useful">NU</button>`+
+        `<button class="lead-qc-btn" data-disposition="DUPLICATE" title="Duplicate">DUP</button>`+
+        `<button class="lead-qc-btn" data-disposition="FALSE_POSITIVE" title="False positive">FP</button>`+
+      `</td>`+
+      `<td class="muted">${item.source_id||'—'}</td>`+
+      `<td class="small">tier ${item.source_authority_tier ?? '—'}</td>`+
+      `<td class="small">${item.confidence ?? '—'}</td>`;
+  }
+
+  function appendRow(item){
+    const tr = document.createElement('tr');
+    tr.id = 'lead-qc-row-' + item.lead_id;
+    tr.dataset.leadId = item.lead_id;
+    tr.innerHTML = rowHtml(item);
+    tbody.appendChild(tr);
+    wireRow(tr);
+  }
+
+  function updateCounts(data){
+    if (unreviewedBadge && data.unreviewed_count !== undefined) unreviewedBadge.textContent = 'Unreviewed: ' + data.unreviewed_count;
+    if (reviewedBadge && data.reviewed_today_count !== undefined) reviewedBadge.textContent = 'Reviewed today: ' + data.reviewed_today_count;
+  }
+
+  async function fetchOneMore(){
+    const lastRow = tbody.lastElementChild;
+    const cursor = lastRow ? lastRow.dataset.leadId : '';
+    const res = await fetch('/api/qc/lead-queue?' + qs({before_id: cursor, limit: 1}), {cache:'no-store'});
+    const data = await res.json();
+    if (data.items && data.items.length) appendRow(data.items[0]);
+    if (loadMoreBtn) loadMoreBtn.style.display = data.next_cursor ? '' : 'none';
+    if (exhausted) exhausted.style.display = (!data.next_cursor && tbody.children.length === 0) ? '' : 'none';
+    updateCounts(data);
+  }
+
+  async function submitReview(btn){
+    const tr = btn.closest('tr');
+    const leadId = tr.dataset.leadId;
+    const disposition = btn.dataset.disposition;
+    tr.querySelectorAll('.lead-qc-btn').forEach(b => b.disabled = true);
+    try {
+      const res = await fetch('/api/qc/lead-review/' + leadId, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({disposition: disposition}),
+      });
+      if (!res.ok) { tr.querySelectorAll('.lead-qc-btn').forEach(b => b.disabled = false); return; }
+      const data = await res.json();
+      tr.remove();
+      updateCounts(data);
+      if (tbody.children.length === 0 && exhausted) exhausted.style.display = '';
+      await fetchOneMore();
+    } catch (e) {
+      tr.querySelectorAll('.lead-qc-btn').forEach(b => b.disabled = false);
+    }
+  }
+
+  function wireRow(tr){
+    tr.querySelectorAll('.lead-qc-btn').forEach(btn => btn.addEventListener('click', () => submitReview(btn)));
+  }
+
+  tbody.querySelectorAll('tr').forEach(wireRow);
+
+  if (loadMoreBtn) loadMoreBtn.addEventListener('click', async () => {
+    const cursor = loadMoreBtn.dataset.cursor;
+    const res = await fetch('/api/qc/lead-queue?' + qs({before_id: cursor}), {cache:'no-store'});
+    const data = await res.json();
+    (data.items||[]).forEach(appendRow);
+    loadMoreBtn.dataset.cursor = data.next_cursor || '';
+    loadMoreBtn.style.display = data.next_cursor ? '' : 'none';
+    updateCounts(data);
+  });
+})();
+</script>
+{% endif %}
 {% endblock %}

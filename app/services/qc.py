@@ -7,6 +7,13 @@ about one Event under one evidence state, never a permanent blacklist of
 a reference, and future use of this data (ranking, noise-repeat
 detection) stays conservative and explainable -- no ML, no opaque
 suppression, no reference-family collateral damage.
+
+2026-08-19 (Watch Clank QC + classifier hardening pass): extended with the
+same contract for SpecialistLead -- see SpecialistLeadReview's own module
+docstring for why that's a sibling table rather than a merge into
+EventReview. `QueueFilters`/`DEFAULT_PAGE_SIZE`/`InvalidDispositionError`
+are reused as-is (manufacturer/region/run_id mean exactly the same thing
+for a lead as for an event; `event_type` doubles as the lead_type filter).
 """
 
 from __future__ import annotations
@@ -17,15 +24,24 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import CollectorRun, Event, EventReview, EventWatch, Watch
+from app.models import (
+    CollectorRun,
+    Event,
+    EventReview,
+    EventWatch,
+    SpecialistLead,
+    SpecialistLeadReview,
+    Watch,
+)
 from app.models.review import DISPOSITIONS
+from app.models.specialist_lead_review import LEAD_DISPOSITIONS
 from app.services.editorial import AVAILABILITY_EVENT_TYPES
 
 DEFAULT_PAGE_SIZE = 25
 
 
 class InvalidDispositionError(ValueError):
-    """Raised when a disposition outside DISPOSITIONS is submitted."""
+    """Raised when a disposition outside DISPOSITIONS/LEAD_DISPOSITIONS is submitted."""
 
 
 @dataclass(frozen=True)
@@ -34,6 +50,15 @@ class QueueFilters:
     event_type: str | None = None
     region: str | None = None
     run_id: int | None = None
+
+
+def _run_window(db: Session, run_id: int) -> tuple[datetime, datetime] | None:
+    """(started_at, effective end) for a CollectorRun, or None if unknown.
+    Shared by both the Event and SpecialistLead run_id filters."""
+    run = db.get(CollectorRun, run_id)
+    if run is None:
+        return None
+    return run.started_at, run.completed_at or (run.started_at + timedelta(minutes=30))
 
 
 def _eligibility_clause():
@@ -60,11 +85,9 @@ def _apply_filters(stmt, filters: QueueFilters, *, db: Session):
     if filters.region:
         stmt = stmt.where(func.json_extract(Event.extra, "$.region") == filters.region)
     if filters.run_id is not None:
-        run = db.get(CollectorRun, filters.run_id)
-        if run is not None:
-            window_start = run.started_at
-            window_end = run.completed_at or (run.started_at + timedelta(minutes=30))
-            stmt = stmt.where(Event.created_at >= window_start, Event.created_at <= window_end)
+        window = _run_window(db, filters.run_id)
+        if window is not None:
+            stmt = stmt.where(Event.created_at >= window[0], Event.created_at <= window[1])
         else:
             # Unknown run id: show nothing rather than silently dropping the
             # filter and rendering an unrelated, unfiltered queue.
@@ -128,12 +151,10 @@ def fetch_history_page(
     if disposition:
         stmt = stmt.where(EventReview.disposition == disposition)
     if filters.run_id is not None:
-        run = db.get(CollectorRun, filters.run_id)
-        if run is not None:
-            window_start = run.started_at
-            window_end = run.completed_at or (run.started_at + timedelta(minutes=30))
+        window = _run_window(db, filters.run_id)
+        if window is not None:
             stmt = stmt.join(Event, Event.id == EventReview.event_id).where(
-                Event.created_at >= window_start, Event.created_at <= window_end
+                Event.created_at >= window[0], Event.created_at <= window[1]
             )
         else:
             stmt = stmt.where(EventReview.id.is_(None))
@@ -215,3 +236,132 @@ def prior_reviews_for_reference(db: Session, *, manufacturer: str, reference_can
             .order_by(desc(EventReview.reviewed_at))
         ).all()
     )
+
+
+# --- SpecialistLead (Layer B) QC -- sibling of the Event functions above ---
+
+
+def _base_unreviewed_lead_query(db: Session, filters: QueueFilters):
+    """Scoped to the same "current" set already shown on /intelligence's
+    Specialist leads section (editorial_freshness == FRESH) -- historical/
+    stale leads are not part of the featured triage workflow, matching
+    Official Events' queue never offering to review suppressed events
+    either. `filters.event_type` doubles as the lead_type filter."""
+    stmt = (
+        select(SpecialistLead)
+        .outerjoin(SpecialistLeadReview, SpecialistLeadReview.specialist_lead_id == SpecialistLead.id)
+        .where(SpecialistLeadReview.id.is_(None))
+        .where(SpecialistLead.editorial_freshness == "FRESH")
+    )
+    if filters.manufacturer:
+        stmt = stmt.where(SpecialistLead.manufacturer == filters.manufacturer)
+    if filters.event_type:
+        stmt = stmt.where(SpecialistLead.lead_type == filters.event_type)
+    if filters.region:
+        stmt = stmt.where(SpecialistLead.region == filters.region)
+    if filters.run_id is not None:
+        stmt = stmt.where(SpecialistLead.collector_run_id == filters.run_id)
+    return stmt
+
+
+def unreviewed_lead_count(db: Session, filters: QueueFilters) -> int:
+    stmt = _base_unreviewed_lead_query(db, filters).with_only_columns(func.count(func.distinct(SpecialistLead.id)))
+    return db.scalar(stmt) or 0
+
+
+def reviewed_leads_today_count(db: Session) -> int:
+    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return db.scalar(
+        select(func.count(func.distinct(SpecialistLeadReview.specialist_lead_id))).where(
+            SpecialistLeadReview.reviewed_at >= start
+        )
+    ) or 0
+
+
+def fetch_lead_queue_page(
+    db: Session, filters: QueueFilters, *, before_id: int | None = None, limit: int = DEFAULT_PAGE_SIZE
+) -> list[SpecialistLead]:
+    """Newest-first (by id) page of unreviewed, currently-fresh
+    SpecialistLeads. ``before_id``, if given, continues past that lead's id."""
+    stmt = _base_unreviewed_lead_query(db, filters)
+    if before_id is not None:
+        stmt = stmt.where(SpecialistLead.id < before_id)
+    stmt = stmt.order_by(desc(SpecialistLead.id)).limit(limit)
+    return list(db.scalars(stmt).unique().all())
+
+
+def fetch_lead_history_page(
+    db: Session,
+    filters: QueueFilters,
+    *,
+    disposition: str | None = None,
+    before_id: int | None = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+) -> list[SpecialistLeadReview]:
+    stmt = select(SpecialistLeadReview).options(joinedload(SpecialistLeadReview.lead))
+    if filters.manufacturer:
+        stmt = stmt.where(SpecialistLeadReview.manufacturer == filters.manufacturer)
+    if filters.event_type:
+        stmt = stmt.where(SpecialistLeadReview.lead_type == filters.event_type)
+    if filters.region:
+        stmt = stmt.where(SpecialistLeadReview.region == filters.region)
+    if disposition:
+        stmt = stmt.where(SpecialistLeadReview.disposition == disposition)
+    if filters.run_id is not None:
+        stmt = stmt.where(SpecialistLeadReview.collector_run_id == filters.run_id)
+    if before_id is not None:
+        stmt = stmt.where(SpecialistLeadReview.id < before_id)
+    stmt = stmt.order_by(desc(SpecialistLeadReview.id)).limit(limit)
+    return list(db.scalars(stmt).unique().all())
+
+
+def submit_lead_review(
+    db: Session, *, lead: SpecialistLead, disposition: str, reason: str | None = None
+) -> SpecialistLeadReview:
+    """Persist (or correct) the operator's verdict on ``lead`` -- exact
+    same idempotent-by-correction contract as `submit_review`. Never
+    touches the SpecialistLead row itself, never touches any other lead
+    for the same manufacturer/reference."""
+    if disposition not in LEAD_DISPOSITIONS:
+        raise InvalidDispositionError(f"unknown disposition: {disposition!r}")
+
+    now = datetime.now(UTC)
+    existing = db.scalar(select(SpecialistLeadReview).where(SpecialistLeadReview.specialist_lead_id == lead.id))
+
+    if existing is not None:
+        if existing.disposition != disposition:
+            metadata = dict(existing.review_metadata or {})
+            history = list(metadata.get("correction_history") or [])
+            history.append(
+                {
+                    "previous_disposition": existing.disposition,
+                    "previous_reviewed_at": existing.reviewed_at.isoformat(),
+                    "corrected_at": now.isoformat(),
+                }
+            )
+            metadata["correction_history"] = history
+            existing.review_metadata = metadata
+            existing.disposition = disposition
+        existing.reason = reason or existing.reason
+        db.flush()
+        return existing
+
+    review = SpecialistLeadReview(
+        specialist_lead_id=lead.id,
+        lead_title=lead.title,
+        source_url=lead.source_url,
+        source_id=lead.source_id,
+        manufacturer=lead.manufacturer,
+        region=lead.region,
+        lead_type=lead.lead_type,
+        source_authority_tier=lead.source_authority_tier,
+        confidence=lead.confidence,
+        published_at=lead.published_at,
+        discovered_at=lead.discovered_at,
+        collector_run_id=lead.collector_run_id,
+        disposition=disposition,
+        reason=reason,
+    )
+    db.add(review)
+    db.flush()
+    return review

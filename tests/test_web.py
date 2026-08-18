@@ -796,3 +796,156 @@ def test_qc_manufacturer_filter_leaves_other_manufacturers_unaffected(qc_client:
     resp2 = qc_client.get("/api/qc/queue?manufacturer=Casio")
     ids2 = {i["event_id"] for i in resp2.json()["items"]}
     assert casio_event.id in ids2
+
+
+# --- 2026-08-19 Watch Clank QC + classifier hardening: Specialist lead QC ---
+#
+# Same EVENT != REVIEW contract, applied to SpecialistLead -- see
+# app.models.specialist_lead_review's module docstring for why this is a
+# sibling table (DUPLICATE in place of OUT_OF_STOCK) rather than a merge
+# into EventReview, and why that still counts as reusing the shared QC
+# system rather than building a parallel one.
+
+
+def _make_specialist_lead(db: Session, **overrides) -> SpecialistLead:
+    from datetime import UTC, datetime
+
+    defaults = {
+        "source_id": "gear_patrol",
+        "source_type": "SPECIALIST_PUBLICATION",
+        "source_authority_tier": 3,
+        "lead_type": "POSSIBLE_COLLABORATION",
+        "manufacturer": "Boldr",
+        "brand": "Boldr",
+        "title": "Boldr and Windup's Automatic Titanium Field Watch Collab",
+        "source_url": "https://www.gearpatrol.com/watches/boldr-windup",
+        "confidence": 50.0,
+        "editorial_freshness": "FRESH",
+        "discovered_at": datetime.now(UTC),
+    }
+    defaults.update(overrides)
+    lead = SpecialistLead(**defaults)
+    db.add(lead)
+    db.commit()
+    db.refresh(lead)
+    return lead
+
+
+def test_lead_qc_review_useful_persists_removed_from_queue_and_in_history(qc_client: TestClient, db: Session):
+    lead = _make_specialist_lead(db)
+
+    before = qc_client.get("/api/qc/lead-queue")
+    assert lead.id in {i["lead_id"] for i in before.json()["items"]}
+
+    resp = qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "USEFUL"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["disposition"] == "USEFUL"
+
+    from app.models import SpecialistLeadReview
+
+    review = db.query(SpecialistLeadReview).filter(SpecialistLeadReview.specialist_lead_id == lead.id).one()
+    assert review.disposition == "USEFUL"
+    assert review.manufacturer == "Boldr"  # snapshot metadata preserved
+    assert review.lead_title == lead.title
+    assert review.source_url == lead.source_url
+
+    after = qc_client.get("/api/qc/lead-queue")
+    assert lead.id not in {i["lead_id"] for i in after.json()["items"]}
+
+    history = qc_client.get("/api/qc/lead-history")
+    assert lead.id in {i["lead_id"] for i in history.json()["items"]}
+
+
+def test_lead_qc_review_false_positive_persists_removed_from_queue_and_in_history(
+    qc_client: TestClient, db: Session
+):
+    lead = _make_specialist_lead(db, title="A different lead entirely", source_url="https://example.com/other")
+
+    resp = qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "FALSE_POSITIVE"})
+    assert resp.status_code == 200
+    assert resp.json()["disposition"] == "FALSE_POSITIVE"
+
+    after = qc_client.get("/api/qc/lead-queue")
+    assert lead.id not in {i["lead_id"] for i in after.json()["items"]}
+
+    history = qc_client.get("/api/qc/lead-history")
+    items = {i["lead_id"]: i for i in history.json()["items"]}
+    assert items[lead.id]["disposition"] == "FALSE_POSITIVE"
+
+
+def test_lead_qc_reviewed_lead_does_not_reappear_after_refresh(qc_client: TestClient, db: Session):
+    """Refresh/reload after review: the reviewed lead must not reappear as
+    unreviewed -- proven via two independent fresh page loads/API calls,
+    not just checking the in-memory response of the review call itself."""
+    lead = _make_specialist_lead(db)
+    qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "DUPLICATE"})
+
+    # Simulate a page reload: brand new GET requests, no client-side state.
+    page = qc_client.get("/intelligence")
+    assert page.status_code == 200
+    assert f'data-lead-id="{lead.id}"' not in page.text
+
+    api = qc_client.get("/api/qc/lead-queue")
+    assert lead.id not in {i["lead_id"] for i in api.json()["items"]}
+    assert api.json()["unreviewed_count"] == 0
+
+
+def test_lead_qc_disposition_correction_restores_expected_state(qc_client: TestClient, db: Session):
+    """Undo/reverse verdict from QC History: correcting a disposition
+    updates the SAME review row in place (never creates a duplicate),
+    keeps the prior verdict in the audit trail, and the corrected value is
+    what subsequently shows in history -- matching EventReview's existing,
+    already-proven correction semantics."""
+    from app.models import SpecialistLeadReview
+
+    lead = _make_specialist_lead(db)
+    qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "NOT_USEFUL"})
+    resp = qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "USEFUL"})
+    assert resp.status_code == 200
+    assert resp.json()["disposition"] == "USEFUL"
+
+    reviews = db.query(SpecialistLeadReview).filter(SpecialistLeadReview.specialist_lead_id == lead.id).all()
+    assert len(reviews) == 1  # correction, not a duplicate row
+    assert reviews[0].disposition == "USEFUL"
+    history = (reviews[0].review_metadata or {}).get("correction_history") or []
+    assert len(history) == 1
+    assert history[0]["previous_disposition"] == "NOT_USEFUL"
+
+    # Still absent from the active queue (a corrected lead stays reviewed).
+    api = qc_client.get("/api/qc/lead-queue")
+    assert lead.id not in {i["lead_id"] for i in api.json()["items"]}
+
+
+def test_lead_qc_invalid_disposition_rejected(qc_client: TestClient, db: Session):
+    lead = _make_specialist_lead(db)
+    resp = qc_client.post(f"/api/qc/lead-review/{lead.id}", json={"disposition": "OUT_OF_STOCK"})
+    assert resp.status_code == 400  # OUT_OF_STOCK is an Event disposition, not a lead one
+
+    from app.models import SpecialistLeadReview
+
+    assert db.query(SpecialistLeadReview).filter(SpecialistLeadReview.specialist_lead_id == lead.id).count() == 0
+
+
+def test_lead_qc_review_on_missing_lead_returns_404(qc_client: TestClient):
+    resp = qc_client.post("/api/qc/lead-review/999999999", json={"disposition": "USEFUL"})
+    assert resp.status_code == 404
+
+
+def test_lead_qc_manufacturer_filter_leaves_other_manufacturers_unaffected(qc_client: TestClient, db: Session):
+    boldr_lead = _make_specialist_lead(db, manufacturer="Boldr", brand="Boldr", source_url="https://www.gearpatrol.com/watches/boldr-1")
+    casio_lead = _make_specialist_lead(
+        db, manufacturer="Casio", brand="Casio", lead_type="POSSIBLE_NEW_REFERENCE",
+        title="New G-Shock reference", source_url="https://www.gearpatrol.com/watches/casio-1",
+    )
+
+    resp = qc_client.get("/api/qc/lead-queue?manufacturer=Boldr")
+    ids = {i["lead_id"] for i in resp.json()["items"]}
+    assert boldr_lead.id in ids
+    assert casio_lead.id not in ids
+
+    qc_client.post(f"/api/qc/lead-review/{boldr_lead.id}", json={"disposition": "USEFUL"})
+    resp2 = qc_client.get("/api/qc/lead-queue?manufacturer=Casio")
+    ids2 = {i["lead_id"] for i in resp2.json()["items"]}
+    assert casio_lead.id in ids2

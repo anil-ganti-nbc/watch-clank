@@ -8,6 +8,7 @@ Watch rows for conservative, exact-reference-string correlation.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
@@ -24,6 +25,73 @@ from app.services.run_lock import RunLockService
 from app.services.source_registry import get_source_profile
 
 logger = get_logger(__name__)
+
+# 2026-08-19 QC + classifier hardening pass (real production data: 43+
+# casioblog leads and dozens of gear_patrol/fratello/great_gshock_world/
+# watchtime leads -- roundups, dress-watch listicles, mod tutorials,
+# retailer deals, "favorite watches this week" posts -- were all silently
+# defaulting to LEAKED_IMAGE purely because they had no leak claim). The
+# old rule per pipeline was a bare `"POSSIBLE_NEW_REFERENCE" if
+# item.reference_candidates else "LEAKED_IMAGE"` fallback: the mere
+# ABSENCE of an extractable reference number was treated as evidence of a
+# leak, when it is not evidence of anything. LEAKED_IMAGE now requires
+# actual leak language (leaked/unreleased/spy shot/before announcement/
+# accidentally published/unannounced); everything else that isn't a
+# reference, collaboration, limited edition, or availability signal falls
+# to EDITORIAL_MENTION -- an honest "this is real coverage of a tracked
+# brand, but makes no specific new/leak/collab/price claim" bucket -- per
+# the brief's explicit instruction to prefer gating + the closest valid
+# type over exploding the enum with one type per editorial sub-genre
+# (deal/mod/historical/etc. all become either EARLY_RETAIL_LISTING, if
+# the article itself uses sale/discount language, or EDITORIAL_MENTION).
+_LEAK_EVIDENCE_RE = re.compile(
+    r"\b(?:leak(?:ed|s|ing)?|un-?released|spy shot|spied|"
+    r"before (?:its |the )?(?:official )?announcement|"
+    r"ahead of (?:its |the )?(?:official )?announcement|"
+    r"accidentally (?:published|posted|revealed|leaked)|"
+    r"unannounced|not yet announced|"
+    r"(?:listing|database)(?: page| entry)? (?:reveals|exposes))\b",
+    re.IGNORECASE | re.ASCII,
+)
+_DEAL_RE = re.compile(
+    r"\b(?:on sale|for sale|% ?off|percent off|discount(?:ed)?|\bdeal\b|clearance|"
+    r"below retail|marked down|price drop|now available|available now|back in stock)\b",
+    re.IGNORECASE | re.ASCII,
+)
+
+
+def classify_lead_type(
+    *,
+    title: str,
+    claim_text: str | None = None,
+    reference_candidates: list[str] | None = None,
+    is_limited_edition: bool = False,
+    is_collaboration: bool = False,
+    is_restock_or_availability: bool = False,
+) -> str:
+    """Single shared lead_type decision, used by every specialist source
+    pipeline below (previously four near-identical inline ternary chains,
+    one per pipeline, that had silently drifted into treating "no
+    reference number found" as leak evidence). Order matters: a more
+    specific structured signal (limited edition / collaboration /
+    availability) always wins over a plain reference match, and genuine
+    leak language always wins over "a reference number happens to be
+    present" -- a leaked photo of a specific unreleased reference is
+    still a leak, not merely a new-reference sighting."""
+    if is_limited_edition:
+        return "POSSIBLE_LIMITED_EDITION"
+    if is_collaboration:
+        return "POSSIBLE_COLLABORATION"
+    if is_restock_or_availability:
+        return "EARLY_RETAIL_LISTING"
+    blob = f"{title} {claim_text or ''}"
+    if _LEAK_EVIDENCE_RE.search(blob):
+        return "LEAKED_IMAGE"
+    if reference_candidates:
+        return "POSSIBLE_NEW_REFERENCE"
+    if _DEAL_RE.search(blob):
+        return "EARLY_RETAIL_LISTING"
+    return "EDITORIAL_MENTION"
 
 
 def _reference_family(reference: str) -> str:
@@ -58,6 +126,7 @@ class SpecialistLeadService:
         ingestion_method: str = "collector",
         notes: str | None = None,
         force_baseline: bool = False,
+        collector_run_id: int | None = None,
     ) -> dict:
         """Create (or silently skip, if already seen) one SpecialistLead.
         Dedup key is source_url — reprocessing the same feed/post is a
@@ -114,6 +183,7 @@ class SpecialistLeadService:
             editorial_freshness=freshness.state,
             freshness_reason=freshness.reason,
             freshness_evaluated_at=now,
+            collector_run_id=collector_run_id,
         )
         self.session.add(lead)
         self.session.flush()
@@ -366,13 +436,18 @@ def run_casioblog_pipeline(session: Session, *, feed_xml: bytes | None = None, m
                 for item in parsed.items:
                     outcome = svc.ingest_candidate(
                         source_id="casioblog",
-                        lead_type="POSSIBLE_NEW_REFERENCE" if item.reference_candidates else "LEAKED_IMAGE",
+                        lead_type=classify_lead_type(
+                            title=item.title,
+                            claim_text=item.claim_text,
+                            reference_candidates=item.reference_candidates,
+                        ),
                         title=item.title,
                         source_url=item.url,
                         published_at=item.published_at,
                         reference_candidates=item.reference_candidates,
                         claim_text=item.claim_text,
                         manufacturer="Casio",
+                        collector_run_id=run.id,
                         confidence=(
                             40.0
                             + (15.0 if item.reference_candidates else 0.0)
@@ -463,11 +538,12 @@ def run_gcentral_pipeline(session: Session, *, feed_xml: bytes | None = None, ma
                 svc = SpecialistLeadService(session)
                 notifier = DiscordNotifier(settings)
                 for item in parsed.items:
-                    lead_type = (
-                        "POSSIBLE_COLLABORATION" if item.is_collaboration
-                        else "EARLY_RETAIL_LISTING" if item.is_restock_or_availability
-                        else "POSSIBLE_NEW_REFERENCE" if item.reference_candidates
-                        else "LEAKED_IMAGE"
+                    lead_type = classify_lead_type(
+                        title=item.title,
+                        claim_text=item.claim_text,
+                        reference_candidates=item.reference_candidates,
+                        is_collaboration=item.is_collaboration,
+                        is_restock_or_availability=item.is_restock_or_availability,
                     )
                     outcome = svc.ingest_candidate(
                         source_id="g_central",
@@ -478,6 +554,7 @@ def run_gcentral_pipeline(session: Session, *, feed_xml: bytes | None = None, ma
                         reference_candidates=item.reference_candidates,
                         claim_text=item.claim_text,
                         manufacturer="Casio",
+                        collector_run_id=run.id,
                         confidence=(
                             35.0
                             + (15.0 if item.reference_candidates else 0.0)
@@ -568,13 +645,18 @@ def run_plus9time_pipeline(session: Session, *, feed_xml: bytes | None = None, m
                 for item in parsed.items:
                     outcome = svc.ingest_candidate(
                         source_id="plus9time",
-                        lead_type="POSSIBLE_NEW_REFERENCE" if item.reference_candidates else "LEAKED_IMAGE",
+                        lead_type=classify_lead_type(
+                            title=item.title,
+                            claim_text=item.claim_text,
+                            reference_candidates=item.reference_candidates,
+                        ),
                         title=item.title,
                         source_url=item.url,
                         published_at=item.published_at,
                         reference_candidates=item.reference_candidates,
                         claim_text=item.claim_text,
                         manufacturer=item.brand_guess,
+                        collector_run_id=run.id,
                         confidence=30.0 + (20.0 if item.reference_candidates else 0.0),
                     )
                     if outcome["created"]:
@@ -685,12 +767,19 @@ def run_publication_pipeline(
                 notifier = DiscordNotifier(settings)
                 manufacturers: set[str] = set()
                 for item in parsed.items:
-                    lead_type = (
-                        "POSSIBLE_LIMITED_EDITION" if item.is_limited_edition
-                        else "POSSIBLE_COLLABORATION" if item.is_collaboration
-                        else "POSSIBLE_NEW_REFERENCE" if item.reference_candidates
-                        else "LEAKED_IMAGE"
+                    lead_type = classify_lead_type(
+                        title=item.title,
+                        claim_text=item.claim_text,
+                        reference_candidates=item.reference_candidates,
+                        is_limited_edition=item.is_limited_edition,
+                        is_collaboration=item.is_collaboration,
                     )
+                    # Collaborator (e.g. "Windup Watch Shop") is preserved as
+                    # structured-enough context without expanding the schema
+                    # for one field -- see app/models/specialist_lead.py's
+                    # `notes` column, already used for free-text annotations
+                    # (e.g. "rumor-tagged").
+                    notes = f"collaborator: {item.collaborator}" if item.collaborator else None
                     outcome = service.ingest_candidate(
                         source_id=source_id,
                         lead_type=lead_type,
@@ -703,6 +792,8 @@ def run_publication_pipeline(
                         brand=item.brand,
                         confidence=35.0 + (20.0 if item.reference_candidates else 0.0),
                         force_baseline=force_baseline,
+                        notes=notes,
+                        collector_run_id=run.id,
                     )
                     if outcome["created"]:
                         new_leads += 1
