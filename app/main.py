@@ -171,8 +171,15 @@ async def field_test_mutation_boundary(request: Request, call_next):
     QC sprint, local editorial review writes -- in field-test mode. A QC
     review never triggers a collector run, never calls out to Discord, and
     never leaves this machine, so it belongs in the same "local-only, no
-    delivery" category as /operations/run/*, not the blocked category."""
-    field_test_collection = request.method == "POST" and request.url.path.startswith("/operations/run/")
+    delivery" category as /operations/run/*, not the blocked category.
+    RUN ALL SAFE COLLECTORS is the same category too -- every job it starts
+    still goes through _local_collection's field-test branch (real
+    subprocesses, but writing only to this Mac's isolated DB, Discord env
+    vars already stripped by launcher.py) -- it just does that for every
+    registered collector sequentially instead of one at a time."""
+    field_test_collection = request.method == "POST" and (
+        request.url.path.startswith("/operations/run/") or request.url.path == "/operations/run-all-safe"
+    )
     field_test_review = request.method == "POST" and request.url.path.startswith("/api/qc/review/")
     if (
         os.getenv("WATCH_CLANK_FIELD_TEST") == "1"
@@ -645,6 +652,16 @@ def _run_collector_subprocess(cli_args: tuple[str, ...], timeout_seconds: int = 
 
 
 class _LocalCollectionController:
+    """Runs field-test collection in a background thread -- either one
+    collector (RUN NOW / COLLECT) or every registered collector
+    sequentially (RUN ALL SAFE COLLECTORS). Both modes share one lock/state
+    so they can never run concurrently with each other -- mirroring, at the
+    web layer, the mutual exclusion RunLockService already guarantees at
+    the pipeline layer, and giving the UI a single source of truth for
+    "is local collection busy right now" regardless of which button
+    started it.
+    """
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._state: dict = {"status": "IDLE", "running": False}
@@ -662,18 +679,31 @@ class _LocalCollectionController:
             if self._state.get("running"):
                 return False
             self._state = {
-                "status": "RUNNING", "running": True, "collector_id": collector_id,
+                "status": "RUNNING", "running": True, "mode": "single", "collector_id": collector_id,
                 "started_at": datetime.now(UTC).isoformat(), "started_monotonic": time.monotonic(),
             }
         threading.Thread(target=self._run, args=(collector_id, cli_args), name="watch-local-collection", daemon=True).start()
         return True
 
-    def _run(self, collector_id: str, cli_args: tuple[str, ...]) -> None:
-        result = _run_collector_subprocess(cli_args, timeout_seconds=900)
-        latest = None
+    def start_all(self, jobs: list[tuple[str, tuple[str, ...]]]) -> bool:
+        with self._lock:
+            if self._state.get("running"):
+                return False
+            self._state = {
+                "status": "RUNNING", "running": True, "mode": "batch",
+                "total": len(jobs), "completed": 0, "current_collector_id": None, "results": {},
+                "started_at": datetime.now(UTC).isoformat(), "started_monotonic": time.monotonic(),
+            }
+        threading.Thread(target=self._run_all, args=(jobs,), name="watch-local-collection-all", daemon=True).start()
+        return True
+
+    def _latest_run_detail(self, collector_id: str, ok: bool, result: dict) -> dict:
         from app.db.session import session_scope
+
         with session_scope() as session:
-            latest = session.scalar(select(CollectorRun).where(CollectorRun.collector_id == collector_id).order_by(desc(CollectorRun.started_at)).limit(1))
+            latest = session.scalar(
+                select(CollectorRun).where(CollectorRun.collector_id == collector_id).order_by(desc(CollectorRun.started_at)).limit(1)
+            )
             detail = None if latest is None else {
                 "run_id": latest.id, "status": latest.status, "discovered": latest.discovered_count,
                 "parsed": latest.parsed_count, "new_watches": latest.new_watch_count,
@@ -682,13 +712,33 @@ class _LocalCollectionController:
                 "warnings": latest.warning_count, "failures": latest.failure_count,
                 "summary": latest.summary_metadata or {},
             }
+        return {
+            "status": detail["status"] if detail else ("FAILED" if not ok else "COMPLETED"),
+            "result": detail,
+            "error": result["stderr_tail"][-1000:] if not ok else None,
+            "output": result["stdout_tail"][-1000:],
+        }
+
+    def _run(self, collector_id: str, cli_args: tuple[str, ...]) -> None:
+        result = _run_collector_subprocess(cli_args, timeout_seconds=900)
+        detail = self._latest_run_detail(collector_id, result["ok"], result)
         with self._lock:
+            self._state.update({"running": False, **detail})
+
+    def _run_all(self, jobs: list[tuple[str, tuple[str, ...]]]) -> None:
+        for collector_id, cli_args in jobs:
+            with self._lock:
+                self._state["current_collector_id"] = collector_id
+            result = _run_collector_subprocess(cli_args, timeout_seconds=900)
+            detail = self._latest_run_detail(collector_id, result["ok"], result)
+            logger.info("field_test_run_all_step", collector_id=collector_id, ok=result["ok"])
+            with self._lock:
+                self._state["results"][collector_id] = detail
+                self._state["completed"] += 1
+        with self._lock:
+            ok_count = sum(1 for r in self._state["results"].values() if r["status"] in ("SUCCESS", "PARTIAL", "ZERO_ITEMS", "COMPLETED"))
             self._state.update({
-                "running": False,
-                "status": detail["status"] if detail else ("FAILED" if not result["ok"] else "COMPLETED"),
-                "result": detail,
-                "error": result["stderr_tail"][-1000:] if not result["ok"] else None,
-                "output": result["stdout_tail"][-1000:],
+                "running": False, "status": "COMPLETED", "current_collector_id": None, "ok_count": ok_count,
             })
 
 
@@ -733,14 +783,29 @@ def run_all_safe_collectors(request: Request):
     parallel: RunLockService is per-collector, but running 15 real network
     collectors concurrently from a single web request has no operational
     justification and makes failure attribution harder). Localhost-only.
+
+    Field-test mode runs the exact same sequential job list through
+    _local_collection's background-thread batch mode instead of blocking
+    the request for the full duration -- matching the async, polled UX
+    the single-collector RUN NOW/COLLECT path already uses there, and
+    writing to this Mac's isolated local database only, same as every
+    other field-test collection action.
     """
     from app.services.collector_registry import SAFE_COLLECTOR_IDS, get_control
 
     _require_loopback(request)
+    jobs = [(collector_id, get_control(collector_id).cli_args) for collector_id in SAFE_COLLECTOR_IDS]
+
+    if os.getenv("WATCH_CLANK_FIELD_TEST") == "1":
+        from fastapi.responses import JSONResponse
+
+        if not _local_collection.start_all(jobs):
+            return JSONResponse(_local_collection.snapshot(), status_code=409)
+        return JSONResponse(_local_collection.snapshot(), status_code=202)
+
     results = {}
-    for collector_id in SAFE_COLLECTOR_IDS:
-        control = get_control(collector_id)
-        results[collector_id] = _run_collector_subprocess(control.cli_args)
+    for collector_id, cli_args in jobs:
+        results[collector_id] = _run_collector_subprocess(cli_args)
         logger.info(
             "web_run_all_safe_step",
             collector_id=collector_id,

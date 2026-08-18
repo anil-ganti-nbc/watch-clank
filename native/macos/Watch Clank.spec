@@ -1,9 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
-import os
 
 root = Path(SPECPATH).parents[1]
-revision = os.environ.get("WATCH_CLANK_PACKAGED_REVISION", "local development build")
+revision_file = root / "native" / "macos" / "generated" / "build_revision.txt"
 
 a = Analysis(
     [str(root / "native" / "macos" / "launcher.py")],
@@ -13,6 +12,7 @@ a = Analysis(
         (str(root / "app" / "templates"), "app/templates"),
         (str(root / "alembic"), "alembic"),
         (str(root / "alembic.ini"), "."),
+        *([(str(revision_file), ".")] if revision_file.exists() else []),
     ],
     hiddenimports=["scripts.run_pipeline", "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"],
 )

@@ -26,6 +26,18 @@ def resource_root() -> Path:
 
 
 def build_revision() -> str:
+    """Prefer the bundled build_revision.txt (written by build.sh at
+    package time -- see that script's comment) over the env var: launching
+    via Finder/`open` does not forward the building shell's exported
+    environment to the new process, so the env var alone was silently
+    always empty for every real double-click launch."""
+    bundled = resource_root() / "build_revision.txt"
+    try:
+        value = bundled.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    except OSError:
+        pass
     value = os.getenv("WATCH_CLANK_PACKAGED_REVISION", "").strip()
     return value or "local development build"
 

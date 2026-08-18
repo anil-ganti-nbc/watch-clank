@@ -86,3 +86,4 @@ WatchClank*.exe
 # Native launcher build products
 native/macos/build/
 native/macos/dist/
+native/macos/generated/

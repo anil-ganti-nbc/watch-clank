@@ -373,6 +373,99 @@ def test_run_now_rejects_non_loopback_client(web_client: TestClient):
     assert resp.status_code == 403
 
 
+# --- 2026-08-18: RUN ALL SAFE COLLECTORS parity for the macOS field-test app -
+
+
+def test_operations_shows_run_all_button_in_field_test_mode(web_client: TestClient, monkeypatch):
+    """RUN ALL SAFE COLLECTORS used to be hidden entirely in field-test
+    mode (server-side {% if not field_test %}). The operator asked for
+    Windows Control Centre parity -- it must now render there too."""
+    monkeypatch.setenv("WATCH_CLANK_FIELD_TEST", "1")
+    resp = web_client.get("/operations")
+    assert resp.status_code == 200
+    assert "RUN ALL SAFE COLLECTORS" in resp.text
+    assert 'id="run-all-form"' in resp.text
+
+
+def test_run_all_safe_starts_batch_in_field_test_mode(web_client: TestClient, monkeypatch):
+    monkeypatch.setenv("WATCH_CLANK_FIELD_TEST", "1")
+    import app.main as main_module
+    from app.services.collector_registry import SAFE_COLLECTOR_IDS
+
+    monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    monkeypatch.setattr(main_module._local_collection, "start_all", lambda jobs: True)
+    monkeypatch.setattr(
+        main_module._local_collection,
+        "snapshot",
+        lambda: {"status": "RUNNING", "running": True, "mode": "batch", "total": len(SAFE_COLLECTOR_IDS), "completed": 0},
+    )
+    resp = web_client.post("/operations/run-all-safe")
+    assert resp.status_code == 202
+    assert resp.json()["mode"] == "batch"
+    assert resp.json()["total"] == len(SAFE_COLLECTOR_IDS)
+
+
+def test_run_all_safe_refused_while_already_running(web_client: TestClient, monkeypatch):
+    monkeypatch.setenv("WATCH_CLANK_FIELD_TEST", "1")
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    monkeypatch.setattr(main_module._local_collection, "start_all", lambda jobs: False)
+    monkeypatch.setattr(
+        main_module._local_collection,
+        "snapshot",
+        lambda: {"status": "RUNNING", "running": True, "mode": "batch", "total": 5, "completed": 2},
+    )
+    resp = web_client.post("/operations/run-all-safe")
+    assert resp.status_code == 409
+
+
+def test_run_all_safe_field_test_end_to_end_aggregates_results(web_client: TestClient, monkeypatch):
+    """Exercises the real _LocalCollectionController.start_all/_run_all
+    background-thread path (not monkeypatched away), with a fake
+    subprocess runner standing in for real network collectors, and polls
+    the real status endpoint to completion -- proving the batch actually
+    runs every collector and aggregates a correct ok_count, not just that
+    the route accepts the request."""
+    monkeypatch.setenv("WATCH_CLANK_FIELD_TEST", "1")
+    import time
+
+    import app.main as main_module
+    from app.services.collector_registry import SAFE_COLLECTOR_IDS
+
+    monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+
+    from app.services.collector_registry import get_control
+
+    failing_id = SAFE_COLLECTOR_IDS[0]
+    failing_args = get_control(failing_id).cli_args
+
+    def fake_subprocess(cli_args, timeout_seconds=180):
+        ok = cli_args != failing_args
+        return {"ok": ok, "returncode": 0 if ok else 1, "stdout_tail": "", "stderr_tail": "" if ok else "simulated failure"}
+
+    monkeypatch.setattr(main_module, "_run_collector_subprocess", fake_subprocess)
+
+    resp = web_client.post("/operations/run-all-safe")
+    assert resp.status_code == 202
+    assert resp.json()["mode"] == "batch"
+    assert resp.json()["total"] == len(SAFE_COLLECTOR_IDS)
+
+    status = {}
+    for _ in range(200):
+        status = web_client.get("/operations/status").json()
+        if not status["running"]:
+            break
+        time.sleep(0.02)
+
+    assert status["running"] is False
+    assert status["status"] == "COMPLETED"
+    assert status["completed"] == len(SAFE_COLLECTOR_IDS)
+    assert set(status["results"].keys()) == set(SAFE_COLLECTOR_IDS)
+    assert status["ok_count"] == len(SAFE_COLLECTOR_IDS) - 1
+    assert status["results"][failing_id]["status"] == "FAILED"
+
+
 # --- Phase 13: Discord secrets must never render -----------------------------
 
 
