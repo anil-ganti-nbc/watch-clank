@@ -5395,16 +5395,21 @@ def test_baseline_new_reference_with_fresh_published_at_still_creates_event(
     assert any("baseline override" in r for r in event.extra["reasons"])
 
 
-def test_reactivated_catalogue_tag_produces_explicit_note_not_a_different_event_type(
+def test_watchbench_tw4b20700_old_product_reactivated_is_not_new_reference(
     db_session: Session, tmp_settings: Settings
 ):
-    """Live-reconstructed TW4B20700 Expedition Field Chronograph: Timex's
-    own catalogue tagged it "REACTIVATED"/"Backorder Eligible", and
-    published_at was literally today -- genuinely first-seen-by-Clank, so
-    event_type correctly stays NEW_REFERENCE (§ "REACTIVATED != masquerading
-    as a new release" is about visibility, not about lying about the
-    discovery type), but the reasons list must carry an explicit note so a
-    reviewer doesn't have to click through to the listing to learn this."""
+    """WatchBench regression: TW4B20700 Expedition Field Chronograph --
+    old product + first local observation + source REACTIVATED evidence ->
+    NOT NEW_REFERENCE. Live-reconstructed: real Hetzner production run
+    (2026-08-19) fired this exact specimen as NEW_REFERENCE purely because
+    it had never been locally observed before, despite Timex's own
+    catalogue tagging it "REACTIVATED"/"Backorder Eligible" and
+    published_at being suspiciously exactly "today" (a reactivation
+    touch, not a launch date -- see
+    ai/handoff/INCIDENT_20260819_EMERGENCY_HOTFIX.md's published_at rule).
+    FIRST_SEEN_BY_CLANK != NEW_REFERENCE: this must now classify as
+    FIRST_SEEN_BY_CLANK -- a real, visible, still-reviewable Event (not
+    suppressed), just not asserting novelty it has no evidence for."""
     from datetime import UTC, datetime
 
     from app.models import Event, SourceObservation, Watch
@@ -5433,9 +5438,13 @@ def test_reactivated_catalogue_tag_produces_explicit_note_not_a_different_event_
         watch=watch, new_obs=observation, is_new_watch=True
     )
 
-    assert result["event_type"] == "NEW_REFERENCE"  # honest about discovery, not launch date
+    assert result["event_type"] == "FIRST_SEEN_BY_CLANK"  # NOT NEW_REFERENCE
     event = db_session.scalar(select(Event))
+    assert event.event_type == "FIRST_SEEN_BY_CLANK"
     assert any("REACTIVATED" in r and "not necessarily a new design" in r for r in event.extra["reasons"])
+    assert any("first observed locally" in r and "may not be a genuine new launch" in r for r in event.extra["reasons"])
+    # deprioritized, not suppressed -- still reachable in the QC queue
+    assert event.story_score < 30.0  # below NEW_REFERENCE's own +30 base
 
 
 def test_reactivation_signal_silent_when_no_reactivation_tags(db_session: Session, tmp_settings: Settings):

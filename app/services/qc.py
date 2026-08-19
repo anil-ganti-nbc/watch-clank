@@ -132,6 +132,13 @@ def reviewed_today_count(db: Session) -> int:
 _QUEUE_PRIORITY_TIER = case(
     (Event.event_type.in_(("NEW_REFERENCE", "NEW_REGION")), 0),
     (Event.event_type == "PRICE_CHANGE", 1),
+    (Event.event_type.in_(("AVAILABILITY_CHANGE", "RESTOCK", "SOLD_OUT")), 2),
+    # FIRST_SEEN_BY_CLANK (2026-08-19) carries the least launch-confidence
+    # evidence of any event type by construction -- the source itself
+    # contradicted novelty (see editorial.VALID_EVENT_TYPES) -- so it sits
+    # below even availability events, not merged into the `else_` bucket
+    # with them.
+    (Event.event_type == "FIRST_SEEN_BY_CLANK", 3),
     else_=2,
 )
 

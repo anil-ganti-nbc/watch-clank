@@ -850,6 +850,39 @@ def test_qc_queue_ranks_new_reference_above_restock_regardless_of_recency(qc_cli
     assert ids_in_order.index(new_reference_event.id) < ids_in_order.index(restock_event.id)
 
 
+def test_qc_queue_ranks_first_seen_by_clank_below_restock_and_new_reference(qc_client: TestClient, db: Session):
+    """TW4B20700 blocker fix: FIRST_SEEN_BY_CLANK carries the least
+    launch-confidence evidence of any event type, so it must sort below
+    even availability events (RESTOCK/SOLD_OUT), not just below
+    NEW_REFERENCE -- confirming _QUEUE_PRIORITY_TIER's dedicated tier 3,
+    not a fallback into the same bucket as RESTOCK."""
+    new_reference_watch = _make_watch(db, reference_raw="TW2Y86000VQ", reference_canonical="TW2Y86000VQ", manufacturer="Timex", brand="Timex")
+    new_reference_event = _make_event_for_watch(db, new_reference_watch)
+
+    restock_watch = _make_watch(db, reference_raw="TW2Y38700JR", reference_canonical="TW2Y38700JR", manufacturer="Timex", brand="Timex")
+    restock_event = Event(
+        event_type="RESTOCK", title="Timex TW2Y38700JR: RESTOCK", status="DRAFT", story_score=70.0,
+        extra={"region": "US", "editorial_eligible": True},
+    )
+    db.add(restock_event)
+    db.flush()
+    db.add(EventWatch(event_id=restock_event.id, watch_id=restock_watch.id, role="subject"))
+
+    reactivated_watch = _make_watch(db, reference_raw="TW4B207009J", reference_canonical="TW4B207009J", manufacturer="Timex", brand="Timex")
+    reactivated_event = Event(
+        event_type="FIRST_SEEN_BY_CLANK", title="Timex TW4B207009J: FIRST_SEEN_BY_CLANK", status="DRAFT", story_score=15.0,
+        extra={"region": "US"},
+    )
+    db.add(reactivated_event)
+    db.flush()
+    db.add(EventWatch(event_id=reactivated_event.id, watch_id=reactivated_watch.id, role="subject"))
+    db.commit()
+
+    resp = qc_client.get("/api/qc/queue")
+    ids_in_order = [i["event_id"] for i in resp.json()["items"]]
+    assert ids_in_order.index(new_reference_event.id) < ids_in_order.index(restock_event.id) < ids_in_order.index(reactivated_event.id)
+
+
 # --- 2026-08-19 Watch Clank QC + classifier hardening: Specialist lead QC ---
 #
 # Same EVENT != REVIEW contract, applied to SpecialistLead -- see

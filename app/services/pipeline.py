@@ -1367,8 +1367,23 @@ class PipelineService:
             # otherwise only fires for a catalogue's first non-baseline
             # sighting of a reference -- exactly the discipline already
             # required before any collector is scheduled.
+            # 2026-08-19 second hotfix pass (TW4B20700 blocker): a
+            # REACTIVATED/backorder catalogue tag is stronger, source-
+            # supplied counter-evidence against novelty than the absence of
+            # a prior local observation is evidence *for* it.
+            # FIRST_SEEN_BY_CLANK != NEW_REFERENCE -- see VALID_EVENT_TYPES'
+            # docstring in app/services/editorial.py. This is deliberately
+            # evaluated regardless of baseline state (unlike
+            # baseline_freshness, which only exists during an active
+            # baseline): the very first non-baseline sighting of a
+            # reactivated reference is exactly the case that must not
+            # silently become "NEW_REFERENCE" merely because baseline had
+            # already ended.
+            reactivation_note = self._reactivation_signal(watch.extra_specs)
+            event_type = "FIRST_SEEN_BY_CLANK" if reactivation_note else "NEW_REFERENCE"
+
             evidence = EventEvidence(
-                event_type="NEW_REFERENCE",
+                event_type=event_type,
                 manufacturer=watch.manufacturer,
                 brand=watch.brand,
                 collection=watch.collection,
@@ -1386,7 +1401,6 @@ class PipelineService:
             ]
             if baseline_freshness is not None and baseline_freshness.state == "FRESH":
                 reasons.append(f"baseline override: {baseline_freshness.reason}")
-            reactivation_note = self._reactivation_signal(watch.extra_specs)
             if reactivation_note:
                 reasons.append(reactivation_note)
             return self._persist_product_event(

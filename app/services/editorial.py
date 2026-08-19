@@ -67,6 +67,20 @@ VALID_EVENT_TYPES = frozenset(
         "AVAILABILITY_CHANGE",
         "SOLD_OUT",
         "RESTOCK",
+        # 2026-08-19 hotfix (TW4B20700 Expedition Field Chronograph):
+        # FIRST_SEEN_BY_CLANK != NEW_REFERENCE. A reference that is merely
+        # absent from this database until today is not, by itself,
+        # evidence the manufacturer launched it today -- see the freshness
+        # taxonomy in ai/handoff/INCIDENT_20260819_EMERGENCY_HOTFIX.md.
+        # NEW_REFERENCE means affirmative evidence of genuine novelty
+        # (a captured published_at within the tight baseline window, a
+        # first-party announcement, a recognisable-family/limited/
+        # collaboration signal). When the *only* evidence available is
+        # "we've never seen this reference before" and the source itself
+        # is telling us the opposite -- a REACTIVATED/backorder catalogue
+        # tag -- the event must be labeled for what it honestly is: a
+        # local-discovery milestone, not a launch claim.
+        "FIRST_SEEN_BY_CLANK",
     }
 )
 
@@ -215,6 +229,20 @@ def score_event(evidence: EventEvidence) -> ScoredEvent:
     if evidence.event_type == "NEW_REFERENCE":
         score += 30.0
         reasons.append("+30 new reference not previously observed")
+    elif evidence.event_type == "FIRST_SEEN_BY_CLANK":
+        # Deliberately no "+30 new reference" bonus -- that would just be
+        # NEW_REFERENCE's scoring under a different name. The only fact in
+        # evidence is "this database has never observed the reference
+        # before"; the source itself has flagged a reason to doubt this is
+        # a genuine launch (see pipeline._reactivation_signal, the only
+        # caller that currently classifies an event this way). Still
+        # scored above zero -- a human should still see it, just correctly
+        # deprioritized (see qc._QUEUE_PRIORITY_TIER) and unlikely to clear
+        # the Discord notify threshold at this score.
+        score += 5.0
+        reasons.append(
+            "+5 first observed locally, but source evidence indicates this may not be a genuine new launch"
+        )
     elif evidence.event_type == "NEW_REGION":
         score += 30.0
         reasons.append(
