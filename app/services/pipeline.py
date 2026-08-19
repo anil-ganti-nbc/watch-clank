@@ -6,6 +6,7 @@ All persistence happens here under clear item-level transaction boundaries.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -52,18 +53,90 @@ _NORMALIZERS = {
     "Timex": normalize_timex_reference,
 }
 
-# Sprint 10 hardening (ai/handoff/TIMEX_FRESHNESS_AUDIT.md): official news
-# sources whose announcement_date is a genuine, machine-parseable ISO-8601
-# timestamp -- as opposed to Casio ("July 15, 2026"), Citizen ("23 July
-# 2026", sometimes even "2 July2026" with no space), and Seiko ("January
-# 07, 2026"), all confirmed live as free-text strings that a strict
-# ISO parse will safely and predictably fail on. Only sources in this set
-# are eligible for the publication-freshness gate in _record_watch_event
-# below -- this is what keeps the hardening scoped to Timex (which can
-# genuinely provide a reliable "how old is this article" signal) without
-# any risk of silently suppressing a real Casio/Citizen/Seiko NEW_REFERENCE
-# event because their date strings don't parse as ISO-8601.
+# Sprint 10 hardening (ai/handoff/TIMEX_FRESHNESS_AUDIT.md): sources whose
+# announcement_date is a genuine, machine-parseable ISO-8601 timestamp get a
+# *stricter* freshness policy -- a missing/unparseable timestamp is treated
+# as "not current" (return "unknown_publication_timestamp"), not silently
+# assumed fresh. Timex's Shopify blog feed reliably provides this.
 _ISO_TIMESTAMP_NEWS_SOURCES = frozenset({"timex_news"})
+
+# 2026-08-19 hotfix (CasioBlog EQB-1300D-5A/-2A incident: a March 28
+# article resurfaced as an Event on August 17 with no freshness check at
+# all, because the original Sprint 10 gate below was scoped to
+# _ISO_TIMESTAMP_NEWS_SOURCES only). Casio ("July 15, 2026"), Citizen
+# ("23 July 2026", sometimes glued as "2 July2026" with no space), and
+# Seiko ("January 07, 2026") all confirmed live as free-text month-name
+# dates -- not ISO-8601, but not unparseable either. _parse_announcement_date
+# below tries ISO first, then this fixed, deterministic list of confirmed
+# real formats. Deliberately NOT a general-purpose date parser (no new
+# dependency, no dateutil-style guessing) -- a string that matches none of
+# these known shapes stays UNKNOWN, and for every source NOT in
+# _ISO_TIMESTAMP_NEWS_SOURCES, UNKNOWN still means "no change from prior
+# behavior" (no suppression) -- see _stale_official_announcement. This can
+# only ever *add* suppression of a confidently-parsed, genuinely stale
+# rediscovery; it can never suppress a source whose date it can't parse, so
+# it carries no regression risk for existing Casio/Citizen/Seiko recall.
+_MONTH_NAME_DATE_FORMATS = (
+    "%B %d, %Y",  # Casio: "July 15, 2026"
+    "%d %B %Y",  # Citizen: "23 July 2026"
+    "%B %d %Y",  # occasional no-comma variant
+)
+
+
+def _parse_free_text_announcement_date(raw: str) -> datetime | None:
+    text = raw.strip()
+    # Citizen's confirmed glued form "2 July2026" -- insert the missing
+    # space between month name and a 4-digit year before matching, rather
+    # than adding a fifth format that would also accept genuinely malformed
+    # strings.
+    text = re.sub(r"([A-Za-z])(\d{4}\b)", r"\1 \2", text)
+    for fmt in _MONTH_NAME_DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_announcement_date(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        pass
+    return _parse_free_text_announcement_date(raw)
+
+
+# 2026-08-19 hotfix (Timex Atelier NBR strap incident: a real blog post,
+# "Timex Atelier NBR Synthetic Rubber Strap: Signature By Design. Now
+# Available Separately.", extracted a real SKU (TW7D18600) via the same
+# image-filename path used for genuine watch launches, and would have
+# created a NEW_REFERENCE Event for a strap). Deliberately a narrow,
+# high-precision phrase match on the title -- NOT a bare "strap" keyword
+# ban, which would misfire on legitimate titles like "... Leather Strap
+# Watch" (a confirmed real, common Timex catalogue title shape). Official
+# marketing copy for an accessory-only post reliably says the product is
+# sold/available "separately" from a watch; a genuine watch launch post
+# never does. False negatives (an accessory post that doesn't use this
+# phrasing slips through) are the accepted cost, matching this module's
+# existing precision-over-recall discipline for anything that could create
+# a confidently-wrong Event.
+_ACCESSORY_ONLY_TITLE_PHRASES = (
+    "available separately",
+    "sold separately",
+    "strap only",
+    "band only",
+    "replacement strap",
+    "replacement band",
+)
+
+
+def _looks_like_accessory_only(title: str | None) -> bool:
+    if not title:
+        return False
+    lowered = title.lower()
+    return any(phrase in lowered for phrase in _ACCESSORY_ONLY_TITLE_PHRASES)
 
 
 class PipelineService:
@@ -119,35 +192,26 @@ class PipelineService:
         )
 
     def _stale_official_announcement(self, lead) -> str | None:
-        """Sprint 10 hardening: returns a suppression reason if `lead`
-        (a ReleaseLead) is from a source in _ISO_TIMESTAMP_NEWS_SOURCES
-        and its announcement_date is either unparseable/missing or older
-        than the configured freshness window. Returns None (no
-        suppression) for every other source -- see the module-level
-        constant's docstring for why this is deliberately source-scoped.
+        """Returns a suppression reason if `lead` (a ReleaseLead) carries a
+        confidently-parseable publication date that is older than the
+        configured freshness window -- generalized 2026-08-19 (CasioBlog
+        EQB-1300D-5A/-2A incident) to every official news source, not just
+        Timex; see _parse_announcement_date's docstring for the parsing
+        contract and why this cannot regress recall for a source whose date
+        format isn't recognized.
 
-        Deliberately conservative in the direction that matters: a source
-        NOT in the allowlist is completely unaffected regardless of what
-        its announcement_date string looks like (Casio/Citizen/Seiko keep
-        their exact pre-existing behavior). Only within the allowlist does
-        "can't parse this timestamp" become "treat as not current" -- per
-        this sprint's explicit instruction: NULL/invalid publication
-        timestamp on an ISO-timestamp source is NOT assumed fresh.
+        Sources in _ISO_TIMESTAMP_NEWS_SOURCES additionally treat a missing/
+        unparseable date as itself disqualifying ("unknown_publication_timestamp")
+        -- the stricter Sprint 10 Timex policy, unchanged. Every other source
+        keeps its pre-existing behavior when the date can't be parsed: no
+        suppression, i.e. still no assumption of freshness, just no change.
         """
-        if lead.source_id not in _ISO_TIMESTAMP_NEWS_SOURCES:
-            return None
-
-        pub_dt = None
-        if lead.announcement_date:
-            try:
-                pub_dt = datetime.fromisoformat(lead.announcement_date)
-            except ValueError:
-                pub_dt = None
+        pub_dt = _parse_announcement_date(lead.announcement_date)
 
         if pub_dt is None:
-            return "unknown_publication_timestamp"
-
-        from app.core.time import ensure_utc
+            if lead.source_id in _ISO_TIMESTAMP_NEWS_SOURCES:
+                return "unknown_publication_timestamp"
+            return None
 
         window_hours = get_settings().specialist_freshness_window_hours
         age = datetime.now(UTC) - ensure_utc(pub_dt)
@@ -961,6 +1025,35 @@ class PipelineService:
         except ValueError:
             return None
 
+    # 2026-08-19 hotfix (TW4B20700 Expedition Field Chronograph: tagged
+    # "REACTIVATED"/"Backorder Eligible" by Timex's own catalogue, first
+    # observed by Watch Clank today -- a real, correct NEW_REFERENCE by this
+    # system's own "first seen by Clank" semantics, but a human skimming the
+    # title alone could easily misread that as a new design). REACTIVATED
+    # != NEW_REFERENCE: the event_type stays NEW_REFERENCE (that label is
+    # honestly about discovery, not launch date -- see the "Discovery time
+    # is not publication time" banner on /intelligence), but this makes the
+    # present-tense catalogue-operation evidence an explicit, visible reason
+    # rather than something a reviewer has to click through to the listing
+    # to find.
+    _REACTIVATION_TAGS = frozenset({"reactivated", "backorder eligible", "backorder-eligible"})
+
+    @classmethod
+    def _reactivation_signal(cls, extra_specs: dict[str, Any] | None) -> str | None:
+        if not extra_specs:
+            return None
+        tags = extra_specs.get("tags")
+        if not tags or not isinstance(tags, list):
+            return None
+        hits = sorted({t for t in tags if isinstance(t, str) and t.strip().lower() in cls._REACTIVATION_TAGS})
+        if not hits:
+            return None
+        return (
+            f"NOTE: source tags {hits} indicate a catalogue reactivation/backorder event, "
+            "not necessarily a new design -- first-seen-by-Clank still holds, but this is "
+            "present-tense catalogue-operation evidence, not launch evidence"
+        )
+
     def _new_reference_baseline_freshness(self, *, watch: Watch, new_obs: SourceObservation):
         """Would this NEW_REFERENCE still be worth alerting despite an
         active baseline, because the source's own evidence proves it's
@@ -974,6 +1067,191 @@ class PipelineService:
             observed_at=new_obs.observed_at,
             window_hours=get_settings().product_baseline_freshness_window_hours,
         )
+
+    def find_baseline_catchup_candidates(
+        self, *, manufacturer: str | None = None, as_of: datetime | None = None
+    ) -> list[dict]:
+        """Identify Watches a baseline sweep correctly silenced (no Event,
+        by design -- see _record_product_transition's baseline guard) but
+        whose own captured published_at proves they were still genuinely
+        recent, just outside the tight
+        product_baseline_freshness_window_hours bar applied *at baseline
+        time*. Read-only: creates nothing, notifies nothing. See
+        create_baseline_catchup_events for the second, explicit-opt-in step
+        -- this is deliberately two functions, not one, so a human reviews
+        the candidate list before anything gets a belated Event (§18: "do
+        not retro-alert an entire baseline").
+
+        A candidate must have:
+        - zero Events (never re-evaluates a watch that already got one,
+          belated or otherwise -- naturally idempotent across repeat runs)
+        - a first SourceObservation flagged is_baseline
+        - a parseable extra_specs.published_at
+        - age (as_of - published_at) within baseline_catchup_window_days,
+          non-negative
+
+        No published_at, unparseable, negative age, or too old -> excluded,
+        silently. This can only ever surface a candidate with real
+        first-party dating evidence; it never guesses.
+
+        Each candidate also carries nearby_published_at_count: how many
+        OTHER returned candidates for the same manufacturer have a
+        published_at within 90 seconds (proximity, not exact match -- a
+        live check found genuine multi-SKU families, e.g. Cavatina Luxe/
+        TW6A, share timestamps seconds apart, not identical). A large count
+        is not auto-rejected (that would just be a different unproven
+        magic threshold, and the same live check found large clusters that
+        genuinely were "everything in this release wave," not only sync
+        noise) -- it's surfaced so create_baseline_catchup_events's
+        required explicit watch_ids list is an informed human decision.
+        """
+        from app.models import EventWatch
+
+        now = ensure_utc(as_of) if as_of is not None else datetime.now(UTC)
+        window = timedelta(days=get_settings().baseline_catchup_window_days)
+
+        has_event = self.session.query(EventWatch.watch_id).filter(EventWatch.watch_id == Watch.id).exists()
+        query = self.session.query(Watch).filter(~has_event)
+        if manufacturer:
+            query = query.filter(Watch.manufacturer == manufacturer)
+
+        candidates: list[dict] = []
+        for watch in query.all():
+            first_obs = (
+                self.session.query(SourceObservation)
+                .filter(SourceObservation.watch_id == watch.id)
+                .order_by(SourceObservation.observed_at.asc())
+                .first()
+            )
+            if first_obs is None or not first_obs.is_baseline:
+                continue
+            published_at = self._parse_extra_specs_published_at(watch.extra_specs)
+            if published_at is None:
+                continue
+            age = now - ensure_utc(published_at)
+            if age < timedelta(0) or age > window:
+                continue
+            candidates.append(
+                {
+                    "watch_id": watch.id,
+                    "manufacturer": watch.manufacturer,
+                    "reference_canonical": watch.reference_canonical,
+                    "published_at": published_at.isoformat(),
+                    "first_observed_at": ensure_utc(first_obs.observed_at).isoformat(),
+                    "age_days": round(age.total_seconds() / 86400.0, 2),
+                    "source_observation_id": first_obs.id,
+                }
+            )
+
+        # Proximity clustering, not exact match: a live check against the
+        # real Hetzner catalogue found genuine multi-SKU families (Cavatina
+        # Luxe, the TW6A E-Line) share published_at values seconds apart,
+        # not bit-identical -- exact-match counting missed them entirely.
+        # It also found that same 90-second window sometimes spans several
+        # *unrelated* collections at once (a routine catalogue-sync batch
+        # touching many SKUs together, not one coordinated launch). Both
+        # are real, confirmed shapes in the live data; this field only
+        # reports the raw cluster size for a human to weigh -- it does not
+        # attempt to auto-classify "genuine family" vs "sync batch" itself,
+        # since that would just be a different unproven guess.
+        by_manufacturer: dict[str, list[dict]] = {}
+        for c in candidates:
+            by_manufacturer.setdefault(c["manufacturer"], []).append(c)
+        for group in by_manufacturer.values():
+            group.sort(key=lambda c: c["published_at"])
+            parsed = [datetime.fromisoformat(c["published_at"]) for c in group]
+            for i, c in enumerate(group):
+                nearby = sum(
+                    1
+                    for j, t in enumerate(parsed)
+                    if j != i and abs((t - parsed[i]).total_seconds()) <= 90
+                )
+                c["nearby_published_at_count"] = nearby
+        return candidates
+
+    def create_baseline_catchup_events(
+        self, *, watch_ids: list[int], notify: bool = False, experimental: bool = True
+    ) -> list[dict]:
+        """Create a belated NEW_REFERENCE Event for each given watch_id --
+        never for "every candidate" implicitly; the caller (a human, via a
+        reviewed find_baseline_catchup_candidates() list) must name exactly
+        which watches. Idempotent per watch: a watch that has gained an
+        Event since candidacy was checked (e.g. two operators running this
+        concurrently) is skipped, not double-fired. notify defaults False
+        -- a launch that's already 1-30 days old surfacing as a fresh
+        Discord "breaking" alert would misrepresent its own age; the belated
+        Event is reachable through the normal QC queue either way. Reuses
+        the exact same scoring/persistence path as a live NEW_REFERENCE
+        (_persist_product_event) so it is not a special, less-trusted kind
+        of Event -- only the reasons and an extra.belated_baseline_catchup
+        flag distinguish it, both purely for human transparency.
+        """
+        from app.models import EventWatch
+        from app.services.editorial import EventEvidence, score_event
+
+        results: list[dict] = []
+        for watch_id in watch_ids:
+            watch = self.session.get(Watch, watch_id)
+            if watch is None:
+                results.append({"watch_id": watch_id, "created": False, "reason": "watch_not_found"})
+                continue
+            existing_event = (
+                self.session.query(EventWatch).filter(EventWatch.watch_id == watch_id).first()
+            )
+            if existing_event is not None:
+                results.append({"watch_id": watch_id, "created": False, "reason": "already_has_event"})
+                continue
+            first_obs = (
+                self.session.query(SourceObservation)
+                .filter(SourceObservation.watch_id == watch_id)
+                .order_by(SourceObservation.observed_at.asc())
+                .first()
+            )
+            if first_obs is None:
+                results.append({"watch_id": watch_id, "created": False, "reason": "no_observation"})
+                continue
+            published_at = self._parse_extra_specs_published_at(watch.extra_specs)
+            if published_at is None:
+                results.append({"watch_id": watch_id, "created": False, "reason": "no_published_at"})
+                continue
+
+            evidence = EventEvidence(
+                event_type="NEW_REFERENCE",
+                manufacturer=watch.manufacturer,
+                brand=watch.brand,
+                collection=watch.collection,
+                region=first_obs.region,
+                is_first_party=True,
+                reference_raw=watch.reference_raw,
+                price=first_obs.price,
+                currency=first_obs.currency,
+                availability_status=first_obs.availability_status,
+                **self._availability_event_character(watch),
+            )
+            reasons = [
+                "belated baseline catch-up (2026-08-19): discovered during an "
+                "epoch baseline sweep, correctly silent at the time, but the "
+                f"source's own published_at ({published_at.isoformat()}) proves "
+                "this was still a genuinely recent launch -- "
+                "see ai/handoff/INCIDENT_TIMEX_BASELINE_ABSORPTION.md",
+            ]
+            outcome = self._persist_product_event(
+                watch=watch,
+                new_obs=first_obs,
+                scored=score_event(evidence),
+                reasons=reasons,
+                prior_observation=None,
+                notify=notify,
+                experimental=experimental,
+                prior_regions=None,
+            )
+            from app.models import Event
+
+            event = self.session.get(Event, outcome["event_id"])
+            event.extra = {**event.extra, "belated_baseline_catchup": True}
+            self.session.commit()
+            results.append({"watch_id": watch_id, "created": True, **outcome})
+        return results
 
     def _annotate_new_reference_burst(
         self, *, new_reference_event_ids: list[int], discovered_count: int
@@ -1108,6 +1386,9 @@ class PipelineService:
             ]
             if baseline_freshness is not None and baseline_freshness.state == "FRESH":
                 reasons.append(f"baseline override: {baseline_freshness.reason}")
+            reactivation_note = self._reactivation_signal(watch.extra_specs)
+            if reactivation_note:
+                reasons.append(reactivation_note)
             return self._persist_product_event(
                 watch=watch,
                 new_obs=new_obs,
@@ -1584,6 +1865,19 @@ class PipelineService:
             self.session.add(lead)
             self.session.flush()
             outcome["new_lead"] = True
+
+        is_accessory_only = _looks_like_accessory_only(title)
+        if is_accessory_only:
+            notes = lead.notes or ""
+            note_line = "accessory_only_title: no watch/Event created (2026-08-19 hotfix)"
+            if note_line not in notes:
+                lead.notes = (notes + "\n" + note_line).strip()
+            lead.enrichment_status = "ACCESSORY_ONLY"
+            outcome["accessory_only"] = True
+            self.session.commit()
+            outcome["success"] = True
+            outcome["lead_id"] = lead.id
+            return outcome
 
         watch_ids = list(lead.watch_ids or [])
         for ref in parsed.model_references:

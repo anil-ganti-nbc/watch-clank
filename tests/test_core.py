@@ -37,6 +37,37 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def _freshen_fixture_date(html: bytes, old_date_text: str) -> bytes:
+    """Replace a fixture's hardcoded, now long-past announcement date with
+    one that is fresh relative to whenever the suite actually runs.
+
+    2026-08-19 hotfix (CasioBlog EQB-1300D-5A/-2A incident,
+    ai/handoff/... generalized the Timex-only publication-freshness gate
+    -- see app.services.pipeline._stale_official_announcement -- to every
+    official news source with a parseable date). Several fixtures (Casio's
+    "June 30, 2026", Citizen's "10 June 2026") were written with a fixed
+    date that was never checked before that fix; several unrelated tests
+    (basic event-creation/notification plumbing, not freshness itself) used
+    them incidentally and would otherwise start failing purely because real
+    wall-clock time moved on. Rewriting to "today" keeps those tests
+    correctly decoupled from freshness semantics; tests that specifically
+    exercise staleness use an explicitly old date instead (see
+    test_stale_official_casio_announcement_is_suppressed and
+    test_stale_official_citizen_announcement_is_suppressed below).
+    """
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    day = str(now.day)  # no leading zero -- portable, unlike strftime's %-d
+    if old_date_text == "June 30, 2026":
+        fresh = f"{now.strftime('%B')} {day}, {now.year}"
+    elif old_date_text == "10 June 2026":
+        fresh = f"{day} {now.strftime('%B')} {now.year}"
+    else:
+        raise ValueError(f"no known format for {old_date_text!r}")
+    return html.replace(old_date_text.encode(), fresh.encode())
+
+
 @pytest.fixture()
 def tmp_settings(tmp_path: Path) -> Settings:
     return Settings(
@@ -702,6 +733,7 @@ def test_scheduled_casio_new_product_creates_event_and_notifies(db_session: Sess
     db_session.flush()
 
     list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
+    list_html = _freshen_fixture_date(list_html, "June 30, 2026")
     detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
     news_run, cat_run_blocked = _casio_multi_new_product_mocks(list_html, detail)
 
@@ -742,6 +774,7 @@ def test_scheduled_casio_no_webhook_creates_event_no_crash(db_session: Session, 
     db_session.flush()
 
     list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
+    list_html = _freshen_fixture_date(list_html, "June 30, 2026")
     detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
     news_run, cat_run_blocked = _casio_multi_new_product_mocks(list_html, detail)
 
@@ -776,6 +809,7 @@ def test_scheduled_casio_notifier_failure_does_not_fail_the_run(db_session: Sess
     db_session.flush()
 
     list_html = (FIXTURES / "casio_intl_news_list.html").read_bytes()
+    list_html = _freshen_fixture_date(list_html, "June 30, 2026")
     detail = (FIXTURES / "casio_intl_news_efk200.html").read_bytes()
     news_run, cat_run_blocked = _casio_multi_new_product_mocks(list_html, detail)
 
@@ -1331,6 +1365,7 @@ def test_brand_news_pipeline_citizen_creates_lead_watch_and_event(db_session: Se
 
     list_html = (FIXTURES / "citizen_news_list.html").read_bytes()
     detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    detail_html = _freshen_fixture_date(detail_html, "10 June 2026")
 
     def fake_run(self, *, max_items=None, index_html=None):
         col = CitizenNewsCollector()
@@ -1384,6 +1419,7 @@ def test_brand_news_pipeline_new_region_detected_not_new_reference(db_session: S
     from app.services.snapshot_storage import SnapshotStorageService
 
     detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    detail_html = _freshen_fixture_date(detail_html, "10 June 2026")
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
     db_session.add(run)
@@ -1443,6 +1479,7 @@ def test_brand_news_pipeline_repeat_same_region_emits_no_event(db_session: Sessi
     from app.services.snapshot_storage import SnapshotStorageService
 
     detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    detail_html = _freshen_fixture_date(detail_html, "10 June 2026")
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
     db_session.add(run)
@@ -4300,6 +4337,7 @@ def test_freshness_official_product_without_publication_date_still_surfaces(db_s
     complete_baseline(db_session, epoch)
 
     detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    detail_html = _freshen_fixture_date(detail_html, "10 June 2026")
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
     db_session.add(run)
@@ -4672,6 +4710,155 @@ def test_timex_news_collector_parses_real_feed():
     assert result.metadata["component_status"] == "SUCCESS"
     assert len(result.discovered) == 8
     assert all(i.url.startswith("https://timex.com/") for i in result.discovered)
+
+
+def _timex_blog_entry_dict(title_startswith: str) -> dict:
+    import xml.etree.ElementTree as ET
+
+    xml_bytes = (FIXTURES / "timex_blog_feed_20260819.atom").read_bytes()
+    root = ET.fromstring(xml_bytes)
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    entry = next(
+        e for e in root.findall("a:entry", ns) if e.find("a:title", ns).text.startswith(title_startswith)
+    )
+    return {
+        "title": entry.find("a:title", ns).text,
+        "published": entry.find("a:published", ns).text,
+        "content": entry.find("a:content", ns).text,
+    }
+
+
+def test_timex_news_parser_extracts_cavatina_luxe_skus_real_capture():
+    """Real 2026-08-19 live capture of timex.com/blogs/the-timex-blog.atom.
+    Timex's official blog post "Cavatina Luxe: The Name Says It All"
+    (published 2026-08-11) announces a 5-SKU family (TW2Y86000-TW2Y86400 per
+    products.json, confirmed live), but only two of the five appear in this
+    post's own image filenames -- honest partial extraction, not a claim the
+    blog alone recovers the whole family. See
+    test_pipeline_cavatina_luxe_blog_post_creates_new_reference_events for
+    the full pipeline outcome."""
+    import json
+
+    from app.parsers.timex_news import parse_timex_news_entry
+
+    entry_dict = _timex_blog_entry_dict("Cavatina Luxe")
+    result = parse_timex_news_entry(json.dumps(entry_dict).encode("utf-8"), source_url="https://timex.com/blogs/cavatina-luxe")
+    assert result.success
+    norms = {r.normalized for r in result.model_references}
+    assert norms == {"TW2Y86000", "TW2Y86200"}
+
+
+def test_timex_news_parser_flags_atelier_strap_as_accessory_only_real_capture():
+    """Real 2026-08-19 live capture: "Timex Atelier NBR Synthetic Rubber
+    Strap: Signature By Design. Now Available Separately." is a genuine
+    replacement-strap post, not a watch launch -- extracts a real SKU
+    (TW7D18600) the same way a genuine launch would, which is exactly why
+    this must be caught by title classification, not by whether a SKU was
+    found. User reaction to this class of alert in production: "a fucking
+    strap?" -- see app.services.pipeline._looks_like_accessory_only."""
+    import json
+
+    from app.parsers.timex_news import parse_timex_news_entry
+    from app.services.pipeline import _looks_like_accessory_only
+
+    entry_dict = _timex_blog_entry_dict("Timex Atelier NBR")
+    result = parse_timex_news_entry(json.dumps(entry_dict).encode("utf-8"), source_url="https://timex.com/blogs/atelier-strap")
+    assert result.success
+    assert {r.normalized for r in result.model_references} == {"TW7D18600"}
+    assert _looks_like_accessory_only(result.title) is True
+
+
+def test_looks_like_accessory_only_does_not_misfire_on_legitimate_strap_watch_titles():
+    """Section 13 requirement: "leather strap watch" / "resin strap watch"
+    are real, common Timex catalogue title shapes (confirmed live: e.g.
+    "Cavatina® Luxe 22mm Leather Strap Watch") and must never be classified
+    as accessory-only. Only explicit "sold/available separately" marketing
+    phrasing does."""
+    from app.services.pipeline import _looks_like_accessory_only
+
+    assert _looks_like_accessory_only("Cavatina® Luxe 22mm Leather Strap Watch") is False
+    assert _looks_like_accessory_only("Expedition Field Chronograph 43mm Resin Strap Watch") is False
+    assert _looks_like_accessory_only("Waterbury Heritage Chronograph: Heritage In The Fast Lane") is False
+    assert _looks_like_accessory_only(None) is False
+    assert _looks_like_accessory_only("Timex Atelier NBR Synthetic Rubber Strap: Now Available Separately.") is True
+
+
+def test_pipeline_atelier_strap_blog_post_creates_no_watch_or_event(db_session: Session, tmp_settings: Settings):
+    """Full pipeline reconstruction of the confirmed live Atelier NBR strap
+    incident: process_news_announcement must record the lead (provenance
+    preserved) but create no Watch and no Event -- a replacement strap must
+    never become a NEW_REFERENCE alert."""
+    import json
+
+    from app.models import Event, ReleaseLead, Watch
+    from app.parsers.timex_news import parse_timex_news_entry
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    entry_dict = _timex_blog_entry_dict("Timex Atelier NBR")
+    fr = FetchResult(
+        url="https://timex.com/blogs/atelier-strap",
+        success=True, status_code=200, content_type="application/json",
+        payload=json.dumps(entry_dict).encode("utf-8"),
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    out = pipeline.process_news_announcement(
+        fr, run_id=None, collector_id="timex_news", collector_version="0.1.0",
+        manufacturer="Timex", brand="Timex", parse_fn=parse_timex_news_entry,
+        merge_key_prefix="timex", default_region="US", emit_events=True, notify=False,
+    )
+    assert out["success"] is True
+    assert out["accessory_only"] is True
+    lead = db_session.scalars(select(ReleaseLead)).first()
+    assert lead is not None and lead.enrichment_status == "ACCESSORY_ONLY"
+    assert db_session.scalars(select(Watch)).first() is None
+    assert db_session.scalars(select(Event)).first() is None
+
+
+def test_pipeline_cavatina_luxe_blog_post_creates_new_reference_events(db_session: Session, tmp_settings: Settings):
+    """Full pipeline reconstruction of the confirmed live Cavatina Luxe
+    launch incident (Timex's official blog post, published 2026-08-11):
+    with a fresh observation date, the two image-filename-extracted SKUs
+    each become a real NEW_REFERENCE Event -- proving the accessory-only
+    check does not also swallow genuine watch launches that happen to
+    mention "strap" in a sibling post, and that the generalized freshness
+    gate does not block a genuinely current article."""
+    import json
+    from datetime import UTC, datetime
+
+    from app.models import Event
+    from app.parsers.timex_news import parse_timex_news_entry
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    entry_dict = _timex_blog_entry_dict("Cavatina Luxe")
+    entry_dict["published"] = datetime.now(UTC).isoformat()  # simulate same-day discovery
+    fr = FetchResult(
+        url="https://timex.com/blogs/cavatina-luxe",
+        success=True, status_code=200, content_type="application/json",
+        payload=json.dumps(entry_dict).encode("utf-8"),
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    out = pipeline.process_news_announcement(
+        fr, run_id=None, collector_id="timex_news", collector_version="0.1.0",
+        manufacturer="Timex", brand="Timex", parse_fn=parse_timex_news_entry,
+        merge_key_prefix="timex", default_region="US", emit_events=True, notify=False,
+    )
+    assert out["success"] is True
+    assert "accessory_only" not in out
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 2
+    assert all(e.event_type == "NEW_REFERENCE" for e in events)
 
 
 def test_normalize_timex_reference_is_conservative_passthrough():
@@ -5139,6 +5326,7 @@ def test_force_baseline_is_source_scoped_not_global(db_session: Session, tmp_set
     # Now a normal (non-Timex, non-force_baseline) news announcement in the
     # SAME live epoch must behave completely normally -- NEW_REFERENCE fires.
     detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    detail_html = _freshen_fixture_date(detail_html, "10 June 2026")
     run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
     db_session.add(run)
     db_session.commit()
@@ -5205,6 +5393,80 @@ def test_baseline_new_reference_with_fresh_published_at_still_creates_event(
     event = db_session.scalar(select(Event))
     assert event is not None
     assert any("baseline override" in r for r in event.extra["reasons"])
+
+
+def test_reactivated_catalogue_tag_produces_explicit_note_not_a_different_event_type(
+    db_session: Session, tmp_settings: Settings
+):
+    """Live-reconstructed TW4B20700 Expedition Field Chronograph: Timex's
+    own catalogue tagged it "REACTIVATED"/"Backorder Eligible", and
+    published_at was literally today -- genuinely first-seen-by-Clank, so
+    event_type correctly stays NEW_REFERENCE (§ "REACTIVATED != masquerading
+    as a new release" is about visibility, not about lying about the
+    discovery type), but the reasons list must carry an explicit note so a
+    reviewer doesn't have to click through to the listing to learn this."""
+    from datetime import UTC, datetime
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Timex", brand="Timex", reference_raw="TW4B207009J", reference_canonical="TW4B207009J",
+        collection="YGroup_ExpeditionFieldChronograph43mmResinStrap",
+        extra_specs={
+            "tags": ["Backorder Eligible", "product-type:amz-smu", "REACTIVATED"],
+            "published_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    db_session.add(watch)
+    db_session.flush()
+    observation = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://www.timex.com/products/tw4b20700",
+        price=59.99, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(observation)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=observation, is_new_watch=True
+    )
+
+    assert result["event_type"] == "NEW_REFERENCE"  # honest about discovery, not launch date
+    event = db_session.scalar(select(Event))
+    assert any("REACTIVATED" in r and "not necessarily a new design" in r for r in event.extra["reasons"])
+
+
+def test_reactivation_signal_silent_when_no_reactivation_tags(db_session: Session, tmp_settings: Settings):
+    """A genuinely new product (Cavatina Luxe shape, tags carry no
+    reactivation/backorder signal) must get no such note -- this is not a
+    blanket disclaimer on every NEW_REFERENCE."""
+    from datetime import UTC, datetime
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Timex", brand="Timex", reference_raw="TW2Y86000VQ", reference_canonical="TW2Y86000VQ",
+        extra_specs={"tags": ["badge:new", "FW26"], "published_at": datetime.now(UTC).isoformat()},
+    )
+    db_session.add(watch)
+    db_session.flush()
+    observation = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://www.timex.com/products/tw2y86000",
+        price=59.99, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(observation)
+    db_session.flush()
+
+    PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=observation, is_new_watch=True
+    )
+    event = db_session.scalar(select(Event))
+    assert not any("REACTIVATED" in r for r in event.extra["reasons"])
 
 
 def test_baseline_new_reference_with_stale_published_at_stays_silent(db_session: Session, tmp_settings: Settings):
@@ -5440,6 +5702,188 @@ def _timex_listing_page(products: list[tuple[str, str, str | None]]) -> bytes:
         ]
     }
     return json.dumps(payload).encode("utf-8")
+
+
+# --- Incident: bounded, evidence-gated catch-up for baseline-absorbed
+# watches (§18). Reconstructed 2026-08-19 against a real, read-only copy of
+# the live Hetzner production DB: Cavatina Luxe (TW2Y86000-86400),
+# TW6A01000/00900/00800, and TW2Y85500 (Snoopy Umbrella) were all
+# genuinely published by Timex 2026-08-07/08-11, all baseline-absorbed
+# 2026-08-14 during the Hetzner redeploy sweep (past the tight 72h
+# product_baseline_freshness_window_hours bar), all with zero Events,
+# permanently silent under the existing mechanism alone. That same live
+# check also found a 23-product Timex cluster sharing one identical
+# 2026-08-07 published_at across totally unrelated collections (Waterbury
+# Classic, Easy Reader, Weekender, Q Timex Marbella, ...) -- a bulk
+# catalogue-touch artifact, not a launch -- which is why
+# create_baseline_catchup_events requires an explicit, human-reviewed
+# watch_ids list rather than acting on find_baseline_catchup_candidates'
+# output automatically.
+
+
+def _make_baseline_watch(db_session, *, manufacturer, reference, published_at, region="US"):
+    from app.models import SourceObservation, Watch
+
+    watch = Watch(
+        manufacturer=manufacturer, brand=manufacturer,
+        reference_raw=reference, reference_canonical=reference,
+        extra_specs={"published_at": published_at} if published_at else None,
+    )
+    db_session.add(watch)
+    db_session.flush()
+    obs = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region=region, source_url=f"https://example.test/{reference}",
+        price=50.0, currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+        is_baseline=True,
+    )
+    db_session.add(obs)
+    db_session.commit()
+    return watch
+
+
+def test_find_baseline_catchup_candidates_matches_cavatina_luxe_specimen(db_session: Session, tmp_settings: Settings):
+    """Real specimen shape (published 2026-08-11, absorbed 2026-08-14,
+    ~8 days old): within the 14-day default window, must be a candidate."""
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from app.services.pipeline import PipelineService
+
+    watch = _make_baseline_watch(
+        db_session, manufacturer="Timex", reference="TW2Y86000VQ", published_at="2026-08-11T09:00:00-04:00",
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with patch("app.services.pipeline.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
+        mock_dt.fromisoformat = datetime.fromisoformat
+        candidates = pipeline.find_baseline_catchup_candidates(manufacturer="Timex")
+    ids = {c["watch_id"] for c in candidates}
+    assert watch.id in ids
+
+
+def test_find_baseline_catchup_candidates_excludes_too_old_and_no_evidence(db_session: Session, tmp_settings: Settings):
+    """TW2Y38700 (Pan Am Waterbury Ace, published 2025-09-30) is ~11 months
+    old -- must never be a catch-up candidate regardless of baseline state.
+    A watch with no published_at at all must also be excluded (never
+    guessed)."""
+    from app.services.pipeline import PipelineService
+
+    too_old = _make_baseline_watch(
+        db_session, manufacturer="Timex", reference="TW2Y38700JR", published_at="2025-09-30T00:00:00-04:00",
+    )
+    no_evidence = _make_baseline_watch(
+        db_session, manufacturer="Timex", reference="TW4B20700", published_at=None,
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    candidates = pipeline.find_baseline_catchup_candidates(manufacturer="Timex")
+    ids = {c["watch_id"] for c in candidates}
+    assert too_old.id not in ids
+    assert no_evidence.id not in ids
+
+
+def test_find_baseline_catchup_candidates_flags_nearby_cluster(db_session: Session, tmp_settings: Settings):
+    """Reconstructs the real live-Hetzner shape: genuine multi-SKU families
+    (and, separately, routine catalogue-sync batches) share published_at
+    values seconds apart, not bit-identical -- proximity clustering (90s),
+    not exact match, is required to surface this to a human reviewer.
+    Watches published days apart must report zero nearby neighbors."""
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from app.services.pipeline import PipelineService
+
+    base_offsets = [0, 3, 7, 11, 14]  # seconds apart, matching the real Cavatina Luxe cluster shape
+    cluster_watches = [
+        _make_baseline_watch(
+            db_session, manufacturer="Timex", reference=f"TW9Z{i:05d}VQ",
+            published_at=f"2026-08-07T12:00:{offset:02d}-04:00",
+        )
+        for i, offset in enumerate(base_offsets)
+    ]
+    isolated = _make_baseline_watch(
+        db_session, manufacturer="Timex", reference="TW2Y85500VQ", published_at="2026-08-11T09:00:00-04:00",
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with patch("app.services.pipeline.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
+        mock_dt.fromisoformat = datetime.fromisoformat
+        candidates = pipeline.find_baseline_catchup_candidates(manufacturer="Timex")
+    by_id = {c["watch_id"]: c for c in candidates}
+    for w in cluster_watches:
+        assert by_id[w.id]["nearby_published_at_count"] == 4  # 4 OTHER watches within 90s
+    assert by_id[isolated.id]["nearby_published_at_count"] == 0
+
+
+def test_create_baseline_catchup_events_requires_explicit_watch_ids(db_session: Session, tmp_settings: Settings):
+    """The core safety property: create_baseline_catchup_events only ever
+    acts on watch_ids a caller explicitly names -- never "every candidate"
+    implicitly. A candidate NOT named in watch_ids gets no Event."""
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+
+    wanted = _make_baseline_watch(
+        db_session, manufacturer="Timex", reference="TW2Y86000VQ", published_at="2026-08-11T09:00:00-04:00",
+    )
+    not_wanted = _make_baseline_watch(
+        db_session, manufacturer="Timex", reference="TW2Y86100VQ", published_at="2026-08-11T09:00:02-04:00",
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    results = pipeline.create_baseline_catchup_events(watch_ids=[wanted.id], notify=False)
+    assert results == [
+        {
+            "watch_id": wanted.id, "created": True, "event_type": "NEW_REFERENCE",
+            "event_id": results[0]["event_id"], "score": results[0]["score"], "confidence": results[0]["confidence"],
+        }
+    ]
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1
+    assert events[0].extra["belated_baseline_catchup"] is True
+    assert "belated baseline catch-up" in events[0].extra["reasons"][-1]
+    # not_wanted must have zero events -- it was never named
+    from app.models import EventWatch
+
+    assert db_session.query(EventWatch).filter(EventWatch.watch_id == not_wanted.id).first() is None
+
+
+def test_create_baseline_catchup_events_is_idempotent(db_session: Session, tmp_settings: Settings):
+    """Calling it twice for the same watch_id must not create a second
+    Event -- a watch that already has one (belated or otherwise) is
+    reported, not re-fired."""
+    from app.services.pipeline import PipelineService
+
+    watch = _make_baseline_watch(
+        db_session, manufacturer="Timex", reference="TW2Y86000VQ", published_at="2026-08-11T09:00:00-04:00",
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    first = pipeline.create_baseline_catchup_events(watch_ids=[watch.id], notify=False)
+    second = pipeline.create_baseline_catchup_events(watch_ids=[watch.id], notify=False)
+    assert first[0]["created"] is True
+    assert second[0] == {"watch_id": watch.id, "created": False, "reason": "already_has_event"}
+
+
+def test_create_baseline_catchup_events_defaults_to_no_notify(db_session: Session, tmp_settings: Settings):
+    """A belated catch-up must not silently reach Discord by default -- an
+    8-day-old launch surfacing as a fresh "breaking" alert would misrepresent
+    its own age. notify=False (the default) must never call Discord even
+    with a webhook configured."""
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.services.pipeline import PipelineService
+
+    watch = _make_baseline_watch(
+        db_session, manufacturer="Timex", reference="TW2Y86000VQ", published_at="2026-08-11T09:00:00-04:00",
+    )
+    configured = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    calls: list[str] = []
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with (
+        patch("app.services.pipeline.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
+    ):
+        pipeline.create_baseline_catchup_events(watch_ids=[watch.id])  # notify defaults False
+    assert calls == []
 
 
 def test_timex_catalogue_backfill_burst_on_first_run_is_silently_baselined(
@@ -5957,11 +6401,15 @@ def test_future_rediscovery_of_old_timex_article_produces_no_alert(db_session: S
 
 
 def test_casio_and_citizen_official_news_unaffected_by_timex_hardening(db_session: Session, tmp_settings: Settings):
-    """Phase 7 regression proof: Casio/Citizen/Seiko's free-text
-    announcement_date strings are NOT in _ISO_TIMESTAMP_NEWS_SOURCES, so
-    they must fire NEW_REFERENCE exactly as before -- completely
-    unaffected by the Timex-specific hardening, regardless of how old
-    their (unparseable) date string might look."""
+    """Phase 7 regression proof, updated 2026-08-19 (CasioBlog EQB-1300D-5A/
+    -2A incident): Casio/Citizen/Seiko's free-text announcement_date strings
+    are NOT in _ISO_TIMESTAMP_NEWS_SOURCES, so a missing/genuinely
+    unparseable date still never blocks NEW_REFERENCE -- but a
+    confidently-parsed free-text date (e.g. Citizen's "10 June 2026" shape)
+    is no longer immune to staleness the way it used to be; see
+    test_stale_official_citizen_announcement_is_suppressed for the negative
+    case this hardening exists to fix. This test now uses a *fresh* date to
+    prove recall is intact, not an old one to prove immunity."""
     from app.collectors.base import FetchResult
     from app.models import CollectorRun, Event
     from app.parsers.citizen_news import parse_citizen_news_html
@@ -5974,6 +6422,7 @@ def test_casio_and_citizen_official_news_unaffected_by_timex_hardening(db_sessio
     complete_baseline(db_session, epoch)
 
     detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    detail_html = _freshen_fixture_date(detail_html, "10 June 2026")
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
     db_session.add(run)
@@ -5991,6 +6440,50 @@ def test_casio_and_citizen_official_news_unaffected_by_timex_hardening(db_sessio
     )
     assert out["watch_events"][0]["event_type"] == "NEW_REFERENCE"  # unaffected
     assert db_session.scalars(select(Event)).first() is not None
+
+
+def test_stale_official_citizen_announcement_is_suppressed(db_session: Session, tmp_settings: Settings):
+    """CasioBlog EQB-1300D-5A/-2A incident (2026-08-19, ai/handoff/): a
+    March-published article resurfaced as a NEW_REFERENCE Event on August 17
+    because the freshness gate was scoped to Timex only. This is the
+    generalized fix's core regression proof, reconstructed with a Citizen
+    fixture (Citizen's real date shape, "10 June 2026", is confidently
+    parseable by _parse_free_text_announcement_date): an official news
+    article with a genuinely old, machine-parseable publication date must
+    not create a current-news Event, regardless of when Watch Clank happens
+    to (re)discover it."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.parsers.citizen_news import parse_citizen_news_html
+    from app.services.epoch import complete_baseline, start_baseline, start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    epoch = start_epoch(db_session, name="epoch_1")
+    start_baseline(db_session, epoch)
+    complete_baseline(db_session, epoch)
+
+    # Deliberately NOT freshened -- "10 June 2026" is the real, old fixture
+    # date this test exists to prove gets suppressed.
+    detail_html = (FIXTURES / "citizen_news_detail.html").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    run = CollectorRun(collector_id="citizen_news", collector_version="0.1.0", status="RUNNING")
+    db_session.add(run)
+    db_session.commit()
+
+    fr = FetchResult(
+        url="https://www.citizenwatch-global.com/news/2026/20260610/index.html",
+        success=True, status_code=200, content_type="text/html", payload=detail_html,
+    )
+    out = pipeline.process_news_announcement(
+        fr, run_id=run.id, discovered_meta={"source_region": "GLOBAL"},
+        collector_id="citizen_news", manufacturer="Citizen", brand="Citizen",
+        parse_fn=parse_citizen_news_html, merge_key_prefix="citizen",
+        default_region="GLOBAL", emit_events=True,
+    )
+    assert out["watch_events"][0]["event_type"] is None
+    assert out["watch_events"][0]["reason"] == "stale_publication"
+    assert db_session.scalars(select(Event)).first() is None  # NO ALERT
 
 
 def test_old_timex_product_restock_still_fires_current_event(db_session: Session, tmp_settings: Settings):
@@ -6239,6 +6732,7 @@ def test_notify_new_lead_respects_confidence_floor_and_authority_flag(db_session
 
 
 def test_notify_correlation_sends_family_match_followup(db_session: Session):
+    from datetime import UTC, datetime
     from unittest.mock import patch
 
     from app.core.config import Settings
@@ -6252,9 +6746,14 @@ def test_notify_correlation_sends_family_match_followup(db_session: Session):
 
     settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
     svc = SpecialistLeadService(db_session)
+    # published_at is deliberately fresh -- notify_correlation now requires
+    # editorial_freshness == "FRESH" (2026-08-19 EQB-1300D hotfix); the
+    # separate negative case (a genuinely stale lead must not send this
+    # follow-up even after correlating with a real official Watch) is
+    # test_notify_correlation_refuses_stale_lead_eqb1300_regression below.
     outcome = svc.ingest_candidate(
         source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE", title="[Rumors] GWR-B3000",
-        source_url="https://casioblog.com/en/rumor-gwr-b3000-followup", published_at=None,
+        source_url="https://casioblog.com/en/rumor-gwr-b3000-followup", published_at=datetime.now(UTC).isoformat(),
         reference_candidates=["GWR-B3000"], claim_text=None, manufacturer="Casio", confidence=60.0,
     )
     svc.correlate_pending_leads(manufacturer="Casio")
@@ -6273,6 +6772,58 @@ def test_notify_correlation_sends_family_match_followup(db_session: Session):
     assert sent is True
     assert "FAMILY_MATCH — NOT EXACT" in captured["body"]
     assert "CONFIRMED" not in captured["body"].split("\n")[0].replace("FAMILY_MATCH — NOT EXACT", "")
+
+
+def test_notify_correlation_refuses_stale_lead_eqb1300_regression(db_session: Session):
+    """Live reconstruction of the CasioBlog EQB-1300D-5A/-2A incident,
+    confirmed 2026-08-19 against the real Hetzner production DB (lead id 10):
+    a CasioBlog article published 2026-03-28 was correctly classified
+    STALE_PUBLICATION and correctly never sent as an early-warning alert
+    (notify_new_lead already refused it) -- but on 2026-08-17, Casio's own
+    official collector observed a matching EQB-1300D-5A product for the
+    first time (itself correctly baseline-suppressed, zero official Events),
+    correlate_pending_leads() then linked the two as a FAMILY_MATCH with
+    lead_time_days=142, and notify_correlation() had no freshness check at
+    all -- it would have sent a "FAMILY_MATCH — NOT EXACT" Discord alert for
+    a 142-day-old article the moment it happened to correlate. This
+    reconstructs that exact sequence and proves the fix: correlating a
+    stale lead with a real (even baseline) official Watch must still
+    produce NO ALERT."""
+    from unittest.mock import patch
+
+    from app.core.config import Settings
+    from app.models import SpecialistLead, Watch
+    from app.services.discord_notify import DiscordNotifier
+    from app.services.specialist_leads import SpecialistLeadService
+
+    watch = Watch(
+        manufacturer="Casio", brand="Casio",
+        reference_raw="EQB-1300D-5A", reference_canonical="EQB-1300D-5A",
+    )
+    db_session.add(watch)
+    db_session.commit()
+
+    settings = Settings(discord_editorial_webhook_url="https://discord.example/editorial")
+    svc = SpecialistLeadService(db_session)
+    outcome = svc.ingest_candidate(
+        source_id="casioblog", lead_type="POSSIBLE_NEW_REFERENCE",
+        title="[EDIFICE 2026] EQB-1300D-5A and EQB-1300D-2A — expanding the new motorsport lineup with fresh dial colors",
+        source_url="https://casioblog.com/en/edifice-2026-eqb-1300d-5a-and-eqb-1300d-2a-expanding-the-new-motorsport-lineup-with-fresh-dial-colors",
+        published_at="2026-03-28T14:43:07",
+        reference_candidates=["EQB-1300", "EQB-1300D"], claim_text=None, manufacturer="Casio", confidence=60.0,
+    )
+    lead = db_session.get(SpecialistLead, outcome["lead_id"])
+    assert lead.editorial_freshness == "STALE_PUBLICATION"
+
+    svc.correlate_pending_leads(manufacturer="Casio")
+    assert lead.correlation_type == "FAMILY_MATCH"  # the real correlation still happens -- it's real evidence
+
+    calls: list[str] = []
+    with patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()):
+        sent = svc.notify_correlation(lead, notifier=DiscordNotifier(settings))
+
+    assert sent is False
+    assert calls == []  # NO ALERT: nothing reached Discord
 
 
 def test_early_warning_alert_is_structurally_distinct_from_official():

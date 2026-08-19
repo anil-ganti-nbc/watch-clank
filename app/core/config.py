@@ -100,6 +100,34 @@ class Settings(BaseSettings):
     # no real relationship to when a product actually launched.
     product_baseline_freshness_window_hours: int = Field(default=72)
 
+    # 2026-08-19 hotfix (live-confirmed on Hetzner: Cavatina Luxe
+    # TW2Y86000-86400, TW6A01000/00900/00800, TW2Y85500 -- all published by
+    # Timex 2026-08-07/08-11, all baseline-absorbed 2026-08-14 during the
+    # Hetzner redeploy sweep, past the tight 72h
+    # product_baseline_freshness_window_hours bar, zero Events, permanently
+    # silent). The 72h window above is deliberately tight to protect
+    # *every future* baseline from routine catalogue-maintenance noise; it
+    # is not the right bar for a one-time, human-reviewed backfill pass
+    # over watches a baseline already silenced. See
+    # PipelineService.find_baseline_catchup_candidates/
+    # create_baseline_catchup_events and
+    # ai/handoff/INCIDENT_TIMEX_BASELINE_ABSORPTION.md. Matches the same
+    # 30-day "genuinely recent launch" bar already used and empirically
+    # justified for availability_recent_launch_window_days above, not a
+    # new number invented for this purpose.
+    # Deliberately NOT the wider 30-day availability_recent_launch_window_days
+    # bar: a live check against the real Hetzner catalogue while building
+    # this (2026-08-19) found that even 14 days lets through a 23-product
+    # Timex cluster sharing one identical 2026-08-07 published_at across
+    # totally unrelated collections (Waterbury Classic, Easy Reader,
+    # Weekender, Q Timex Marbella, ...) -- the same bulk-catalogue-touch
+    # artifact already documented for baseline itself, just at a wider
+    # window. Kept tight and paired with the shared_timestamp_count signal
+    # on each candidate (see find_baseline_catchup_candidates) precisely so
+    # a human reviewer can see that risk directly, rather than trusting the
+    # window alone.
+    baseline_catchup_window_days: int = Field(default=14)
+
     # Catalogue-backfill burst context (see
     # ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md). A single
     # product-observation-pipeline run whose NEW_REFERENCE count clears

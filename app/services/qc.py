@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
@@ -119,17 +119,36 @@ def reviewed_today_count(db: Session) -> int:
     ) or 0
 
 
+# 2026-08-19 hotfix (TW2Y38700 Pan Am RESTOCK -- an 11-month-old collab
+# restocking cleared the availability editorial bar and sat in the queue
+# at equal priority to a genuine NEW_REFERENCE). RESTOCK/SOLD_OUT are real,
+# legitimately time-sensitive inventory news -- not suppressed here, still
+# fully filterable via the existing event-type dropdown -- but they answer
+# a different editorial question ("is this back in stock") than
+# NEW_REFERENCE/NEW_REGION ("is this a genuinely new product"), so the
+# default queue must not interleave them by recency alone. Tier 0 (new
+# discovery) always sorts above tier 1 (price) above tier 2 (availability),
+# newest-first within each tier.
+_QUEUE_PRIORITY_TIER = case(
+    (Event.event_type.in_(("NEW_REFERENCE", "NEW_REGION")), 0),
+    (Event.event_type == "PRICE_CHANGE", 1),
+    else_=2,
+)
+
+
 def fetch_queue_page(
     db: Session, filters: QueueFilters, *, before_id: int | None = None, limit: int = DEFAULT_PAGE_SIZE
 ) -> list[Event]:
-    """Newest-first page of unreviewed, editorially-eligible Events.
-    ``before_id``, if given, continues the queue past that event's id."""
+    """Priority-tiered, newest-first-within-tier page of unreviewed,
+    editorially-eligible Events -- see _QUEUE_PRIORITY_TIER. ``before_id``,
+    if given, continues the queue past that event's id (id, not tier,
+    since it's a stable pagination cursor)."""
     stmt = _base_unreviewed_query(db, filters).options(
         joinedload(Event.watches).joinedload(EventWatch.watch).joinedload(Watch.observations)
     )
     if before_id is not None:
         stmt = stmt.where(Event.id < before_id)
-    stmt = stmt.order_by(desc(Event.id)).limit(limit)
+    stmt = stmt.order_by(_QUEUE_PRIORITY_TIER.asc(), desc(Event.id)).limit(limit)
     return list(db.scalars(stmt).unique().all())
 
 

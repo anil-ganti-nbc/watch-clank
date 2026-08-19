@@ -820,6 +820,36 @@ def test_qc_manufacturer_filter_leaves_other_manufacturers_unaffected(qc_client:
     assert casio_event.id in ids2
 
 
+def test_qc_queue_ranks_new_reference_above_restock_regardless_of_recency(qc_client: TestClient, db: Session):
+    """2026-08-19 hotfix (TW2Y38700 Pan Am RESTOCK, score 70, sat in the
+    default queue at equal priority to genuine NEW_REFERENCE discoveries):
+    RESTOCK is real, legitimately time-sensitive inventory news -- not
+    suppressed, still fully reachable via the event-type filter -- but must
+    not outrank a NEW_REFERENCE in the default (unfiltered) queue merely by
+    being newer. Deliberately create the RESTOCK event AFTER (higher id/
+    newer) the NEW_REFERENCE to prove tier beats recency."""
+    watch = _make_watch(db, reference_raw="TW2Y38700JR", reference_canonical="TW2Y38700JR", manufacturer="Timex", brand="Timex")
+    new_reference_event = _make_event_for_watch(db, watch)
+
+    restock_watch = _make_watch(db, reference_raw="TW6A01000VQ", reference_canonical="TW6A01000VQ", manufacturer="Timex", brand="Timex")
+    restock_event = Event(
+        event_type="RESTOCK",
+        title="Timex TW2Y38700JR: RESTOCK",
+        status="DRAFT",
+        story_score=70.0,
+        extra={"region": "US", "editorial_eligible": True},
+    )
+    db.add(restock_event)
+    db.flush()
+    db.add(EventWatch(event_id=restock_event.id, watch_id=restock_watch.id, role="subject"))
+    db.commit()
+    assert restock_event.id > new_reference_event.id  # confirms recency alone would rank it first
+
+    resp = qc_client.get("/api/qc/queue")
+    ids_in_order = [i["event_id"] for i in resp.json()["items"]]
+    assert ids_in_order.index(new_reference_event.id) < ids_in_order.index(restock_event.id)
+
+
 # --- 2026-08-19 Watch Clank QC + classifier hardening: Specialist lead QC ---
 #
 # Same EVENT != REVIEW contract, applied to SpecialistLead -- see

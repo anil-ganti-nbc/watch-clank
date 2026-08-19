@@ -354,11 +354,28 @@ class SpecialistLeadService:
         after correlate_pending_leads() correlates a lead. Naturally
         deduped: correlate_pending_leads only ever queries UNCONFIRMED
         leads, so a lead can be correlated (and therefore notified here)
-        at most once."""
+        at most once.
+
+        2026-08-19 hotfix (CasioBlog EQB-1300D-5A/-2A incident,
+        live-confirmed on Hetzner: lead id 10, a 2026-03-28 article,
+        editorial_freshness=STALE_PUBLICATION, correlated 2026-08-17 with a
+        baseline-suppressed official Watch observation): unlike
+        notify_new_lead just above -- which has always refused to alert
+        anything that isn't editorial_freshness == "FRESH" -- this method
+        had no freshness check at all. Correlation with an official Watch
+        proves the *reference is real*, not that the original article is
+        current; a lead published 142 days before Watch Clank happened to
+        observe the matching product must not become a "CONFIRMED"/
+        "FAMILY_MATCH" news alert. This is a distinct, second gap from the
+        one fixed in app.services.pipeline._stale_official_announcement
+        (which only ever covered leads created directly as official news,
+        not this correlation-followup path)."""
         settings = get_settings()
         if not settings.editorial_notifications_enabled:
             return False
         if lead.is_baseline:
+            return False
+        if lead.editorial_freshness != "FRESH":
             return False
         notifier = notifier or DiscordNotifier(settings)
         if not notifier.editorial_enabled or lead.correlated_watch_id is None:
