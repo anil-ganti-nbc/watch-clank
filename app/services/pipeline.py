@@ -416,7 +416,14 @@ class PipelineService:
         collector_version: str = COLLECTOR_VERSION,
         parse_fn=None,
         default_region: str = "JP",
-        emit_events: bool = False,
+        # 2026-08-21 Phase 8: defaults flipped False->True. The historical
+        # casio_multi incident (zero Events ever, silently, for months)
+        # happened because these defaults were False and one runner forgot
+        # the flag. Forgetting now fails LOUD (an unexpected Event surfaces
+        # in review) instead of silent (a Watch row nobody ever hears
+        # about). Observation-only tooling (replay_snapshot, fixture mode)
+        # passes emit_events=False explicitly, making that intent visible.
+        emit_events: bool = True,
         notify: bool = False,
         experimental: bool = False,
         force_baseline: bool = False,
@@ -1938,7 +1945,8 @@ class PipelineService:
         parse_fn=None,
         merge_key_prefix: str | None = None,
         default_region: str = "INTL",
-        emit_events: bool = False,
+        # See process_fetch_result: Phase 8 default flip, same rationale.
+        emit_events: bool = True,
         notify: bool = False,
         experimental: bool = False,
         force_baseline: bool = False,

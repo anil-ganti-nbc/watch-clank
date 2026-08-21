@@ -1509,10 +1509,14 @@ def test_brand_news_pipeline_repeat_same_region_emits_no_event(db_session: Sessi
     assert len(events) == 1
 
 
-def test_casio_production_path_emits_no_events_by_default(db_session: Session, tmp_settings: Settings):
-    """Non-negotiable safety rule: the existing Casio production call path
-    (no new kwargs) must not start writing Event rows just because the
-    scoring/event feature now exists in the same function."""
+def test_casio_production_path_emits_events_by_default(db_session: Session, tmp_settings: Settings):
+    """Phase 8 (2026-08-21) inversion of the old 'no events by default'
+    safety rule. That rule was written when event generation was unproven,
+    and it is exactly what caused the casio_multi incident: a runner
+    forgetting emit_events silently ingested Watches for months with zero
+    Events. The default now fails LOUD -- an unexpected Event surfaces in
+    review -- instead of silent. Observation-only intent (replay, fixture
+    tooling) must now be declared explicitly with emit_events=False."""
     from app.collectors.base import FetchResult
     from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
@@ -1532,8 +1536,19 @@ def test_casio_production_path_emits_no_events_by_default(db_session: Session, t
     )
     out = pipeline.process_news_announcement(fr, run_id=run.id)
     assert out["success"] and out["new_watch"]
-    assert "watch_events" not in out
-    assert db_session.scalars(select(Event)).first() is None
+    assert out.get("watch_events"), "default must be editorial, not silent ingestion"
+    assert db_session.scalars(select(Event)).first() is not None
+
+    # explicit observation-only intent remains available and honest
+    html2 = html.replace(b"GA-2100-1A1JF", b"GA-2200-1A1JF")
+    fr2 = FetchResult(
+        url="https://www.casio.com/intl/news/2026/test-observation-only/",
+        success=True, status_code=200, content_type="text/html", payload=html2,
+    )
+    out2 = pipeline.process_news_announcement(fr2, run_id=run.id, emit_events=False)
+    assert out2["success"]
+    assert "watch_events" not in out2
+    assert db_session.scalars(select(Event)).count() == 1  # unchanged by the silent call
 
 
 def test_editorial_scoring_is_explainable_and_bounded():
@@ -7248,3 +7263,39 @@ def test_casio_jp_sitemap_first_run_auto_baselines_then_repeat_quiet(
     second = pipeline.run_product_observation_pipeline("casio_jp")
     assert second.new_watch_count == 0
     assert db_session.query(Event).count() == 0
+
+
+def test_citizen_enrichment_cap_and_failure_are_distinguishable(db_session: Session, tmp_settings: Settings):
+    """Phase 6: UNKNOWN is not one state. Items beyond the enrichment cap
+    (NOT_ENRICHED_CAP) and failed detail fetches (ENRICHMENT_FETCH_FAILED)
+    must be visible as different facts from 'source has no field'."""
+    import json
+
+    import app.collectors.citizen_products as mod
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    collector = CitizenProductsCollector()
+    page1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    page2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+
+    orig_cap = mod.MAX_AVAILABILITY_ENRICHMENT_FETCHES
+    mod.MAX_AVAILABILITY_ENRICHMENT_FETCHES = 1
+    try:
+        result = collector.run(
+            max_items=50,
+            search_pages={"mens": [page1, page2]},  # offline: no real network
+            detail_pages={},  # no fixtures -> every enrichment fetch fails
+            known_product_urls=set(),
+        )
+    finally:
+        mod.MAX_AVAILABILITY_ENRICHMENT_FETCHES = orig_cap
+
+    assert result.metadata.get("availability_enrichment_capped_out", 0) >= 1
+    payloads = [
+        json.loads(f.payload)
+        for f in result.fetched
+        if f.success and f.content_type == "application/json"
+    ]
+    provenances = [p.get("availability_provenance") for p in payloads]
+    assert provenances.count("ENRICHMENT_FETCH_FAILED") == 1  # within cap, fetch failed
+    assert provenances.count("NOT_ENRICHED_CAP") >= 1  # beyond cap entirely

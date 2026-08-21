@@ -130,6 +130,13 @@ def _watch_from_product_data(
         parser_warnings.append("no_price_in_source")
     if not has_inventory:
         parser_warnings.append("no_availability_in_source")
+    # 2026-08-21 Phase 6: UNKNOWN is not one state. Distinguish "the source
+    # page genuinely carries no inventory field" from "enrichment was
+    # capped" and from "the enrichment fetch itself failed" -- the collector
+    # stamps this key on cheap-record payloads it emits in those cases.
+    provenance = data.get("availability_provenance")
+    if provenance:
+        parser_warnings.append(f"availability_provenance:{provenance}")
 
     return ParsedWatch(
         reference_raw=str(reference_raw),
