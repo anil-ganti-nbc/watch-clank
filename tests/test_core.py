@@ -6862,3 +6862,97 @@ def test_early_warning_alert_is_structurally_distinct_from_official():
     assert "tier" in early_warning_text.lower()
     # never claims official-style "Editorial score" language for a lead
     assert "Editorial score" not in early_warning_text
+
+
+# --- 2026-08-21 hostile architecture audit: surgical regressions ------------
+
+
+def test_timex_reference_pattern_rejects_ordinary_prose_words():
+    """Audit finding: the specialist-publication Timex reference pattern had
+    no digit requirement (unlike its own Casio pattern), so ordinary
+    lowercase prose words shaped TW + 6+ letters matched under IGNORECASE,
+    and normalize_timex_reference is a passthrough with no validation --
+    garbage flowed straight into SpecialistLead.reference_candidates."""
+    from app.normalization.references import normalize_timex_reference
+    from app.parsers.specialist_publications import _REFERENCE_PATTERNS
+
+    timex = _REFERENCE_PATTERNS["Timex"]
+    for word in ("twentieth", "tweeting", "Tweeters", "twiddlier"):
+        assert timex.search(word) is None, word
+    # real SKU shapes still match, with or without a variant suffix
+    for sku in ("TW2Y71200", "tw2y71200vq", "TW2Y93300"):
+        m = timex.search(sku)
+        assert m is not None, sku
+    # and the normalizer still accepts a real reference unchanged
+    assert normalize_timex_reference("TW2Y71200VQ").reference_canonical == "TW2Y71200VQ"
+
+
+def test_run_lock_pid_liveness_never_uses_os_kill_on_windows(monkeypatch):
+    """Audit finding: os.kill(pid, 0) on Windows calls TerminateProcess for
+    any signal value outside CTRL_C_EVENT/CTRL_BREAK_EVENT -- the lock's
+    'liveness probe' could kill the very process holding the lock (or an
+    unrelated PID-reused process). On nt the service must not call os.kill
+    at all and must treat the lock as active until the timestamp-staleness
+    check alone retires it."""
+    from pathlib import Path
+
+    from app.core.config import Settings
+    from app.services.run_lock import RunLockService
+
+    # Build everything path-dependent BEFORE faking a Windows platform
+    # (pathlib cannot instantiate WindowsPath on a POSIX host).
+    settings = Settings(database_url="sqlite:///:memory:", stale_run_threshold_minutes=45)
+    svc = RunLockService(None, settings, lock_path=Path("/tmp/wc-test.run.lock"))
+
+    monkeypatch.setattr("app.services.run_lock.os.name", "nt")
+    killed: list[int] = []
+
+    def _boom(pid, sig):
+        killed.append((pid, sig))
+        return True
+
+    monkeypatch.setattr("app.services.run_lock.os.kill", _boom)
+    assert svc._pid_alive(12345) is True
+    assert killed == [], "os.kill must never be invoked on Windows"
+
+
+def test_health_flags_persistent_zero_item_source_as_warning(db_session: Session, tmp_settings: Settings):
+    """Audit finding: ZERO_ITEMS counts as a success status, so a silently
+    broken feed read as HEALTHY forever (real case: monochrome_rss, 20
+    consecutive item-less runs). Three-plus consecutive empty successes
+    must degrade to WARNING."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import CollectorRun
+    from app.services.health import _source_health
+
+    base = datetime.now(UTC) - timedelta(hours=12)
+    for i in range(4):
+        db_session.add(
+            CollectorRun(
+                collector_id="monochrome_rss",
+                collector_version="0.1.0",
+                started_at=base + timedelta(minutes=i),
+                completed_at=base + timedelta(minutes=i + 1),
+                status="ZERO_ITEMS",
+                discovered_count=0,
+            )
+        )
+    db_session.commit()
+
+    health = _source_health(db_session, "monochrome_rss")
+    assert health.state == "WARNING"
+
+    # a genuinely productive recent run keeps the source HEALTHY
+    db_session.add(
+        CollectorRun(
+            collector_id="casioblog_rss",
+            collector_version="0.1.0",
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            status="SUCCESS",
+            discovered_count=3,
+        )
+    )
+    db_session.commit()
+    assert _source_health(db_session, "casioblog_rss").state == "HEALTHY"

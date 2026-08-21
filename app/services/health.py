@@ -134,6 +134,21 @@ def _source_health(session: Session, collector_id: str) -> SourceHealth:
 
     if most_recent.status in SUCCESS_STATUSES:
         state = "HEALTHY"
+        # A source can be "successfully" empty forever: ZERO_ITEMS counts as
+        # a success status, so a silently broken feed/parser (real case:
+        # monochrome_rss, 20 consecutive ZERO_ITEMS runs in the field-test
+        # DB while the same source worked elsewhere) reads as HEALTHY.
+        # Three-plus consecutive item-less successes is not collection, it
+        # is an unanswered question -- surface it as WARNING. Found by the
+        # 2026-08-21 hostile architecture audit.
+        zero_item_streak = 0
+        for r in runs:
+            if r.status == "ZERO_ITEMS" and (r.discovered_count or 0) == 0:
+                zero_item_streak += 1
+            else:
+                break
+        if zero_item_streak >= 3:
+            state = "WARNING"
     elif most_recent.status == "SKIPPED_OVERLAP":
         state = "WARNING"
     else:

@@ -147,6 +147,19 @@ class RunLockService:
     def _pid_alive(self, pid: int) -> bool:
         if pid <= 0:
             return False
+        # Windows: os.kill(pid, 0) is NOT a liveness probe there. CPython
+        # documents that any signal value other than CTRL_C_EVENT /
+        # CTRL_BREAK_EVENT makes os.kill call TerminateProcess -- so this
+        # check would have KILLED the lock-owning (or PID-reused) process
+        # instead of asking whether it was alive. On non-POSIX platforms we
+        # deliberately cannot verify PID liveness and fall back to the
+        # timestamp staleness check alone (_lock_is_stale), which is the
+        # strictly safe direction: a dead owner's lock is reclaimed after
+        # stale_run_threshold_minutes either way. Found by the 2026-08-21
+        # hostile architecture audit (incident Q class).
+        if os.name == "nt":
+            logger.debug("pid_liveness_unverifiable_on_windows", pid=pid)
+            return True
         try:
             os.kill(pid, 0)
             return True
