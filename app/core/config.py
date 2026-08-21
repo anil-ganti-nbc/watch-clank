@@ -1,9 +1,8 @@
 """Application configuration using Pydantic Settings."""
 
+import ipaddress
 from functools import lru_cache
 from pathlib import Path
-
-import ipaddress
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,6 +36,12 @@ class Settings(BaseSettings):
     schedule_interval_minutes: int = Field(default=90)
     stale_run_threshold_minutes: int = Field(default=45)
     max_run_duration_seconds: int = Field(default=1200)
+    # Consecutive item-less ZERO_ITEMS runs before a source degrades from
+    # HEALTHY to WARNING (2026-08-21 audit: monochrome_rss read HEALTHY
+    # through 20 consecutive empty runs). Expressed in runs, not hours, so
+    # one number means the same thing for a 45-minute RSS lane and a
+    # 12-hour sitemap lane.
+    zero_item_warning_streak: int = Field(default=3, ge=1)
 
     log_level: str = Field(default="INFO")
     log_format: str = Field(default="json")

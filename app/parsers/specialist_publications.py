@@ -102,7 +102,15 @@ _REFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
     "Casio": re.compile(r"\b((?:GA|GW|GM|GMW|GCW|GBD|GBDH|GBX|GWR|GBA|GMA|GMD|GME|GSH|GST|EFK|EF|OCW|PRG|PRW|MRG|MTG|BGA|MSG)[-]?(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,24})\b", re.IGNORECASE | re.ASCII),
     "Seiko": re.compile(r"\b((?:S[A-Z]{2,3}[0-9]{3,4}|H(?:CC|BC|DB)[A-Z0-9]{3,5}))\b", re.IGNORECASE | re.ASCII),
     "Citizen": re.compile(r"\b([A-Z]{2}[0-9]{4}-[0-9A-Z]{2,4})\b", re.IGNORECASE | re.ASCII),
-    "Timex": re.compile(r"\b(TW[A-Z0-9]{6,})\b", re.IGNORECASE | re.ASCII),
+    # Timex requires a digit somewhere in the candidate (same lookahead
+    # discipline as the Casio pattern): without it, ordinary lowercase
+    # prose words shaped TW+6+ letters ("twentieth", "tweeting") match
+    # under IGNORECASE and flow into SpecialistLead.reference_candidates
+    # as garbage -- normalize_timex_reference is a conservative passthrough
+    # with no format validation, so nothing downstream rejects them.
+    # Found by the 2026-08-21 hostile architecture audit; re-verified still
+    # present after Phase 0 remediation (bf87c7d does not touch this path).
+    "Timex": re.compile(r"\b(TW(?=[A-Z0-9-]*\d)[A-Z0-9]{6,})\b", re.IGNORECASE | re.ASCII),
 }
 _LIMITED_RE = re.compile(r"\b(?:limited edition|limited to|limited-run)\b", re.IGNORECASE)
 _COLLAB_RE = re.compile(r"\b(?:collaboration|collab| x )\b", re.IGNORECASE)

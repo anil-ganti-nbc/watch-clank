@@ -166,30 +166,46 @@ class PipelineService:
         }
 
     def _auto_baseline_for_first_run(self, collector_id: str) -> bool:
-        """Uninitialized-DB safety invariant (2026-08-17 production reset --
-        see ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md's
-        addendum). A genuinely first-ever run for a collector, on a
-        database that has never had an epoch, must not be able to flood
-        NEW_REFERENCE/NEW_REGION events just because whoever triggered it
-        (a script, a dashboard "RUN ALL SAFE COLLECTORS" click) didn't
-        know to pass --force-baseline -- this is exactly how both the
+        """Collector-initialization safety invariant.
+
+        2026-08-17 (see ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md's
+        addendum): a genuinely first-ever run for a collector must not be able
+        to flood NEW_REFERENCE/NEW_REGION events just because whoever
+        triggered it (a script, a dashboard "RUN ALL SAFE COLLECTORS" click)
+        didn't know to pass --force-baseline -- this is exactly how both the
         local dev database and a fresh field-test database independently
         reproduced the same Timex flood.
 
-        Deliberately narrow: only True when BOTH conditions hold, so it
-        can never change behavior for a collector that has already run at
-        least once (every currently-active Hetzner source has real run
-        history, so this is always False there) or on a database with a
-        real epoch (where is_baseline_active() already governs baseline
-        state correctly, and should keep doing so unchanged).
-        """
-        from app.services.epoch import get_active_epoch
+        2026-08-21 hostile-audit remediation (Phase 8): that protection
+        previously applied ONLY when no operational epoch existed, so adding
+        a new collector/brand/region to an already-running deployment
+        replayed the same flood unless an operator remembered
+        --force-baseline. Baseline safety must not depend on operator
+        memory: ANY collector with no successful run on this database is
+        auto-baselined on its first run, epoch or no epoch. A first run
+        persists watches/observations/leads normally but emits no Events.
 
-        if get_active_epoch(self.session) is not None:
-            return False
-        return (
-            self.session.query(CollectorRun).filter(CollectorRun.collector_id == collector_id).first() is None
+        Collectors with established successful run history are grandfathered
+        by that history rather than force-re-baselined at deploy (that would
+        silently cost every production source one real collection cycle).
+        The residual risk -- a long-retired collector re-enabled against a
+        large accumulated delta -- is handled by the Phase 6 novelty
+        inversion instead: such discoveries surface as honestly-labelled
+        FIRST_SEEN_BY_CLANK unless they carry affirmative publication
+        evidence, so a flood becomes a visible, low-priority, correctly-
+        labelled review queue rather than a wall of confident false
+        NEW_REFERENCE claims.
+        """
+        has_successful_run = (
+            self.session.query(CollectorRun)
+            .filter(
+                CollectorRun.collector_id == collector_id,
+                CollectorRun.status.in_(("SUCCESS", "PARTIAL", "ZERO_ITEMS")),
+            )
+            .first()
+            is not None
         )
+        return not has_successful_run
 
     def _stale_official_announcement(self, lead) -> str | None:
         """Returns a suppression reason if `lead` (a ReleaseLead) carries a
@@ -1335,7 +1351,13 @@ class PipelineService:
 
         baseline_active = force_baseline or is_baseline_active(self.session)
         baseline_freshness = None
-        if baseline_active and is_new_watch:
+        if is_new_watch:
+            # 2026-08-21 Phase 6/7: source-publication evidence is now
+            # evaluated for EVERY first sighting, not only while a baseline
+            # is active. It serves two roles with one implementation: the
+            # pre-existing baseline override (INCIDENT_TIMEX_BASELINE_
+            # ABSORPTION), and affirmative novelty evidence in normal
+            # operation -- see the classification rule below.
             baseline_freshness = self._new_reference_baseline_freshness(watch=watch, new_obs=new_obs)
 
         if baseline_active and not (baseline_freshness is not None and baseline_freshness.state == "FRESH"):
@@ -1380,7 +1402,56 @@ class PipelineService:
             # silently become "NEW_REFERENCE" merely because baseline had
             # already ended.
             reactivation_note = self._reactivation_signal(watch.extra_specs)
-            event_type = "FIRST_SEEN_BY_CLANK" if reactivation_note else "NEW_REFERENCE"
+            # 2026-08-21 Phase 6 -- NOVELTY INVERSION. The default for a
+            # first local sighting is now FIRST_SEEN_BY_CLANK: "this
+            # database has never seen this reference" is a discovery
+            # milestone, not launch evidence. NEW_REFERENCE must be EARNED
+            # by affirmative novelty evidence. The qualifying evidence
+            # implemented here is the same bar already trusted for the
+            # baseline override: the source's own structured publication
+            # timestamp, within product_baseline_freshness_window_hours of
+            # this observation (classify_baseline_product_freshness). A
+            # source-declared REACTIVATED/backorder tag is affirmative
+            # counter-evidence and always wins. Absence of prior local
+            # rows, a new URL, and current stock are explicitly NOT
+            # novelty evidence. Recall is preserved, not suppressed: a
+            # FIRST_SEEN_BY_CLANK Event is still created, queued (tier 3),
+            # scored and reviewable -- it just no longer claims a launch
+            # it cannot prove. The official-news path (_record_watch_event)
+            # keeps NEW_REFERENCE for is_new_watch because a first-party
+            # announcement article IS affirmative launch evidence.
+            publication_fresh = baseline_freshness is not None and baseline_freshness.state == "FRESH"
+            if reactivation_note:
+                event_type = "FIRST_SEEN_BY_CLANK"
+            elif publication_fresh:
+                event_type = "NEW_REFERENCE"
+            else:
+                event_type = "FIRST_SEEN_BY_CLANK"
+
+            novelty_evidence = {
+                "collector_id": new_obs.collector_id,
+                "region": new_obs.region,
+                "local_first_seen_at": ensure_utc(new_obs.observed_at).isoformat(),
+                "source_published_at": (
+                    self._parse_extra_specs_published_at(watch.extra_specs).isoformat()
+                    if self._parse_extra_specs_published_at(watch.extra_specs)
+                    else None
+                ),
+                "existed_locally_before": False,
+                "source_reactivation_signal": bool(reactivation_note),
+                "publication_freshness_state": baseline_freshness.state if baseline_freshness else None,
+                "baseline_state": "ACTIVE" if baseline_active else "INACTIVE",
+                "official_article_corroboration": None,
+                "classification_reason": (
+                    "source-declared reactivation/backorder"
+                    if reactivation_note
+                    else (
+                        f"affirmative source publication evidence ({baseline_freshness.reason})"
+                        if publication_fresh
+                        else "no affirmative novelty evidence; local absence is not launch evidence"
+                    )
+                ),
+            }
 
             evidence = EventEvidence(
                 event_type=event_type,
@@ -1399,8 +1470,11 @@ class PipelineService:
                 "first-ever product-catalogue observation of this reference; "
                 "no prior region or announcement existed"
             ]
-            if baseline_freshness is not None and baseline_freshness.state == "FRESH":
-                reasons.append(f"baseline override: {baseline_freshness.reason}")
+            if publication_fresh:
+                reasons.append(
+                    f"affirmative novelty evidence: {baseline_freshness.reason}"
+                    + (" (baseline override)" if baseline_active else "")
+                )
             if reactivation_note:
                 reasons.append(reactivation_note)
             return self._persist_product_event(
@@ -1412,6 +1486,7 @@ class PipelineService:
                 notify=notify,
                 experimental=experimental,
                 prior_regions=None,
+                novelty_evidence=novelty_evidence,
             )
 
         prior_product_regions = self._prior_product_regions_for_watch(
@@ -1534,8 +1609,16 @@ class PipelineService:
         notify: bool,
         experimental: bool,
         prior_regions: frozenset[str] | None,
+        novelty_evidence: dict | None = None,
     ) -> dict:
-        """Persist a product-state Event after the caller proved its facts."""
+        """Persist a product-state Event after the caller proved its facts.
+
+        novelty_evidence (2026-08-21 Phase 7): the structured provenance of
+        a novelty classification -- source, region, local first-seen time,
+        source publication timestamp, reactivation signal, publication
+        freshness, baseline state, and the final classification reason.
+        Purely additive JSON in Event.extra; every field is data this
+        module already computed, so nothing is duplicated or re-derived."""
         from app.models import Event, EventWatch
         from app.services.discord_notify import DiscordNotifier
         from app.services.editorial import editorial_eligibility, format_alert
@@ -1564,6 +1647,7 @@ class PipelineService:
                 "alerted": False,
                 "editorial_eligible": editorial_eligible,
                 "editorial_eligibility_reasons": eligibility_reasons,
+                **({"novelty_evidence": novelty_evidence} if novelty_evidence else {}),
             },
         )
         self.session.add(event)
@@ -2652,8 +2736,14 @@ class PipelineService:
                     failures += 1
 
             backfill_context = self._annotate_new_reference_burst(
+                # 2026-08-21 Phase 6: a catalogue-backfill flood is now
+                # mostly FIRST_SEEN_BY_CLANK events (the honest default),
+                # so burst detection counts both first-sighting novelty
+                # types -- the flood signature, not a specific label.
                 new_reference_event_ids=[
-                    pe["event_id"] for pe in events if pe.get("event_type") == "NEW_REFERENCE" and pe.get("event_id")
+                    pe["event_id"]
+                    for pe in events
+                    if pe.get("event_type") in ("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK") and pe.get("event_id")
                 ],
                 discovered_count=len(result.discovered),
             )

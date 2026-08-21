@@ -68,8 +68,8 @@ VALID_EVENT_TYPES = frozenset(
         "SOLD_OUT",
         "RESTOCK",
         # 2026-08-19 hotfix (TW4B20700 Expedition Field Chronograph):
-        # FIRST_SEEN_BY_CLANK != NEW_REFERENCE. A reference that is merely
-        # absent from this database until today is not, by itself,
+        # FIRST_SEEN_BY_CLANK != NEW_REFERENCE. A reference that is
+        # merely absent from this database until today is not, by itself,
         # evidence the manufacturer launched it today -- see the freshness
         # taxonomy in ai/handoff/INCIDENT_20260819_EMERGENCY_HOTFIX.md.
         # NEW_REFERENCE means affirmative evidence of genuine novelty
@@ -80,6 +80,13 @@ VALID_EVENT_TYPES = frozenset(
         # is telling us the opposite -- a REACTIVATED/backorder catalogue
         # tag -- the event must be labeled for what it honestly is: a
         # local-discovery milestone, not a launch claim.
+        # 2026-08-21 Phase 6 novelty inversion: FIRST_SEEN_BY_CLANK is now
+        # the DEFAULT classification for a product-catalogue first
+        # sighting; NEW_REFERENCE is emitted only when affirmative
+        # publication evidence exists (see PipelineService.
+        # _record_product_transition). The official-news path keeps
+        # NEW_REFERENCE for genuinely new references because a first-party
+        # announcement article is itself affirmative launch evidence.
         "FIRST_SEEN_BY_CLANK",
     }
 )
