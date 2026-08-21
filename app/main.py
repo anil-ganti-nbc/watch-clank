@@ -77,6 +77,7 @@ def _instance_context() -> dict:
     (never cached at import time) so a .env change takes effect on reload
     without restarting the process. Available in every template via
     base.html's header -- see Phase 1 of the web catch-up sprint."""
+    from app.local_operator import mutation_authority
     from app.services.discord_notify import DiscordNotifier
 
     current_settings = get_settings()
@@ -86,6 +87,7 @@ def _instance_context() -> dict:
         "instance_label": label or "UNLABELED",
         "instance_configured": bool(label),
         "notification_authority": notifier.notification_authority(),
+        "mutation_authority": mutation_authority(app),
         "field_test": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
         "version": app.version,
         "channel": os.getenv("WATCH_CLANK_RELEASE_CHANNEL", "production"),
@@ -1437,14 +1439,22 @@ def health(db: Session = Depends(get_db)):
 @app.get("/api/runtime")
 def runtime_provenance():
     """Non-secret build/state provenance for operator verification."""
+    from app.local_operator import mutation_authority
+
+    field_test = os.getenv("WATCH_CLANK_FIELD_TEST") == "1"
+    authority = mutation_authority(app)
     return {
         "service": "Watch Clank",
         "version": app.version,
-        "mode": "FIELD TEST" if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" else "default",
+        "mode": "FIELD TEST" if field_test else "default",
         "channel": os.getenv("WATCH_CLANK_RELEASE_CHANNEL", "production"),
         "revision": os.getenv("WATCH_CLANK_BUILD_REVISION", "local development build"),
         "state_root": os.getenv("WATCH_CLANK_STATE_ROOT", "default server paths"),
-        "read_only": False,
-        "local_collection": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
-        "external_delivery": False if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" else "configured by server settings",
+        # Phase 0 truth-in-provenance: report what this instance can
+        # actually do, derived from the installed authority rather than a
+        # hardcoded False that went stale when containment landed.
+        "mutation_authority": authority,
+        "read_only": authority == "NONE",
+        "local_collection": field_test,
+        "external_delivery": False if field_test else "configured by server settings",
     }
