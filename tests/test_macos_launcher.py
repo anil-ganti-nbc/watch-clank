@@ -15,6 +15,18 @@ def test_field_test_allows_selected_collection_and_run_all_but_blocks_other_muta
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "phase0_network_authorizer",
+        lambda _client, _host: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module.app.state,
+        "phase0_mutation_authorizer",
+        lambda _request: True,
+        raising=False,
+    )
     # start_all is mocked to avoid spawning a real background thread full of
     # real subprocess calls -- this test only proves the middleware/route
     # allow this request through, not the batch-execution logic itself
@@ -52,6 +64,18 @@ def test_selected_collection_starts_and_overlap_is_refused(monkeypatch):
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "phase0_network_authorizer",
+        lambda _client, _host: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module.app.state,
+        "phase0_mutation_authorizer",
+        lambda _request: True,
+        raising=False,
+    )
     monkeypatch.setattr(main_module._local_collection, "start", lambda collector_id, cli_args: True)
     monkeypatch.setattr(main_module._local_collection, "snapshot", lambda: {"status": "RUNNING", "running": True, "collector_id": "timex_news"})
     with TestClient(main_module.app) as client:
@@ -71,6 +95,18 @@ def test_run_all_overlap_with_single_collector_is_refused(monkeypatch):
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "phase0_network_authorizer",
+        lambda _client, _host: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module.app.state,
+        "phase0_mutation_authorizer",
+        lambda _request: True,
+        raising=False,
+    )
     with TestClient(main_module.app) as client:
         monkeypatch.setattr(main_module._local_collection, "start", lambda collector_id, cli_args: True)
         started = client.post("/operations/run/timex_news")

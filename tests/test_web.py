@@ -41,8 +41,14 @@ def web_client(tmp_path: Path, monkeypatch):
 
     from app.main import app
 
+    app.state.phase0_network_authorizer = lambda _client, _host: True
+    app.state.phase0_mutation_authorizer = lambda _request: True
+
     client = TestClient(app)
     yield client
+
+    app.state.phase0_network_authorizer = None
+    app.state.phase0_mutation_authorizer = None
 
     get_settings.cache_clear()
     db_session_module._engine = None

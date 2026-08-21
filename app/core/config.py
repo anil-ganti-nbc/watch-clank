@@ -3,7 +3,9 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+import ipaddress
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,6 +48,19 @@ class Settings(BaseSettings):
     app_host: str = Field(default="127.0.0.1")
     app_port: int = Field(default=8765)
     debug: bool = Field(default=False)
+
+    @field_validator("app_host")
+    @classmethod
+    def dashboard_must_be_loopback(cls, value: str) -> str:
+        try:
+            loopback = ipaddress.ip_address(value).is_loopback
+        except ValueError:
+            loopback = value.lower() == "localhost"
+        if not loopback:
+            raise ValueError(
+                "Watch Clank has no authenticated remote dashboard profile; APP_HOST must be loopback"
+            )
+        return value
 
     # Discord alert delivery (Sprint 2). Secrets come from env/.env only —
     # never commit a webhook URL. Both default to None (disabled/no-op).
