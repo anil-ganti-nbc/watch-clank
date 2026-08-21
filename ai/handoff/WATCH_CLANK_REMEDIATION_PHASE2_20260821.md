@@ -313,3 +313,53 @@ Not merged to main.
   "expected next run by X" per source beyond heartbeat.
 - *Every known blind spot closed or explicitly visible*: YES — Casio JP
   closed; Citizen UK / price-availability / Orient / social documented here.
+
+---
+
+# OPERATOR ACCEPTANCE (2026-08-21) — MERGED TO MAIN
+
+Verdict: **ready to merge into main and begin controlled field testing;
+NOT approved for Hetzner deployment.** Merged as `e20eeb3`.
+
+## Live acceptance evidence (clean temp DB, real network, all 20 collectors)
+
+- The original live complaint corpus reacted exactly as the operator would
+  manually: TW2Y27900, TW2W52400, TW4B07700, TW5M46400, TW7C05800 all
+  FIRST_SEEN_BY_CLANK (WEAK; bulk-touch cluster detected on their shared
+  same-morning published_at) — never fake NEW_REFERENCE.
+- Three genuinely fresh Timex launches (Expedition Pioneer Automatic pair,
+  seconds apart, same YGroup family + Expedition Field Post Titanium,
+  published the day before the run) survived baseline via the freshness
+  override and earned NEW_REFERENCE (MEDIUM): precision without
+  castrating recall.
+- casio_jp_sitemap initialized 2,655 watches with zero-event baseline;
+  stable repeat = 0/0; a synthetic next-week delta produced exactly one
+  honest FIRST_SEEN. GBA-950-1A/-2A/-7A and GCW-B5000UN-1/-6 verified
+  present in the source.
+- Citizen enrichment bounded; UNKNOWN provenance honest.
+- Migration 011 preserved all 66 real field-test reviews incl. correction
+  history; DUPLICATE accepted post-migration.
+- Packaged macOS app rebuilt at 0900f19: FIELD TEST profile, LOCAL_OPERATOR
+  authority, QC reaches routes, unapproved POSTs 403, zero Discord env.
+
+## Operator rulings recorded
+
+1. **30-item initialization queue behaviour is correct as shipped** — pure
+   silence would bury weak-but-interesting items forever; Discord-ing 30
+   uncertain items would be intolerable; GUI-only review queue is the right
+   middle ground.
+2. **Follow-up metric (non-blocking): baseline FIRST_SEEN backlog**, tracked
+   separately from steady-state FIRST_SEEN volume, so initialization residue
+   (e.g. a future collector producing 700 weak observations) is immediately
+   distinguishable from a precision regression.
+3. **Hetzner runbook amendment**: after casio_jp_sitemap auto-baselines, a
+   REPEAT RUN is mandatory deployment acceptance before enabling normal
+   cadence — first run ~2,655 baseline / 0 novelty events; second unchanged
+   run 0 new / 0 events. Same repeat-run invariant applies to any source
+   whose deployment state has drifted enough that Watch Clank considers it
+   never-run.
+4. **Next phase is empirical, not architectural**: let field-test collectors
+   feed the QC queue and collect performance data. The question to answer:
+   does the Casio JP lane catch releases before manual discovery? If not,
+   target remaining announcement/specialist surfaces — do NOT redesign
+   novelty semantics again.
