@@ -1548,7 +1548,7 @@ def test_casio_production_path_emits_events_by_default(db_session: Session, tmp_
     out2 = pipeline.process_news_announcement(fr2, run_id=run.id, emit_events=False)
     assert out2["success"]
     assert "watch_events" not in out2
-    assert db_session.scalars(select(Event)).count() == 1  # unchanged by the silent call
+    assert len(db_session.scalars(select(Event)).all()) == 1  # unchanged by the silent call
 
 
 def test_editorial_scoring_is_explainable_and_bounded():
