@@ -108,35 +108,11 @@ def _parse_announcement_date(raw: str | None) -> datetime | None:
     return _parse_free_text_announcement_date(raw)
 
 
-# 2026-08-19 hotfix (Timex Atelier NBR strap incident: a real blog post,
-# "Timex Atelier NBR Synthetic Rubber Strap: Signature By Design. Now
-# Available Separately.", extracted a real SKU (TW7D18600) via the same
-# image-filename path used for genuine watch launches, and would have
-# created a NEW_REFERENCE Event for a strap). Deliberately a narrow,
-# high-precision phrase match on the title -- NOT a bare "strap" keyword
-# ban, which would misfire on legitimate titles like "... Leather Strap
-# Watch" (a confirmed real, common Timex catalogue title shape). Official
-# marketing copy for an accessory-only post reliably says the product is
-# sold/available "separately" from a watch; a genuine watch launch post
-# never does. False negatives (an accessory post that doesn't use this
-# phrasing slips through) are the accepted cost, matching this module's
-# existing precision-over-recall discipline for anything that could create
-# a confidently-wrong Event.
-_ACCESSORY_ONLY_TITLE_PHRASES = (
-    "available separately",
-    "sold separately",
-    "strap only",
-    "band only",
-    "replacement strap",
-    "replacement band",
-)
-
-
-def _looks_like_accessory_only(title: str | None) -> bool:
-    if not title:
-        return False
-    lowered = title.lower()
-    return any(phrase in lowered for phrase in _ACCESSORY_ONLY_TITLE_PHRASES)
+# 2026-08-19 accessory gate; 2026-08-21 the phrase list moved to
+# app.services.editorial (shared with the specialist-lead classifier,
+# which had the identical hole). Kept as a thin alias here so the
+# pipeline call site reads the same.
+from app.services.editorial import looks_like_accessory_only as _looks_like_accessory_only
 
 
 class PipelineService:
@@ -1084,6 +1060,104 @@ class PipelineService:
             window_hours=get_settings().product_baseline_freshness_window_hours,
         )
 
+    def _publication_cluster_shape(self, *, watch: Watch, published_at: datetime) -> dict:
+        """Is a fresh `published_at` a launch signature or maintenance noise?
+
+        Live evidence from the real Hetzner catalogue (see
+        ai/handoff/INCIDENT_20260819_EMERGENCY_HOTFIX.md, "published_at is
+        not launch authority"): genuine coordinated launches share
+        timestamps SECONDS apart within ONE collection (Cavatina Luxe: 5
+        SKUs / 6 seconds; TW6A E-Line: 3 SKUs / 3 seconds), while routine
+        catalogue-sync batches touch many unrelated collections at once (a
+        23-product cluster spanning Waterbury Classic, Easy Reader,
+        Weekender and Q Timex Marbella off one identical timestamp). A
+        source timestamp can mean launch, migration, maintenance,
+        republishing or localisation -- the cluster SHAPE is what
+        distinguishes them.
+
+        Returns {"siblings": N, "collections": M} where siblings = other
+        watches of the same manufacturer with a parseable published_at
+        within bulk_touch_proximity_seconds (default 90, the same
+        empirically-justified window find_baseline_catchup_candidates
+        uses), and collections = distinct non-null collections among
+        watch + siblings. Deliberately bounded work: only novelty-event
+        paths call this, which are rare in steady state.
+        """
+        proximity = timedelta(seconds=get_settings().bulk_touch_proximity_seconds)
+        rows = (
+            self.session.query(Watch.id, Watch.collection, Watch.extra_specs)
+            .filter(
+                Watch.manufacturer == watch.manufacturer,
+                Watch.id != watch.id,
+            )
+            .all()
+        )
+        siblings = 0
+        collections = {watch.collection}
+        for other_id, other_collection, other_specs in rows:
+            other_published = self._parse_extra_specs_published_at(other_specs)
+            if other_published is None:
+                continue
+            if abs((other_published - published_at).total_seconds()) > proximity.total_seconds():
+                continue
+            siblings += 1
+            collections.add(other_collection)
+        return {"siblings": siblings, "collections": len({c for c in collections if c})}
+
+    def _publication_evidence_strength(
+        self, *, watch: Watch, published_at: datetime | None, reactivation_note: str | None
+    ) -> tuple[str, dict]:
+        """Classify the strength of a first sighting's novelty evidence.
+
+        STRONG -- reserved for the official-news path (a first-party
+            announcement article IS a launch claim); handled in
+            _record_watch_event, never returned here.
+        MEDIUM -- a fresh source publication timestamp whose cluster shape
+            looks like a coordinated family launch (small sibling count,
+            or all siblings in one collection).
+        WEAK -- everything else: local absence only, a reactivation tag,
+            or a fresh timestamp embedded in a large cross-collection
+            sync batch (bulk-touch noise). WEAK never claims
+            NEW_REFERENCE.
+        """
+        if reactivation_note:
+            return "WEAK", {
+                "evidence_strength": "WEAK",
+                "cluster": None,
+                "strength_reason": "source-declared reactivation/backorder contradicts novelty",
+            }
+        if published_at is None:
+            return "WEAK", {
+                "evidence_strength": "WEAK",
+                "cluster": None,
+                "strength_reason": "no publication evidence; local absence is not launch evidence",
+            }
+        cluster = self._publication_cluster_shape(watch=watch, published_at=published_at)
+        suspicious = (
+            cluster["siblings"] + 1 >= get_settings().bulk_touch_cluster_min_size
+            and cluster["collections"] >= get_settings().bulk_touch_cluster_min_collections
+        )
+        if suspicious:
+            return "WEAK", {
+                "evidence_strength": "WEAK",
+                "cluster": cluster,
+                "strength_reason": (
+                    f"fresh published_at sits in a {cluster['siblings'] + 1}-product "
+                    f"{cluster['collections']}-collection same-source sync batch -- "
+                    "maintenance noise, not a launch signature"
+                ),
+            }
+        return "MEDIUM", {
+            "evidence_strength": "MEDIUM",
+            "cluster": cluster,
+            "strength_reason": (
+                f"fresh published_at with launch-like cluster shape "
+                f"({cluster['siblings'] + 1} product(s), "
+                f"{cluster['collections']} collection(s) within "
+                f"{get_settings().bulk_touch_proximity_seconds}s)"
+            ),
+        }
+
     def find_baseline_catchup_candidates(
         self, *, manufacturer: str | None = None, as_of: datetime | None = None
     ) -> list[dict]:
@@ -1121,13 +1195,30 @@ class PipelineService:
         noise) -- it's surfaced so create_baseline_catchup_events's
         required explicit watch_ids list is an informed human decision.
         """
-        from app.models import EventWatch
+        from app.models import Event, EventWatch
 
         now = ensure_utc(as_of) if as_of is not None else datetime.now(UTC)
         window = timedelta(days=get_settings().baseline_catchup_window_days)
 
-        has_event = self.session.query(EventWatch.watch_id).filter(EventWatch.watch_id == Watch.id).exists()
-        query = self.session.query(Watch).filter(~has_event)
+        # 2026-08-21: exclude only watches with an existing NOVELTY-CLAIMING
+        # event (NEW_REFERENCE / NEW_REGION). The original blanket "any
+        # Event" exclusion made sense when every catalogue discovery was
+        # either silent or a NEW_REFERENCE claim, but after the Phase 6
+        # novelty inversion an uncertain discovery carries FIRST_SEEN_BY_CLANK
+        # -- which is exactly the state catch-up exists to promote. Blocking
+        # promotion because of the honest label would have permanently locked
+        # every post-inversion 73-hour launch out of recovery (found by the
+        # Phase 2 semantic specimen corpus).
+        has_claim = (
+            self.session.query(EventWatch.event_id)
+            .join(Event, Event.id == EventWatch.event_id)
+            .filter(
+                EventWatch.watch_id == Watch.id,
+                Event.event_type.in_(("NEW_REFERENCE", "NEW_REGION")),
+            )
+            .exists()
+        )
+        query = self.session.query(Watch).filter(~has_claim)
         if manufacturer:
             query = query.filter(Watch.manufacturer == manufacturer)
 
@@ -1202,7 +1293,7 @@ class PipelineService:
         of Event -- only the reasons and an extra.belated_baseline_catchup
         flag distinguish it, both purely for human transparency.
         """
-        from app.models import EventWatch
+        from app.models import Event, EventWatch
         from app.services.editorial import EventEvidence, score_event
 
         results: list[dict] = []
@@ -1211,10 +1302,20 @@ class PipelineService:
             if watch is None:
                 results.append({"watch_id": watch_id, "created": False, "reason": "watch_not_found"})
                 continue
-            existing_event = (
-                self.session.query(EventWatch).filter(EventWatch.watch_id == watch_id).first()
+            # Same Phase 6 reconciliation as find_baseline_catchup_candidates:
+            # only a prior NOVELTY CLAIM blocks a belated NEW_REFERENCE. A
+            # FIRST_SEEN_BY_CLANK event is the honest-uncertainty state this
+            # function promotes, never a reason to refuse.
+            existing_claim = (
+                self.session.query(EventWatch)
+                .join(Event, Event.id == EventWatch.event_id)
+                .filter(
+                    EventWatch.watch_id == watch_id,
+                    Event.event_type.in_(("NEW_REFERENCE", "NEW_REGION")),
+                )
+                .first()
             )
-            if existing_event is not None:
+            if existing_claim is not None:
                 results.append({"watch_id": watch_id, "created": False, "reason": "already_has_event"})
                 continue
             first_obs = (
@@ -1410,8 +1511,11 @@ class PipelineService:
             # implemented here is the same bar already trusted for the
             # baseline override: the source's own structured publication
             # timestamp, within product_baseline_freshness_window_hours of
-            # this observation (classify_baseline_product_freshness). A
-            # source-declared REACTIVATED/backorder tag is affirmative
+            # this observation (classify_baseline_product_freshness) AND a
+            # launch-like cluster shape -- a fresh timestamp embedded in a
+            # large cross-collection sync batch is maintenance noise, not a
+            # launch signature (_publication_evidence_strength). A source-
+            # declared REACTIVATED/backorder tag is affirmative
             # counter-evidence and always wins. Absence of prior local
             # rows, a new URL, and current stock are explicitly NOT
             # novelty evidence. Recall is preserved, not suppressed: a
@@ -1420,7 +1524,15 @@ class PipelineService:
             # it cannot prove. The official-news path (_record_watch_event)
             # keeps NEW_REFERENCE for is_new_watch because a first-party
             # announcement article IS affirmative launch evidence.
-            publication_fresh = baseline_freshness is not None and baseline_freshness.state == "FRESH"
+            published_at = self._parse_extra_specs_published_at(watch.extra_specs)
+            strength, strength_detail = self._publication_evidence_strength(
+                watch=watch, published_at=published_at, reactivation_note=reactivation_note
+            )
+            publication_fresh = (
+                baseline_freshness is not None
+                and baseline_freshness.state == "FRESH"
+                and strength == "MEDIUM"
+            )
             if reactivation_note:
                 event_type = "FIRST_SEEN_BY_CLANK"
             elif publication_fresh:
@@ -1432,24 +1544,19 @@ class PipelineService:
                 "collector_id": new_obs.collector_id,
                 "region": new_obs.region,
                 "local_first_seen_at": ensure_utc(new_obs.observed_at).isoformat(),
-                "source_published_at": (
-                    self._parse_extra_specs_published_at(watch.extra_specs).isoformat()
-                    if self._parse_extra_specs_published_at(watch.extra_specs)
-                    else None
-                ),
+                "source_published_at": published_at.isoformat() if published_at else None,
                 "existed_locally_before": False,
                 "source_reactivation_signal": bool(reactivation_note),
                 "publication_freshness_state": baseline_freshness.state if baseline_freshness else None,
                 "baseline_state": "ACTIVE" if baseline_active else "INACTIVE",
                 "official_article_corroboration": None,
+                "evidence_strength": strength_detail["evidence_strength"],
+                "cluster_shape": strength_detail["cluster"],
                 "classification_reason": (
-                    "source-declared reactivation/backorder"
-                    if reactivation_note
-                    else (
-                        f"affirmative source publication evidence ({baseline_freshness.reason})"
-                        if publication_fresh
-                        else "no affirmative novelty evidence; local absence is not launch evidence"
-                    )
+                    strength_detail["strength_reason"]
+                    if not publication_fresh
+                    else f"affirmative source publication evidence ({baseline_freshness.reason}; "
+                    f"{strength_detail['strength_reason']})"
                 ),
             }
 

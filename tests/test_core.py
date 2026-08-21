@@ -1933,7 +1933,8 @@ def test_citizen_product_baseline_observation_creates_first_seen_event(db_sessio
     ne = events[0].extra["novelty_evidence"]
     assert ne["existed_locally_before"] is False
     assert ne["source_published_at"] is None
-    assert "no affirmative novelty evidence" in ne["classification_reason"]
+    assert ne["evidence_strength"] == "WEAK"
+    assert "no publication evidence" in ne["classification_reason"]
 
 
 def test_citizen_product_repeat_identical_fetch_creates_no_duplicate_event(db_session: Session, tmp_settings: Settings):

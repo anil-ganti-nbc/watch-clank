@@ -43,6 +43,19 @@ class Settings(BaseSettings):
     # 12-hour sitemap lane.
     zero_item_warning_streak: int = Field(default=3, ge=1)
 
+    # Bulk-touch detection for source publication timestamps (2026-08-21
+    # Phase 2 evidence-strength work; live shapes documented in
+    # ai/handoff/INCIDENT_20260819_EMERGENCY_HOTFIX.md): a fresh
+    # published_at shared by >= bulk_touch_cluster_min_size products
+    # spanning >= bulk_touch_cluster_min_collections DISTINCT collections
+    # within bulk_touch_proximity_seconds is routine catalogue-sync noise,
+    # not a coordinated launch. Genuine launch families observed live were
+    # small (3-5 SKUs) and single-collection; maintenance batches were 14+
+    # products across many unrelated collections.
+    bulk_touch_proximity_seconds: int = Field(default=90, ge=1)
+    bulk_touch_cluster_min_size: int = Field(default=8, ge=2)
+    bulk_touch_cluster_min_collections: int = Field(default=3, ge=2)
+
     log_level: str = Field(default="INFO")
     log_format: str = Field(default="json")
     log_dir: Path = Field(default=Path("./data/logs"))

@@ -18,7 +18,11 @@ from app.core.logging import get_logger
 from app.core.time import ensure_utc
 from app.models import CollectorRun, SourceObservation, SpecialistLead, Watch
 from app.services.discord_notify import DiscordNotifier
-from app.services.editorial import format_correlation_followup_alert, format_early_warning_alert
+from app.services.editorial import (
+    format_correlation_followup_alert,
+    format_early_warning_alert,
+    looks_like_accessory_only,
+)
 from app.services.epoch import get_active_epoch, is_baseline_active
 from app.services.freshness import classify_lead_freshness
 from app.services.run_lock import RunLockService
@@ -87,6 +91,14 @@ def classify_lead_type(
     blob = f"{title} {claim_text or ''}"
     if _LEAK_EVIDENCE_RE.search(blob):
         return "LEAKED_IMAGE"
+    # 2026-08-21 (Phase 2 specimen corpus): accessory-only posts must be
+    # classified BEFORE reference presence is allowed to decide. The
+    # Atelier NBR strap sale carried a real-looking SKU, and the previous
+    # order let that SKU outrank the sale language -- producing a
+    # POSSIBLE_NEW_REFERENCE lead for a strap. Same phrase contract as the
+    # official-news gate (editorial.looks_like_accessory_only).
+    if looks_like_accessory_only(title):
+        return "EARLY_RETAIL_LISTING"
     if reference_candidates:
         return "POSSIBLE_NEW_REFERENCE"
     if _DEAL_RE.search(blob):
