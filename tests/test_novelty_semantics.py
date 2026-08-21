@@ -510,3 +510,53 @@ def test_first_seen_alert_cannot_resemble_confirmed_launch():
     )
     assert "UNCONFIRMED" in first_seen and "needs review" in first_seen
     assert "UNCONFIRMED" not in new_ref
+
+
+def test_first_seen_events_do_not_ring_discord_by_default(db_session: Session, tmp_settings: Settings):
+    """Live-validated flood class: the initial post-baseline crawl of a
+    17.8k-URL catalogue emits hundreds of FIRST_SEEN events per run. They
+    must stay reviewable but silent unless explicitly opted in."""
+    from unittest.mock import patch
+
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = _watch(db_session, ref="TWQUIET01")
+    obs = _obs(watch.id)
+    db_session.add(obs)
+    db_session.flush()
+
+    calls: list[str] = []
+    configured = Settings(
+        discord_editorial_webhook_url="https://discord.example/editorial",
+        discord_experimental_min_score=0.0,
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    with (
+        patch("app.services.pipeline.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204})()),
+    ):
+        result = pipeline._record_product_transition(
+            watch=watch, new_obs=obs, is_new_watch=True, experimental=True, notify=True
+        )
+    assert result["event_type"] == "FIRST_SEEN_BY_CLANK"
+    event = db_session.query(Event).one()
+    assert event.extra["alerted"] is False
+    assert calls == []  # reviewable, not audible
+
+    # an affirmative NEW_REFERENCE under identical config still alerts
+
+    watch2 = _watch(db_session, ref="TWLOUD01", extra={"published_at": _fresh(1)})
+    obs2 = _obs(watch2.id, url="https://example.test/loud")
+    db_session.add(obs2)
+    db_session.flush()
+    with (
+        patch("app.services.pipeline.get_settings", return_value=configured),
+        patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204})()),
+    ):
+        result2 = pipeline._record_product_transition(
+            watch=watch2, new_obs=obs2, is_new_watch=True, experimental=True, notify=True
+        )
+    assert result2["event_type"] == "NEW_REFERENCE"
+    assert len(calls) == 1  # genuine launch evidence still rings

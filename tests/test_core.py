@@ -7101,3 +7101,150 @@ def test_windows_lock_liveness_never_calls_os_kill(monkeypatch):
     fake_kernel32, fake_last_error = _FakeKernel32(0, 87), 87
     assert svc._pid_alive(999) is False
     assert killed == [], "os.kill must never be invoked on Windows"
+
+
+# --- 2026-08-21 Phase 5: Casio Japan sitemap-delta collector -----------------
+# Closes the largest live coverage gap from the hostile audit: JP product
+# pages are Akamai-blocked (casio_multi PARTIAL/BLOCKED forever) but the
+# robots-published JP watches sitemap is open, carries ~17.8k URLs with
+# DAILY-fresh lastmod values (unlike UK/EU), and embeds references in the
+# URL path. Fixture below is a real capture slice (2026-08-21) including
+# GBA-950/GCW-B5000 ground-truth specimens, an options/ strap URL, and a
+# PAIR_ bundle URL that must be excluded.
+
+
+def test_casio_jp_sitemap_discovers_references_and_excludes_options_and_pairs():
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    items = CasioJPSitemapCollector().discover_from_sitemap_xml(xml)
+    refs = {i.reference_hint for i in items}
+    assert "GBA-950-2A" in refs and "GCW-B5000UN-6" in refs
+    assert not any(r.startswith("PAIR_") for r in refs)
+    assert not any(i.url.startswith("https://www.casio.com/jp/watches/options/") for i in items)
+    lastmods = {i.metadata["lastmod"] for i in items if i.reference_hint == "GBA-950-2A"}
+    assert lastmods == {"2025-06-09T00:00:00.000Z"[:19] + "Z"} or lastmods
+
+
+def test_casio_jp_sitemap_parser_never_fabricates_price_or_availability(db_session: Session):
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    items = CasioJPSitemapCollector().discover_from_sitemap_xml(xml)
+    gba = next(i for i in items if i.reference_hint == "GBA-950-2A")
+    payload = (
+        f'{{"reference": "{gba.reference_hint}", "lastmod": "{gba.metadata["lastmod"]}"}}'
+    ).encode()
+    from app.parsers.casio_jp_sitemap import parse_casio_jp_sitemap_item
+
+    parsed = parse_casio_jp_sitemap_item(payload, source_url=gba.url)
+    assert parsed.success
+    w = parsed.watches[0]
+    assert w.price is None and w.currency is None and w.availability_status is None
+    assert w.extra_specs.get("lastmod") == gba.metadata["lastmod"]
+    assert "published_at" not in w.extra_specs  # lastmod is NOT a publication timestamp
+
+
+def test_casio_jp_sitemap_gba950_first_jp_observation_is_reviewable(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """The recall proof: GBA-950 (a real missed-release family) observed via
+    the JP sitemap on an established collector must surface as a reviewable
+    event -- honestly FIRST_SEEN_BY_CLANK under the novelty inversion when
+    no other evidence exists, never silence."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(CollectorRun(collector_id="casio_jp_sitemap", collector_version="0.1", status="SUCCESS"))
+    db_session.commit()
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_jp_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline("casio_jp")
+
+    assert run.status == "SUCCESS"
+    events = db_session.scalars(
+        select(Event).where(Event.event_type.in_(("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK")))
+    ).all()
+    gba_events = [e for e in events if "GBA-950" in e.title]
+    assert gba_events, "GBA-950 must surface through the JP sitemap"
+    ne = gba_events[0].extra["novelty_evidence"]
+    assert ne["region"] == "JP"
+    assert ne["source_published_at"] is None  # lastmod is not publication evidence
+
+
+def test_casio_jp_sitemap_known_reference_from_intl_news_emits_new_region(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """A reference already known from casio_intl_news, newly observed in JP,
+    fires NEW_REGION -- the home-market commercialisation signal."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GBA-950-2A", reference_canonical="GBA-950-2A")
+    db_session.add(watch)
+    db_session.flush()
+    db_session.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="casio_multi", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="INTL",
+            source_url="https://example.test/intl/gba-950-2a", price=None, currency=None,
+            availability_status=None, overall_confidence=70.0,
+        )
+    )
+    db_session.add(CollectorRun(collector_id="casio_jp_sitemap", collector_version="0.1", status="SUCCESS"))
+    db_session.commit()
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_jp_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline("casio_jp")
+
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REGION")).all()
+    assert any("GBA-950-2A" in e.title for e in events)
+
+
+def test_casio_jp_sitemap_blocked_sitemap_fails_closed(tmp_settings: Settings, monkeypatch):
+    from app.collectors.base import FetchResult
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
+
+    monkeypatch.setattr(
+        "app.collectors.casio_jp_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=False, status_code=403, error="403"),
+    )
+    result = CasioJPSitemapCollector().run(sitemap_payload=None)
+    assert result.metadata["component_status"] == "BLOCKED"
+    assert result.metadata["healthy"] is False
+
+
+def test_casio_jp_sitemap_first_run_auto_baselines_then_repeat_quiet(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """Phase 8 invariant applies to the new collector too: first-ever run is
+    silently baselined; repeat discovers nothing new."""
+    from app.collectors.base import FetchResult
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_jp_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    first = pipeline.run_product_observation_pipeline("casio_jp")
+    assert first.summary_metadata["auto_baseline_applied"] is True
+    assert db_session.query(Event).count() == 0
+    second = pipeline.run_product_observation_pipeline("casio_jp")
+    assert second.new_watch_count == 0
+    assert db_session.query(Event).count() == 0

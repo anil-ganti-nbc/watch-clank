@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     bulk_touch_cluster_min_size: int = Field(default=8, ge=2)
     bulk_touch_cluster_min_collections: int = Field(default=3, ge=2)
 
+    # Whether FIRST_SEEN_BY_CLANK events may ring the editorial Discord.
+    # Default False (2026-08-21): live validation of casio_jp_sitemap showed
+    # an established catalogue's initial post-baseline crawl emits hundreds
+    # of honestly-labelled first-sightings per run -- exactly what the QC
+    # queue is for, and exactly what an alert channel is not for. They stay
+    # fully visible in /intelligence and the review queue; only the ping is
+    # suppressed. Flip to true only if the operator wants uncertainty in
+    # the alert channel too.
+    discord_first_seen_enabled: bool = Field(default=False)
+
     log_level: str = Field(default="INFO")
     log_format: str = Field(default="json")
     log_dir: Path = Field(default=Path("./data/logs"))

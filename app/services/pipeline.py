@@ -1769,7 +1769,17 @@ class PipelineService:
             score=scored.score,
         )
 
-        if notify and editorial_eligible:
+        # 2026-08-21: FIRST_SEEN_BY_CLANK is reviewable, not audible. The
+        # initial post-baseline crawl of a large catalogue emits hundreds of
+        # honest first-sightings per run (live-verified with casio_jp_sitemap:
+        # 400 in one run); at the experimental lane's threshold of 0 every
+        # one of them would ring Discord. They stay fully visible in the
+        # dashboard and QC queue; only the ping is gated behind an explicit
+        # operator opt-in.
+        first_seen_alertable = (
+            scored.event_type != "FIRST_SEEN_BY_CLANK" or settings.discord_first_seen_enabled
+        )
+        if notify and editorial_eligible and first_seen_alertable:
             notifier = DiscordNotifier(settings)
             threshold = (
                 settings.discord_experimental_min_score if experimental else settings.discord_official_min_score
@@ -2605,6 +2615,14 @@ class PipelineService:
                 REGION as CASIO_EU_REGION,
             )
             from app.collectors.casio_europe_sitemap import CasioEuropeSitemapCollector
+            from app.collectors.casio_jp_sitemap import (
+                COLLECTOR_ID as CASIO_JP_ID,
+            )
+            from app.collectors.casio_jp_sitemap import (
+                COLLECTOR_VERSION as CASIO_JP_VER,
+            )
+            from app.collectors.casio_jp_sitemap import REGION as CASIO_JP_REGION
+            from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
             from app.collectors.casio_uk_sitemap import (
                 COLLECTOR_ID as CASIO_UK_ID,
             )
@@ -2674,6 +2692,7 @@ class PipelineService:
                 TimexProductsCollector,
             )
             from app.parsers.casio_europe_sitemap import parse_casio_europe_sitemap_item
+            from app.parsers.casio_jp_sitemap import parse_casio_jp_sitemap_item
             from app.parsers.casio_uk_sitemap import parse_casio_uk_sitemap_item
             from app.parsers.citizen_de_products import parse_citizen_de_product_html
             from app.parsers.citizen_products import parse_citizen_search_hit
@@ -2689,6 +2708,16 @@ class PipelineService:
                         "collector_version": CASIO_UK_VER,
                         "parse_fn": parse_casio_uk_sitemap_item,
                         "default_region": CASIO_UK_REGION,
+                        "offline_kwarg": "sitemap_payload",
+                        "default_max_items": 300,
+                        "known_urls_from_observations": True,
+                    },
+                    "casio_jp": {
+                        "collector_cls": CasioJPSitemapCollector,
+                        "collector_id": CASIO_JP_ID,
+                        "collector_version": CASIO_JP_VER,
+                        "parse_fn": parse_casio_jp_sitemap_item,
+                        "default_region": CASIO_JP_REGION,
                         "offline_kwarg": "sitemap_payload",
                         "default_max_items": 300,
                         "known_urls_from_observations": True,
