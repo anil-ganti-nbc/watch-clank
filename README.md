@@ -1,5 +1,9 @@
 # Watch Clank
 
+> **Phase 0: UNVERIFIED_PRODUCTION — promotion frozen.** The unauthenticated
+> dashboard supports loopback binding only; LAN, NAS, Tailscale, and public
+> exposure are unsupported until an authenticated profile exists.
+
 > Status: Experimental / under construction
 
 Editorial intelligence system for discovering new analog-watch releases.
