@@ -7299,3 +7299,26 @@ def test_citizen_enrichment_cap_and_failure_are_distinguishable(db_session: Sess
     provenances = [p.get("availability_provenance") for p in payloads]
     assert provenances.count("ENRICHMENT_FETCH_FAILED") == 1  # within cap, fetch failed
     assert provenances.count("NOT_ENRICHED_CAP") >= 1  # beyond cap entirely
+
+
+def test_event_review_supports_duplicate_disposition(db_session: Session, tmp_settings: Settings):
+    """Phase 9: a duplicate Event is a real editorial disposition. The
+    vocabulary now matches SpecialistLeadReview (plus OUT_OF_STOCK), and a
+    DUPLICATE verdict survives a real database CHECK constraint."""
+    from app.models import Event, EventReview, EventWatch, Watch
+    from app.services.qc import submit_review
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GA-2100-1A1",
+                  reference_canonical="GA-2100-1A1")
+    db_session.add(watch)
+    db_session.flush()
+    event = Event(event_type="NEW_REFERENCE", title="dup test", status="DRAFT")
+    db_session.add(event)
+    db_session.flush()
+    db_session.add(EventWatch(event_id=event.id, watch_id=watch.id, role="subject"))
+    db_session.commit()
+
+    review = submit_review(db_session, event=event, disposition="DUPLICATE", reason="same ref via casio_multi + jp sitemap")
+    assert review.disposition == "DUPLICATE"
+    stored = db_session.query(EventReview).one()
+    assert stored.disposition == "DUPLICATE"
