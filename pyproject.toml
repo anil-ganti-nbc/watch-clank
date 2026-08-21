@@ -17,6 +17,7 @@ dependencies = [
     "python-multipart>=0.0.17",
     "structlog>=24.4.0",
     "orjson>=3.10.0",
+    "tzdata>=2025.2; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

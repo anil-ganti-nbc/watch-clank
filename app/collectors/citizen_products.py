@@ -274,10 +274,14 @@ class CitizenProductsCollector:
         # zero real HTTP calls, exactly as before this change.
         known_urls = known_product_urls or set()
         new_urls: set[str] = set()
+        capped_out = 0
         if fetch_availability_for_new and max_items is not None:
-            new_urls = {i.url for i in items if i.url not in known_urls}
-            if len(new_urls) > MAX_AVAILABILITY_ENRICHMENT_FETCHES:
-                new_urls = set(list(new_urls)[:MAX_AVAILABILITY_ENRICHMENT_FETCHES])
+            all_new = {i.url for i in items if i.url not in known_urls}
+            if len(all_new) > MAX_AVAILABILITY_ENRICHMENT_FETCHES:
+                capped_out = len(all_new) - MAX_AVAILABILITY_ENRICHMENT_FETCHES
+                new_urls = set(list(all_new)[:MAX_AVAILABILITY_ENRICHMENT_FETCHES])
+            else:
+                new_urls = all_new
         offline = search_pages is not None
         for item in items:
             if item.url in new_urls:
@@ -293,13 +297,24 @@ class CitizenProductsCollector:
                 if detail_fr.success and detail_fr.payload:
                     result.fetched.append(detail_fr)
                     continue
-            product_dict = item.metadata.get("product_dict")
+            product_dict = dict(item.metadata.get("product_dict") or {})
+            # Availability provenance (2026-08-21): make WHY an observation
+            # is UNKNOWN visible downstream instead of conflating "source
+            # has no field" with "we could not enrich". Item 61+ of a cap
+            # overflow and a failed detail fetch are different facts.
+            if item.url in new_urls:
+                product_dict["availability_provenance"] = "ENRICHMENT_FETCH_FAILED"
+            elif capped_out and item.url not in known_urls:
+                product_dict["availability_provenance"] = "NOT_ENRICHED_CAP"
             result.fetched.append(
                 FetchResult(
                     url=item.url, success=True, status_code=200, content_type="application/json",
                     payload=json.dumps(product_dict).encode("utf-8"),
                 )
             )
+
+        if capped_out:
+            result.metadata["availability_enrichment_capped_out"] = capped_out
 
         useful = sum(1 for f in result.fetched if f.success)
         status = component_status_from_fetches(

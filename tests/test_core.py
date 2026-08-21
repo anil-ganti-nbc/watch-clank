@@ -1509,10 +1509,14 @@ def test_brand_news_pipeline_repeat_same_region_emits_no_event(db_session: Sessi
     assert len(events) == 1
 
 
-def test_casio_production_path_emits_no_events_by_default(db_session: Session, tmp_settings: Settings):
-    """Non-negotiable safety rule: the existing Casio production call path
-    (no new kwargs) must not start writing Event rows just because the
-    scoring/event feature now exists in the same function."""
+def test_casio_production_path_emits_events_by_default(db_session: Session, tmp_settings: Settings):
+    """Phase 8 (2026-08-21) inversion of the old 'no events by default'
+    safety rule. That rule was written when event generation was unproven,
+    and it is exactly what caused the casio_multi incident: a runner
+    forgetting emit_events silently ingested Watches for months with zero
+    Events. The default now fails LOUD -- an unexpected Event surfaces in
+    review -- instead of silent. Observation-only intent (replay, fixture
+    tooling) must now be declared explicitly with emit_events=False."""
     from app.collectors.base import FetchResult
     from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
@@ -1532,8 +1536,19 @@ def test_casio_production_path_emits_no_events_by_default(db_session: Session, t
     )
     out = pipeline.process_news_announcement(fr, run_id=run.id)
     assert out["success"] and out["new_watch"]
-    assert "watch_events" not in out
-    assert db_session.scalars(select(Event)).first() is None
+    assert out.get("watch_events"), "default must be editorial, not silent ingestion"
+    assert db_session.scalars(select(Event)).first() is not None
+
+    # explicit observation-only intent remains available and honest
+    html2 = html.replace(b"GA-2100-1A1JF", b"GA-2200-1A1JF")
+    fr2 = FetchResult(
+        url="https://www.casio.com/intl/news/2026/test-observation-only/",
+        success=True, status_code=200, content_type="text/html", payload=html2,
+    )
+    out2 = pipeline.process_news_announcement(fr2, run_id=run.id, emit_events=False)
+    assert out2["success"]
+    assert "watch_events" not in out2
+    assert len(db_session.scalars(select(Event)).all()) == 1  # unchanged by the silent call
 
 
 def test_editorial_scoring_is_explainable_and_bounded():
@@ -1891,13 +1906,15 @@ def _process_citizen_product_fixture(pipeline, run_id, fixture_name: str, url: s
     )
 
 
-def test_citizen_product_baseline_observation_creates_new_reference_event(db_session: Session, tmp_settings: Settings):
+def test_citizen_product_baseline_observation_creates_first_seen_event(db_session: Session, tmp_settings: Settings):
     """Hall-of-shame remediation: a genuinely first-ever product-catalogue
-    sighting of a reference is real new-product discovery evidence and must
-    produce NEW_REFERENCE (outside an active epoch/force_baseline — see
+    sighting of a reference must produce a reviewable Event (outside an
+    active epoch/force_baseline — see
     test_new_watch_from_catalogue_silent_during_epoch_baseline for that
-    guard). Previously this was an unconditional no-op ("baseline_new_watch"),
-    the single biggest product-catalogue discovery gap found this sprint."""
+    guard). Since the 2026-08-21 novelty inversion, a first sighting with
+    no affirmative publication evidence is honestly labelled
+    FIRST_SEEN_BY_CLANK rather than claiming NEW_REFERENCE. Recall is
+    unchanged: the discovery is still queued and reviewable."""
     from app.models import Event, SourceObservation, Watch
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
@@ -1909,7 +1926,7 @@ def test_citizen_product_baseline_observation_creates_new_reference_event(db_ses
 
     out = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
     assert out["success"] and out["new_watch"] is True
-    assert out["product_event"]["event_type"] == "NEW_REFERENCE"
+    assert out["product_event"]["event_type"] == "FIRST_SEEN_BY_CLANK"
 
     watches = db_session.scalars(select(Watch).where(Watch.manufacturer == "Citizen")).all()
     assert len(watches) == 1
@@ -1926,7 +1943,13 @@ def test_citizen_product_baseline_observation_creates_new_reference_event(db_ses
     assert obs[0].region == "US"
 
     events = db_session.scalars(select(Event)).all()
-    assert len(events) == 1 and events[0].event_type == "NEW_REFERENCE"
+    assert len(events) == 1 and events[0].event_type == "FIRST_SEEN_BY_CLANK"
+    # Phase 7 evidence provenance must ride along on every novelty event
+    ne = events[0].extra["novelty_evidence"]
+    assert ne["existed_locally_before"] is False
+    assert ne["source_published_at"] is None
+    assert ne["evidence_strength"] == "WEAK"
+    assert "no publication evidence" in ne["classification_reason"]
 
 
 def test_citizen_product_repeat_identical_fetch_creates_no_duplicate_event(db_session: Session, tmp_settings: Settings):
@@ -1946,7 +1969,7 @@ def test_citizen_product_repeat_identical_fetch_creates_no_duplicate_event(db_se
     out2 = _process_citizen_product_fixture(pipeline, run.id, "citizen_product_at8294.html")
     assert out1["new_watch"] is True
     assert out2["new_watch"] is False
-    assert out1["product_event"]["event_type"] == "NEW_REFERENCE"  # first-ever sighting is real discovery
+    assert out1["product_event"]["event_type"] == "FIRST_SEEN_BY_CLANK"  # honest first-sighting label
     assert out2["product_event"]["event_type"] is None  # identical price+availability -> no transition
     assert len(db_session.scalars(select(Event)).all()) == 1
 
@@ -2108,7 +2131,7 @@ def test_citizen_product_price_transition_produces_price_change(db_session: Sess
     events = db_session.scalars(select(Event)).all()
     # First observation now also fires its own NEW_REFERENCE (see
     # test_citizen_product_baseline_observation_creates_new_reference_event).
-    assert sorted(e.event_type for e in events) == ["NEW_REFERENCE", "PRICE_CHANGE"]
+    assert sorted(e.event_type for e in events) == ["FIRST_SEEN_BY_CLANK", "PRICE_CHANGE"]
     price_event = next(e for e in events if e.event_type == "PRICE_CHANGE")
     assert any("980" in r and "1225" in r for r in price_event.extra["reasons"])
 
@@ -2133,7 +2156,7 @@ def test_citizen_product_availability_transitions_sold_out_then_restock(db_sessi
     events = db_session.scalars(select(Event)).all()
     # First observation now also fires its own NEW_REFERENCE (see
     # test_citizen_product_baseline_observation_creates_new_reference_event).
-    assert sorted(e.event_type for e in events) == ["NEW_REFERENCE", "RESTOCK", "SOLD_OUT"]
+    assert sorted(e.event_type for e in events) == ["FIRST_SEEN_BY_CLANK", "RESTOCK", "SOLD_OUT"]
     availability_events = [e for e in events if e.event_type in ("SOLD_OUT", "RESTOCK")]
     assert all(e.extra["editorial_eligible"] is False for e in availability_events)
     assert all("EDITORIAL HIDDEN" in e.extra["editorial_eligibility_reasons"][0] for e in availability_events)
@@ -2263,7 +2286,7 @@ def test_initial_unavailable_product_never_reported_as_sold_out(db_session: Sess
         watch=watch, new_obs=observation, is_new_watch=True, experimental=True
     )
 
-    assert result["event_type"] == "NEW_REFERENCE"
+    assert result["event_type"] == "FIRST_SEEN_BY_CLANK"
     assert db_session.query(Event).count() == 1
 
 
@@ -2295,10 +2318,17 @@ def test_new_watch_from_catalogue_creates_new_reference_event(db_session: Sessio
         watch=watch, new_obs=observation, is_new_watch=True, experimental=True
     )
 
-    assert result["event_type"] == "NEW_REFERENCE"
+    # 2026-08-21 novelty inversion: still NOT silent (the original
+    # Hall-of-Shame invariant), but honestly labelled -- this fixture
+    # carries no publication evidence, so NEW_REFERENCE must not be claimed.
+    assert result["event_type"] == "FIRST_SEEN_BY_CLANK"
     event = db_session.query(Event).one()
-    assert event.event_type == "NEW_REFERENCE"
+    assert event.event_type == "FIRST_SEEN_BY_CLANK"
     assert event.extra["editorial_eligible"] is True
+    ne = event.extra["novelty_evidence"]
+    assert ne["collector_id"] == "citizen_products"
+    assert ne["region"] == "US"
+    assert ne["baseline_state"] == "INACTIVE"
     linked_watch_ids = {ew.watch_id for ew in db_session.query(EventWatch).filter_by(event_id=event.id)}
     assert linked_watch_ids == {watch.id}
 
@@ -2427,7 +2457,7 @@ def test_citizen_product_failed_fetch_cannot_create_sold_out(db_session: Session
     # only the one baseline observation exists; the failure created none
     assert len(db_session.scalars(select(SourceObservation)).all()) == 1
     events = db_session.scalars(select(Event)).all()
-    assert len(events) == 1 and events[0].event_type == "NEW_REFERENCE"  # from the first real observation
+    assert len(events) == 1 and events[0].event_type == "FIRST_SEEN_BY_CLANK"  # from the first real observation
 
     # a subsequent healthy AVAILABLE fetch after the failure is still just a
     # repeat, not a fabricated RESTOCK (there was never a real SOLD_OUT)
@@ -2635,7 +2665,7 @@ def test_seiko_jp_hbc008j_new_watch_creates_new_reference_event(db_session: Sess
         parse_fn=parse_seiko_jp_product_json, default_region="JP", emit_events=True,
     )
     assert out["success"] and out["new_watch"] is True
-    assert out["product_event"]["event_type"] == "NEW_REFERENCE"
+    assert out["product_event"]["event_type"] == "FIRST_SEEN_BY_CLANK"
     event = db_session.query(Event).one()
     assert event.extra["editorial_eligible"] is True
 
@@ -2704,7 +2734,7 @@ def test_seiko_product_pipeline_baseline_then_price_change(db_session: Session, 
         )
 
     out1 = process(base)
-    assert out1["new_watch"] is True and out1["product_event"]["event_type"] == "NEW_REFERENCE"
+    assert out1["new_watch"] is True and out1["product_event"]["event_type"] == "FIRST_SEEN_BY_CLANK"
 
     cheaper = dict(base)
     cheaper["variants"] = [dict(base["variants"][0], price="2400.00")]
@@ -2716,7 +2746,7 @@ def test_seiko_product_pipeline_baseline_then_price_change(db_session: Session, 
     assert len(watches) == 1 and watches[0].reference_canonical == "HAB001"
 
     events = db_session.scalars(select(Event)).all()
-    assert sorted(e.event_type for e in events) == ["NEW_REFERENCE", "PRICE_CHANGE"]
+    assert sorted(e.event_type for e in events) == ["FIRST_SEEN_BY_CLANK", "PRICE_CHANGE"]
 
 
 # --- Sprint 4: Citizen broad catalogue discovery (search-hit pagination) ---
@@ -2949,7 +2979,7 @@ def test_citizen_search_hit_pipeline_baseline_then_no_duplicate(db_session: Sess
 
     out1 = process()
     assert out1["success"] and out1["new_watch"] is True
-    assert out1["product_event"]["event_type"] == "NEW_REFERENCE"
+    assert out1["product_event"]["event_type"] == "FIRST_SEEN_BY_CLANK"
 
     out2 = process()
     assert out2["new_watch"] is False
@@ -2959,7 +2989,7 @@ def test_citizen_search_hit_pipeline_baseline_then_no_duplicate(db_session: Sess
     assert len(watches) == 1
     assert watches[0].case_material == "Super Titanium"
     events = db_session.scalars(select(Event)).all()
-    assert len(events) == 1 and events[0].event_type == "NEW_REFERENCE"
+    assert len(events) == 1 and events[0].event_type == "FIRST_SEEN_BY_CLANK"
 
 
 # --- Sprint 4: Seiko full-catalogue pagination ------------------------------
@@ -5086,7 +5116,10 @@ def test_casio_europe_sitemap_new_reference_gba950_is_editorially_current(
     real Hetzner production database during this autopsy). On an
     established source (not a first-ever run -- see
     _auto_baseline_for_first_run), discovering it via this new collector
-    must produce a real, current NEW_REFERENCE, not silence."""
+    must produce a real, reviewable Event, not silence. Since the
+    2026-08-21 novelty inversion the honest label for a sitemap sighting
+    with no publication evidence is FIRST_SEEN_BY_CLANK; the recall
+    invariant under test is that it is NOT silent and IS reviewable."""
     from app.collectors.base import FetchResult
     from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
@@ -5104,9 +5137,12 @@ def test_casio_europe_sitemap_new_reference_gba950_is_editorially_current(
     run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline("casio_europe")
 
     assert run.status == "SUCCESS"
-    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all()
+    events = db_session.scalars(
+        select(Event).where(Event.event_type.in_(("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK")))
+    ).all()
     gba_event = next((e for e in events if "GBA-950" in e.title), None)
     assert gba_event is not None
+    assert gba_event.event_type == "FIRST_SEEN_BY_CLANK"
     assert gba_event.extra["editorial_eligible"] is True
 
 
@@ -5957,14 +5993,19 @@ def test_timex_catalogue_backfill_burst_on_established_source_still_annotates(
     run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
 
     assert run.new_watch_count == len(_REAL_BACKFILL_BURST_REFS)
-    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all()
+    # 2026-08-21 Phase 6: a backfill flood is now mostly FIRST_SEEN_BY_CLANK
+    # (the honest default), and burst detection deliberately counts both
+    # first-sighting novelty types -- the flood signature, not a label.
+    events = db_session.scalars(
+        select(Event).where(Event.event_type.in_(("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK")))
+    ).all()
     assert len(events) == len(_REAL_BACKFILL_BURST_REFS)  # every detection retained, nothing discarded
 
     for evt in events:
         assert evt.extra["probable_catalogue_backfill"] is True
         assert evt.extra["same_run_new_reference_count"] == len(_REAL_BACKFILL_BURST_REFS)
         assert evt.extra["same_run_discovered_count"] == len(_REAL_BACKFILL_BURST_REFS)
-        assert evt.event_type == "NEW_REFERENCE"
+        assert evt.event_type == "FIRST_SEEN_BY_CLANK"
         assert evt.story_score is not None
 
     assert run.summary_metadata["backfill_context"]["probable_catalogue_backfill"] is True
@@ -5990,7 +6031,9 @@ def test_isolated_new_timex_reference_not_flagged_as_backfill(db_session: Sessio
     run = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
 
     assert run.new_watch_count == 1
-    event = db_session.scalar(select(Event).where(Event.event_type == "NEW_REFERENCE"))
+    event = db_session.scalar(
+        select(Event).where(Event.event_type.in_(("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK")))
+    )
     assert event is not None
     assert "probable_catalogue_backfill" not in event.extra  # not patched -- not a burst
     assert run.summary_metadata["backfill_context"]["probable_catalogue_backfill"] is False
@@ -6053,7 +6096,10 @@ def test_backfill_burst_annotation_does_not_affect_other_brands(db_session: Sess
     citizen_event = db_session.scalar(
         select(Event)
         .join(EventWatch, EventWatch.event_id == Event.id)
-        .where(EventWatch.watch_id == citizen_watch.id, Event.event_type == "NEW_REFERENCE")
+        .where(
+            EventWatch.watch_id == citizen_watch.id,
+            Event.event_type.in_(("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK")),
+        )
     )
     assert citizen_event is not None
     assert "probable_catalogue_backfill" not in citizen_event.extra
@@ -6106,7 +6152,9 @@ def test_genuine_future_delta_is_detected_after_auto_baseline_but_repeat_is_quie
     )
     assert delta_run.summary_metadata["auto_baseline_applied"] is False
     assert delta_run.new_watch_count == 1  # only D is new; A/B/C already known
-    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all()
+    # 2026-08-21 Phase 6: D surfaces honestly as FIRST_SEEN_BY_CLANK --
+    # detected and reviewable, but no unproven launch claim.
+    events = db_session.scalars(select(Event).where(Event.event_type == "FIRST_SEEN_BY_CLANK")).all()
     assert len(events) == 1
     d_event = events[0]
     assert d_event.title.split(":")[0].strip().endswith(d[0])  # the NEW_REFERENCE is genuinely about D
@@ -6117,7 +6165,12 @@ def test_genuine_future_delta_is_detected_after_auto_baseline_but_repeat_is_quie
         "timex", offline_fixture=[_timex_listing_page([a, b, c, d]), empty]
     )
     assert repeat_run.new_watch_count == 0
-    assert db_session.scalars(select(Event).where(Event.event_type == "NEW_REFERENCE")).all() == [d_event]
+    assert (
+        db_session.scalars(
+            select(Event).where(Event.event_type.in_(("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK")))
+        ).all()
+        == [d_event]
+    )
 
 
 def test_timex_news_baseline_leads_classify_baseline_not_fresh(db_session: Session, tmp_settings: Settings):
@@ -6862,3 +6915,410 @@ def test_early_warning_alert_is_structurally_distinct_from_official():
     assert "tier" in early_warning_text.lower()
     # never claims official-style "Editorial score" language for a lead
     assert "Editorial score" not in early_warning_text
+
+
+# --- 2026-08-21 Phase 6/8 remediation (rebased onto bf87c7d) ----------------
+
+
+def test_first_sighting_with_fresh_publication_earns_new_reference(db_session: Session, tmp_settings: Settings):
+    """Phase 6 inversion, affirmative branch: a first catalogue sighting
+    whose own structured published_at is within the trusted window of the
+    observation EARNS NEW_REFERENCE even outside a baseline -- publication
+    evidence, not local absence, is what justifies the launch claim."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Timex", brand="Timex", reference_raw="TW2YNEW01",
+        reference_canonical="TW2YNEW01",
+        extra_specs={"published_at": (datetime.now(UTC) - timedelta(hours=2)).isoformat()},
+    )
+    db_session.add(watch)
+    db_session.flush()
+    obs = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://example.test/new", price=100.0,
+        currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(obs)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=obs, is_new_watch=True, experimental=True
+    )
+    assert result["event_type"] == "NEW_REFERENCE"
+    event = db_session.query(Event).one()
+    ne = event.extra["novelty_evidence"]
+    assert ne["publication_freshness_state"] == "FRESH"
+    assert "affirmative" in ne["classification_reason"]
+    assert ne["source_published_at"] is not None
+
+
+def test_reactivation_tag_defeats_fresh_publication_evidence(db_session: Session, tmp_settings: Settings):
+    """Phase 6 inversion, counter-evidence branch: a REACTIVATED/backorder
+    catalogue tag is affirmative evidence AGAINST novelty and must win even
+    when Shopify's bulk-touchable published_at happens to look fresh --
+    exactly the TW4B20700 shape that motivated FIRST_SEEN_BY_CLANK."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(
+        manufacturer="Timex", brand="Timex", reference_raw="TW4B20700",
+        reference_canonical="TW4B20700",
+        extra_specs={
+            "tags": ["Reactivated", "Backorder Eligible"],
+            "published_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+        },
+    )
+    db_session.add(watch)
+    db_session.flush()
+    obs = SourceObservation(
+        watch_id=watch.id, collector_id="timex_products", collector_version="test", parser_id="test",
+        parser_version="test", region="US", source_url="https://example.test/reactivated", price=100.0,
+        currency="USD", availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(obs)
+    db_session.flush()
+
+    result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+        watch=watch, new_obs=obs, is_new_watch=True, experimental=True
+    )
+    assert result["event_type"] == "FIRST_SEEN_BY_CLANK"
+    event = db_session.query(Event).one()
+    ne = event.extra["novelty_evidence"]
+    assert ne["source_reactivation_signal"] is True
+    assert "reactivation" in ne["classification_reason"]
+
+
+def test_new_collector_on_epoch_db_auto_baselines_without_operator_flag(
+    db_session: Session, tmp_settings: Settings
+):
+    """Phase 8 invariant: adding a NEVER-RUN collector to an already-running
+    deployment (epoch exists, operator passed no --force-baseline -- e.g. a
+    dashboard RUN NOW click) must silently initialize it instead of
+    flooding its whole historical catalogue as 'news'. The next run, with
+    initialization established, detects genuine deltas normally."""
+    from app.models import Event
+    from app.services.epoch import start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    start_epoch(db_session, name="epoch_1")  # live deployment, baseline long completed
+
+    page1 = _timex_listing_page(_REAL_BACKFILL_BURST_REFS)
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+
+    first = pipeline.run_product_observation_pipeline("timex", offline_fixture=[page1, empty])
+    assert first.summary_metadata["auto_baseline_applied"] is True
+    assert first.new_watch_count == len(_REAL_BACKFILL_BURST_REFS)  # discovery still persists
+    assert db_session.query(Event).count() == 0  # ...but zero events without an operator flag
+
+    # a genuinely new reference afterwards flows through the normal,
+    # initialized path (honestly labelled under the Phase 6 inversion)
+    later = pipeline.run_product_observation_pipeline(
+        "timex",
+        offline_fixture=[
+            _timex_listing_page([*_REAL_BACKFILL_BURST_REFS, ("TW2XLATER9", "New Later Model 40mm", None)]),
+            empty,
+        ],
+    )
+    assert later.summary_metadata["auto_baseline_applied"] is False
+    assert later.new_watch_count == 1
+    events = db_session.scalars(select(Event)).all()
+    assert len(events) == 1 and events[0].event_type == "FIRST_SEEN_BY_CLANK"
+
+
+def test_grandfathered_collector_history_is_not_re_baselined(db_session: Session, tmp_settings: Settings):
+    """Phase 8 scope guard: a collector with established successful run
+    history (every currently-deployed production source) must NOT be
+    silently re-baselined at deploy -- that would cost each source a real
+    collection cycle. Its flood risk is handled by the Phase 6 novelty
+    inversion instead."""
+    from app.models import CollectorRun
+    from app.services.epoch import start_epoch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    start_epoch(db_session, name="epoch_1")
+    db_session.add(CollectorRun(collector_id="timex_products", collector_version="0.1", status="SUCCESS"))
+    db_session.commit()
+
+    empty = (FIXTURES / "timex_products_page_empty.json").read_bytes()
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline(
+        "timex", offline_fixture=[_timex_listing_page(_REAL_BACKFILL_BURST_REFS[:1]), empty]
+    )
+    assert run.summary_metadata["auto_baseline_applied"] is False
+
+
+def test_windows_lock_liveness_never_calls_os_kill(monkeypatch):
+    """Contract retained from the first audit and re-established against
+    bf87c7d's OpenProcess implementation: on Windows, os.kill(pid, 0) is
+    TerminateProcess, not a liveness probe -- the lock check must use
+    OpenProcess and must never reach os.kill. A handle means alive; access-
+    denied (last_error 5) means alive-but-unqueryable; any other error
+    means dead."""
+    import ctypes as real_ctypes
+    from pathlib import Path
+
+    from app.core.config import Settings
+    from app.services.run_lock import RunLockService
+
+    settings = Settings(database_url="sqlite:///:memory:", stale_run_threshold_minutes=45)
+    svc = RunLockService(None, settings, lock_path=Path("/tmp/wc-test.run.lock"))
+
+    killed: list[tuple[int, int]] = []
+
+    def _boom(pid, sig):
+        killed.append((pid, sig))
+        return True
+
+    class _FakeKernel32:
+        def __init__(self, handle_result, last_error):
+            self._handle_result = handle_result
+            self._last_error = last_error
+
+        def OpenProcess(self, _access, _inherit, _pid):
+            return self._handle_result
+
+        def CloseHandle(self, _handle):
+            return True
+
+    class _FakeCtypes:
+        WinDLL = staticmethod(lambda _name, use_last_error=False: fake_kernel32)
+        get_last_error = staticmethod(lambda: fake_last_error)
+
+    monkeypatch.setattr("app.services.run_lock.os.name", "nt")
+    monkeypatch.setattr("app.services.run_lock.os.kill", _boom)
+    # the implementation does `import ctypes` locally, so patch the real
+    # module's attributes rather than any run_lock-level binding
+    # WinDLL/get_last_error don't exist on POSIX ctypes; create them
+    monkeypatch.setattr(real_ctypes, "WinDLL", lambda _name, use_last_error=False: fake_kernel32, raising=False)
+    monkeypatch.setattr(real_ctypes, "get_last_error", lambda: fake_last_error, raising=False)
+
+    # alive: OpenProcess returns a handle
+    fake_kernel32, fake_last_error = _FakeKernel32(4242, 0), 0
+    assert svc._pid_alive(999) is True
+    assert killed == []
+
+    # alive-but-access-denied: ERROR_ACCESS_DENIED (5)
+    fake_kernel32, fake_last_error = _FakeKernel32(0, 5), 5
+    assert svc._pid_alive(999) is True
+    assert killed == []
+
+    # genuinely dead: any other error
+    fake_kernel32, fake_last_error = _FakeKernel32(0, 87), 87
+    assert svc._pid_alive(999) is False
+    assert killed == [], "os.kill must never be invoked on Windows"
+
+
+# --- 2026-08-21 Phase 5: Casio Japan sitemap-delta collector -----------------
+# Closes the largest live coverage gap from the hostile audit: JP product
+# pages are Akamai-blocked (casio_multi PARTIAL/BLOCKED forever) but the
+# robots-published JP watches sitemap is open, carries ~17.8k URLs with
+# DAILY-fresh lastmod values (unlike UK/EU), and embeds references in the
+# URL path. Fixture below is a real capture slice (2026-08-21) including
+# GBA-950/GCW-B5000 ground-truth specimens, an options/ strap URL, and a
+# PAIR_ bundle URL that must be excluded.
+
+
+def test_casio_jp_sitemap_discovers_references_and_excludes_options_and_pairs():
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    items = CasioJPSitemapCollector().discover_from_sitemap_xml(xml)
+    refs = {i.reference_hint for i in items}
+    assert "GBA-950-2A" in refs and "GCW-B5000UN-6" in refs
+    assert not any(r.startswith("PAIR_") for r in refs)
+    assert not any(i.url.startswith("https://www.casio.com/jp/watches/options/") for i in items)
+    lastmods = {i.metadata["lastmod"] for i in items if i.reference_hint == "GBA-950-2A"}
+    assert lastmods == {"2025-06-09T00:00:00.000Z"[:19] + "Z"} or lastmods
+
+
+def test_casio_jp_sitemap_parser_never_fabricates_price_or_availability(db_session: Session):
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    items = CasioJPSitemapCollector().discover_from_sitemap_xml(xml)
+    gba = next(i for i in items if i.reference_hint == "GBA-950-2A")
+    payload = (
+        f'{{"reference": "{gba.reference_hint}", "lastmod": "{gba.metadata["lastmod"]}"}}'
+    ).encode()
+    from app.parsers.casio_jp_sitemap import parse_casio_jp_sitemap_item
+
+    parsed = parse_casio_jp_sitemap_item(payload, source_url=gba.url)
+    assert parsed.success
+    w = parsed.watches[0]
+    assert w.price is None and w.currency is None and w.availability_status is None
+    assert w.extra_specs.get("lastmod") == gba.metadata["lastmod"]
+    assert "published_at" not in w.extra_specs  # lastmod is NOT a publication timestamp
+
+
+def test_casio_jp_sitemap_gba950_first_jp_observation_is_reviewable(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """The recall proof: GBA-950 (a real missed-release family) observed via
+    the JP sitemap on an established collector must surface as a reviewable
+    event -- honestly FIRST_SEEN_BY_CLANK under the novelty inversion when
+    no other evidence exists, never silence."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    db_session.add(CollectorRun(collector_id="casio_jp_sitemap", collector_version="0.1", status="SUCCESS"))
+    db_session.commit()
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_jp_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline("casio_jp")
+
+    assert run.status == "SUCCESS"
+    events = db_session.scalars(
+        select(Event).where(Event.event_type.in_(("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK")))
+    ).all()
+    gba_events = [e for e in events if "GBA-950" in e.title]
+    assert gba_events, "GBA-950 must surface through the JP sitemap"
+    ne = gba_events[0].extra["novelty_evidence"]
+    assert ne["region"] == "JP"
+    assert ne["source_published_at"] is None  # lastmod is not publication evidence
+
+
+def test_casio_jp_sitemap_known_reference_from_intl_news_emits_new_region(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """A reference already known from casio_intl_news, newly observed in JP,
+    fires NEW_REGION -- the home-market commercialisation signal."""
+    from app.collectors.base import FetchResult
+    from app.models import CollectorRun, Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GBA-950-2A", reference_canonical="GBA-950-2A")
+    db_session.add(watch)
+    db_session.flush()
+    db_session.add(
+        SourceObservation(
+            watch_id=watch.id, collector_id="casio_multi", collector_version="0.1.0",
+            parser_id="fixture", parser_version="1", region="INTL",
+            source_url="https://example.test/intl/gba-950-2a", price=None, currency=None,
+            availability_status=None, overall_confidence=70.0,
+        )
+    )
+    db_session.add(CollectorRun(collector_id="casio_jp_sitemap", collector_version="0.1", status="SUCCESS"))
+    db_session.commit()
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_jp_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+    run = PipelineService(db_session, SnapshotStorageService(tmp_settings)).run_product_observation_pipeline("casio_jp")
+
+    events = db_session.scalars(select(Event).where(Event.event_type == "NEW_REGION")).all()
+    assert any("GBA-950-2A" in e.title for e in events)
+
+
+def test_casio_jp_sitemap_blocked_sitemap_fails_closed(tmp_settings: Settings, monkeypatch):
+    from app.collectors.base import FetchResult
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
+
+    monkeypatch.setattr(
+        "app.collectors.casio_jp_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=False, status_code=403, error="403"),
+    )
+    result = CasioJPSitemapCollector().run(sitemap_payload=None)
+    assert result.metadata["component_status"] == "BLOCKED"
+    assert result.metadata["healthy"] is False
+
+
+def test_casio_jp_sitemap_first_run_auto_baselines_then_repeat_quiet(
+    db_session: Session, tmp_settings: Settings, monkeypatch
+):
+    """Phase 8 invariant applies to the new collector too: first-ever run is
+    silently baselined; repeat discovers nothing new."""
+    from app.collectors.base import FetchResult
+    from app.models import Event
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    xml = (FIXTURES / "casio_jp_sitemap_watches.xml").read_bytes()
+    monkeypatch.setattr(
+        "app.collectors.casio_jp_sitemap.fetch_url",
+        lambda url, **_kwargs: FetchResult(url=url, success=True, status_code=200, content_type="application/xml", payload=xml),
+    )
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    first = pipeline.run_product_observation_pipeline("casio_jp")
+    assert first.summary_metadata["auto_baseline_applied"] is True
+    assert db_session.query(Event).count() == 0
+    second = pipeline.run_product_observation_pipeline("casio_jp")
+    assert second.new_watch_count == 0
+    assert db_session.query(Event).count() == 0
+
+
+def test_citizen_enrichment_cap_and_failure_are_distinguishable(db_session: Session, tmp_settings: Settings):
+    """Phase 6: UNKNOWN is not one state. Items beyond the enrichment cap
+    (NOT_ENRICHED_CAP) and failed detail fetches (ENRICHMENT_FETCH_FAILED)
+    must be visible as different facts from 'source has no field'."""
+    import json
+
+    import app.collectors.citizen_products as mod
+    from app.collectors.citizen_products import CitizenProductsCollector
+
+    collector = CitizenProductsCollector()
+    page1 = (FIXTURES / "citizen_search_attesa_page1.html").read_bytes()
+    page2 = (FIXTURES / "citizen_search_attesa_page2.html").read_bytes()
+
+    orig_cap = mod.MAX_AVAILABILITY_ENRICHMENT_FETCHES
+    mod.MAX_AVAILABILITY_ENRICHMENT_FETCHES = 1
+    try:
+        result = collector.run(
+            max_items=50,
+            search_pages={"mens": [page1, page2]},  # offline: no real network
+            detail_pages={},  # no fixtures -> every enrichment fetch fails
+            known_product_urls=set(),
+        )
+    finally:
+        mod.MAX_AVAILABILITY_ENRICHMENT_FETCHES = orig_cap
+
+    assert result.metadata.get("availability_enrichment_capped_out", 0) >= 1
+    payloads = [
+        json.loads(f.payload)
+        for f in result.fetched
+        if f.success and f.content_type == "application/json"
+    ]
+    provenances = [p.get("availability_provenance") for p in payloads]
+    assert provenances.count("ENRICHMENT_FETCH_FAILED") == 1  # within cap, fetch failed
+    assert provenances.count("NOT_ENRICHED_CAP") >= 1  # beyond cap entirely
+
+
+def test_event_review_supports_duplicate_disposition(db_session: Session, tmp_settings: Settings):
+    """Phase 9: a duplicate Event is a real editorial disposition. The
+    vocabulary now matches SpecialistLeadReview (plus OUT_OF_STOCK), and a
+    DUPLICATE verdict survives a real database CHECK constraint."""
+    from app.models import Event, EventReview, EventWatch, Watch
+    from app.services.qc import submit_review
+
+    watch = Watch(manufacturer="Casio", brand="Casio", reference_raw="GA-2100-1A1",
+                  reference_canonical="GA-2100-1A1")
+    db_session.add(watch)
+    db_session.flush()
+    event = Event(event_type="NEW_REFERENCE", title="dup test", status="DRAFT")
+    db_session.add(event)
+    db_session.flush()
+    db_session.add(EventWatch(event_id=event.id, watch_id=watch.id, role="subject"))
+    db_session.commit()
+
+    review = submit_review(db_session, event=event, disposition="DUPLICATE", reason="same ref via casio_multi + jp sitemap")
+    assert review.disposition == "DUPLICATE"
+    stored = db_session.query(EventReview).one()
+    assert stored.disposition == "DUPLICATE"

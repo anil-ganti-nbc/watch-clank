@@ -1,9 +1,10 @@
 """Application configuration using Pydantic Settings."""
 
+import ipaddress
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +36,35 @@ class Settings(BaseSettings):
     schedule_interval_minutes: int = Field(default=90)
     stale_run_threshold_minutes: int = Field(default=45)
     max_run_duration_seconds: int = Field(default=1200)
+    # Consecutive item-less ZERO_ITEMS runs before a source degrades from
+    # HEALTHY to WARNING (2026-08-21 audit: monochrome_rss read HEALTHY
+    # through 20 consecutive empty runs). Expressed in runs, not hours, so
+    # one number means the same thing for a 45-minute RSS lane and a
+    # 12-hour sitemap lane.
+    zero_item_warning_streak: int = Field(default=3, ge=1)
+
+    # Bulk-touch detection for source publication timestamps (2026-08-21
+    # Phase 2 evidence-strength work; live shapes documented in
+    # ai/handoff/INCIDENT_20260819_EMERGENCY_HOTFIX.md): a fresh
+    # published_at shared by >= bulk_touch_cluster_min_size products
+    # spanning >= bulk_touch_cluster_min_collections DISTINCT collections
+    # within bulk_touch_proximity_seconds is routine catalogue-sync noise,
+    # not a coordinated launch. Genuine launch families observed live were
+    # small (3-5 SKUs) and single-collection; maintenance batches were 14+
+    # products across many unrelated collections.
+    bulk_touch_proximity_seconds: int = Field(default=90, ge=1)
+    bulk_touch_cluster_min_size: int = Field(default=8, ge=2)
+    bulk_touch_cluster_min_collections: int = Field(default=3, ge=2)
+
+    # Whether FIRST_SEEN_BY_CLANK events may ring the editorial Discord.
+    # Default False (2026-08-21): live validation of casio_jp_sitemap showed
+    # an established catalogue's initial post-baseline crawl emits hundreds
+    # of honestly-labelled first-sightings per run -- exactly what the QC
+    # queue is for, and exactly what an alert channel is not for. They stay
+    # fully visible in /intelligence and the review queue; only the ping is
+    # suppressed. Flip to true only if the operator wants uncertainty in
+    # the alert channel too.
+    discord_first_seen_enabled: bool = Field(default=False)
 
     log_level: str = Field(default="INFO")
     log_format: str = Field(default="json")
@@ -46,6 +76,19 @@ class Settings(BaseSettings):
     app_host: str = Field(default="127.0.0.1")
     app_port: int = Field(default=8765)
     debug: bool = Field(default=False)
+
+    @field_validator("app_host")
+    @classmethod
+    def dashboard_must_be_loopback(cls, value: str) -> str:
+        try:
+            loopback = ipaddress.ip_address(value).is_loopback
+        except ValueError:
+            loopback = value.lower() == "localhost"
+        if not loopback:
+            raise ValueError(
+                "Watch Clank has no authenticated remote dashboard profile; APP_HOST must be loopback"
+            )
+        return value
 
     # Discord alert delivery (Sprint 2). Secrets come from env/.env only —
     # never commit a webhook URL. Both default to None (disabled/no-op).

@@ -17,7 +17,7 @@ from sqlalchemy import func, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.core.time import ensure_utc
 from app.db.schema_check import SchemaStatus, check_schema
 from app.models import CollectorRun, Event, SourceObservation, SpecialistLead, Watch
@@ -29,6 +29,7 @@ KNOWN_COLLECTORS = [
     "casio_multi",
     "casio_uk_sitemap",
     "casio_europe_sitemap",
+    "casio_jp_sitemap",
     "citizen_news",
     "citizen_products",
     # citizen_de_products retired 2026-08-17 (owner directive: proved too
@@ -73,6 +74,7 @@ EXPECTED_CADENCE_MINUTES = {
     "casio_multi": 90,
     "casio_uk_sitemap": 720,
     "casio_europe_sitemap": 720,
+    "casio_jp_sitemap": 360,  # fresh daily lastmod: JP is the earliest official surface, check twice as often
     "citizen_news": 90,
     "citizen_products": 360,
     "seiko_jp_news": 90,
@@ -134,6 +136,26 @@ def _source_health(session: Session, collector_id: str) -> SourceHealth:
 
     if most_recent.status in SUCCESS_STATUSES:
         state = "HEALTHY"
+        # A source can be "successfully" empty forever: ZERO_ITEMS counts as
+        # a success status, so a silently broken feed/parser (real case:
+        # monochrome_rss, 20 consecutive ZERO_ITEMS runs in the field-test
+        # DB while the same source worked elsewhere) reads as HEALTHY.
+        # Repeated empty runs from a source that historically produces
+        # content must become operator-visible. The streak threshold is an
+        # explicit, documented setting (zero_item_warning_streak, default 3)
+        # rather than a buried magic number; it is deliberately expressed in
+        # RUNS not hours so it means the same thing for a 45-minute RSS lane
+        # and a 12-hour sitemap lane. Found by the 2026-08-21 hostile
+        # architecture audit; re-verified still present after Phase 0
+        # remediation (bf87c7d does not touch this path).
+        zero_item_streak = 0
+        for r in runs:
+            if r.status == "ZERO_ITEMS" and (r.discovered_count or 0) == 0:
+                zero_item_streak += 1
+            else:
+                break
+        if zero_item_streak >= get_settings().zero_item_warning_streak:
+            state = "WARNING"
     elif most_recent.status == "SKIPPED_OVERLAP":
         state = "WARNING"
     else:

@@ -52,7 +52,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
-DISPOSITIONS = frozenset({"USEFUL", "NOT_USEFUL", "FALSE_POSITIVE", "OUT_OF_STOCK"})
+# 2026-08-21 Phase 9: DUPLICATE added -- a duplicate Event is a real
+# editorial disposition (same reference via two collectors, a re-sent
+# announcement), previously force-filed as NOT_USEFUL/FALSE_POSITIVE,
+# polluting the QC feedback signal. Vocabulary now matches
+# SpecialistLeadReview's, plus OUT_OF_STOCK which only Events carry.
+DISPOSITIONS = frozenset({"USEFUL", "NOT_USEFUL", "DUPLICATE", "FALSE_POSITIVE", "OUT_OF_STOCK"})
 
 
 class EventReview(Base):
@@ -61,7 +66,7 @@ class EventReview(Base):
     __tablename__ = "event_reviews"
     __table_args__ = (
         CheckConstraint(
-            "disposition IN ('USEFUL', 'NOT_USEFUL', 'FALSE_POSITIVE', 'OUT_OF_STOCK')",
+            "disposition IN ('USEFUL', 'NOT_USEFUL', 'DUPLICATE', 'FALSE_POSITIVE', 'OUT_OF_STOCK')",
             name="ck_event_review_disposition",
         ),
         UniqueConstraint("event_id", name="uq_event_review_event_id"),

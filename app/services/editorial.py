@@ -68,8 +68,8 @@ VALID_EVENT_TYPES = frozenset(
         "SOLD_OUT",
         "RESTOCK",
         # 2026-08-19 hotfix (TW4B20700 Expedition Field Chronograph):
-        # FIRST_SEEN_BY_CLANK != NEW_REFERENCE. A reference that is merely
-        # absent from this database until today is not, by itself,
+        # FIRST_SEEN_BY_CLANK != NEW_REFERENCE. A reference that is
+        # merely absent from this database until today is not, by itself,
         # evidence the manufacturer launched it today -- see the freshness
         # taxonomy in ai/handoff/INCIDENT_20260819_EMERGENCY_HOTFIX.md.
         # NEW_REFERENCE means affirmative evidence of genuine novelty
@@ -80,9 +80,51 @@ VALID_EVENT_TYPES = frozenset(
         # is telling us the opposite -- a REACTIVATED/backorder catalogue
         # tag -- the event must be labeled for what it honestly is: a
         # local-discovery milestone, not a launch claim.
+        # 2026-08-21 Phase 6 novelty inversion: FIRST_SEEN_BY_CLANK is now
+        # the DEFAULT classification for a product-catalogue first
+        # sighting; NEW_REFERENCE is emitted only when affirmative
+        # publication evidence exists (see PipelineService.
+        # _record_product_transition). The official-news path keeps
+        # NEW_REFERENCE for genuinely new references because a first-party
+        # announcement article is itself affirmative launch evidence.
         "FIRST_SEEN_BY_CLANK",
     }
 )
+
+# 2026-08-19 hotfix (Timex Atelier NBR strap incident: a real blog post,
+# "Timex Atelier NBR Synthetic Rubber Strap: Signature By Design. Now
+# Available Separately.", extracted a real SKU (TW7D18600) via the same
+# image-filename path used for genuine watch launches, and created a
+# NEW_REFERENCE Event for a strap). Deliberately a narrow, high-precision
+# phrase match on the title -- NOT a bare "strap" keyword ban, which would
+# misfire on legitimate titles like "... Leather Strap Watch" (a confirmed
+# real, common Timex catalogue title shape). Official marketing copy for an
+# accessory-only post reliably says the product is sold/available
+# "separately" from a watch; a genuine watch launch post never does.
+# False negatives (an accessory post that doesn't use this phrasing slips
+# through) are the accepted cost, matching this module's existing
+# precision-over-recall discipline for anything that could create a
+# confidently-wrong Event.
+# 2026-08-21: moved here from pipeline.py and shared with
+# specialist_leads.classify_lead_type -- the specialist path had the SAME
+# hole (a strap sale post with a reference candidate still classified as
+# POSSIBLE_NEW_REFERENCE because reference presence outranked deal
+# language), found by the Phase 2 semantic specimen corpus.
+ACCESSORY_ONLY_TITLE_PHRASES = (
+    "available separately",
+    "sold separately",
+    "strap only",
+    "band only",
+    "replacement strap",
+    "replacement band",
+)
+
+
+def looks_like_accessory_only(title: str | None) -> bool:
+    if not title:
+        return False
+    lowered = title.lower()
+    return any(phrase in lowered for phrase in ACCESSORY_ONLY_TITLE_PHRASES)
 
 
 @dataclass
@@ -413,18 +455,31 @@ def format_alert(
         "",
         f"Reference: {reference_raw or 'UNKNOWN'}",
         f"Event: {scored.event_type}",
-        f"Region: {region or 'UNKNOWN'}",
-        f"Observed: {observed_at}",
-        "",
-        "What changed:",
-        announcement_title or "(no title available)",
-        "",
-        "Evidence:",
-        announcement_url,
-        "",
-        f"Editorial score: {int(scored.score)}/100",
-        "Reasons:",
     ]
+    # 2026-08-21: an honest FIRST_SEEN_BY_CLANK must never visually
+    # resemble a confirmed launch claim. The uncertainty is stated in the
+    # alert body itself, not buried in the reasons list.
+    if scored.event_type == "FIRST_SEEN_BY_CLANK":
+        lines.append(
+            "(first observed locally -- novelty UNCONFIRMED; needs review, "
+            "may be an old catalogue item)"
+        )
+    lines.extend(
+        [
+            "",
+            f"Region: {region or 'UNKNOWN'}",
+            f"Observed: {observed_at}",
+            "",
+            "What changed:",
+            announcement_title or "(no title available)",
+            "",
+            "Evidence:",
+            announcement_url,
+            "",
+            f"Editorial score: {int(scored.score)}/100",
+            "Reasons:",
+        ]
+    )
     lines.extend(f"- {r}" for r in scored.reasons)
     lines.append("")
     lines.append(f"Confidence: {scored.confidence}")

@@ -3,7 +3,7 @@
 # this image; the dashboard is NOT deployed by this image in this phase
 # (see ai/handoff/SQLITE_COORDINATION.md -- it is read-only and safe to add
 # later, but adds a second service for zero soak-correctness benefit today).
-FROM python:3.12-slim AS base
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
@@ -16,13 +16,14 @@ WORKDIR /app
 # app/ must exist before `pip install .` (hatchling needs the package
 # source present to resolve) -- the .draft version copied pyproject.toml
 # alone first, which it flagged as illustrative-only, not a working step.
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md requirements.container.lock ./
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --require-hashes -r requirements.container.lock \
+    && pip install --no-cache-dir --no-deps .
 
 # Full Git SHA this image was built from. Must be passed at build time.
 # Never derived from a .git directory at runtime -- none is copied into

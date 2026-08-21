@@ -52,4 +52,4 @@ echo "     and DISCORD_EDITORIAL_WEBHOOK_URL / DISCORD_HEALTH_WEBHOOK_URL if des
 echo "     Never commit .env."
 echo "  2. Manual one-shot run (same path as scheduled): ./scripts/run_scheduled.sh"
 echo "  3. For unattended scheduling, see scripts/systemd/README.md"
-echo "  4. Dashboard: python -m uvicorn app.main:app --host 127.0.0.1 --port 8765"
+echo "  4. Dashboard: python -m app.serve --host 127.0.0.1 --port 8765"

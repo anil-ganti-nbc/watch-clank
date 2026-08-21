@@ -13,8 +13,12 @@ def test_field_test_allows_selected_collection_and_run_all_but_blocks_other_muta
     monkeypatch.setenv("WATCH_CLANK_BUILD_REVISION", "test-revision")
     monkeypatch.setenv("WATCH_CLANK_STATE_ROOT", "/tmp/watch-state")
     import app.main as main_module
+    from app.local_operator import install_local_operator_authority
 
     monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    # Install the REAL launcher-scoped authority (never a blanket allow):
+    # this is the same call the packaged launcher makes at startup.
+    install_local_operator_authority(main_module.app)
     # start_all is mocked to avoid spawning a real background thread full of
     # real subprocess calls -- this test only proves the middleware/route
     # allow this request through, not the batch-execution logic itself
@@ -25,9 +29,10 @@ def test_field_test_allows_selected_collection_and_run_all_but_blocks_other_muta
         "snapshot",
         lambda: {"status": "RUNNING", "running": True, "mode": "batch", "total": 19, "completed": 0},
     )
-    with TestClient(main_module.app) as client:
-        runtime = client.get("/api/runtime")
+    with TestClient(main_module.app, client=("127.0.0.1", 50000)) as client:
+        runtime = client.get("/api/runtime", headers={"host": "127.0.0.1:8765"})
         assert runtime.status_code == 200
+        assert runtime.json()["mutation_authority"] == "LOCAL_OPERATOR"
         assert runtime.json()["read_only"] is False
         assert runtime.json()["local_collection"] is True
         assert runtime.json()["external_delivery"] is False
@@ -38,28 +43,30 @@ def test_field_test_allows_selected_collection_and_run_all_but_blocks_other_muta
         # as a single COLLECT -- it must be allowed through the mutation
         # boundary in field-test mode (2026-08-18: the operator asked for
         # Windows Control Centre's RUN ALL parity on macOS).
-        allowed = client.post("/operations/run-all-safe")
+        allowed = client.post("/operations/run-all-safe", headers={"host": "127.0.0.1:8765"})
         assert allowed.status_code == 202
         assert allowed.json()["mode"] == "batch"
 
         # Something genuinely outside the allow-list is still blocked.
-        blocked = client.post("/operations/not-a-real-mutation")
+        blocked = client.post("/operations/not-a-real-mutation", headers={"host": "127.0.0.1:8765"})
         assert blocked.status_code == 403
 
 
 def test_selected_collection_starts_and_overlap_is_refused(monkeypatch):
     monkeypatch.setenv("WATCH_CLANK_FIELD_TEST", "1")
     import app.main as main_module
+    from app.local_operator import install_local_operator_authority
 
     monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    install_local_operator_authority(main_module.app)
     monkeypatch.setattr(main_module._local_collection, "start", lambda collector_id, cli_args: True)
     monkeypatch.setattr(main_module._local_collection, "snapshot", lambda: {"status": "RUNNING", "running": True, "collector_id": "timex_news"})
-    with TestClient(main_module.app) as client:
-        started = client.post("/operations/run/timex_news")
+    with TestClient(main_module.app, client=("127.0.0.1", 50000)) as client:
+        started = client.post("/operations/run/timex_news", headers={"host": "127.0.0.1:8765"})
         assert started.status_code == 202
         assert started.json()["collector_id"] == "timex_news"
         monkeypatch.setattr(main_module._local_collection, "start", lambda collector_id, cli_args: False)
-        overlap = client.post("/operations/run/timex_news")
+        overlap = client.post("/operations/run/timex_news", headers={"host": "127.0.0.1:8765"})
         assert overlap.status_code == 409
 
 
@@ -71,9 +78,21 @@ def test_run_all_overlap_with_single_collector_is_refused(monkeypatch):
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
-    with TestClient(main_module.app) as client:
+    monkeypatch.setattr(
+        main_module.app.state,
+        "phase0_network_authorizer",
+        lambda _client, _host: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module.app.state,
+        "phase0_mutation_authorizer",
+        lambda _request: True,
+        raising=False,
+    )
+    with TestClient(main_module.app, client=("127.0.0.1", 50000)) as client:
         monkeypatch.setattr(main_module._local_collection, "start", lambda collector_id, cli_args: True)
-        started = client.post("/operations/run/timex_news")
+        started = client.post("/operations/run/timex_news", headers={"host": "127.0.0.1:8765"})
         assert started.status_code == 202
 
         monkeypatch.setattr(main_module._local_collection, "start_all", lambda jobs: False)
@@ -82,7 +101,7 @@ def test_run_all_overlap_with_single_collector_is_refused(monkeypatch):
             "snapshot",
             lambda: {"status": "RUNNING", "running": True, "mode": "single", "collector_id": "timex_news"},
         )
-        blocked = client.post("/operations/run-all-safe")
+        blocked = client.post("/operations/run-all-safe", headers={"host": "127.0.0.1:8765"})
         assert blocked.status_code == 409
 
 

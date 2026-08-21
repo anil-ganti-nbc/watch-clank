@@ -1,0 +1,13 @@
+title = "Watch Clank secret scanning policy"
+
+[[allowlists]]
+description = "The captured Casio pages contain public client-side BOOMR telemetry identifiers, not credentials."
+paths = [
+  '''^tests/fixtures/casio_intl_news_efk200\.html$''',
+  '''^tests/fixtures/casio_intl_news_list\.html$''',
+]
+rules = ["generic-api-key"]
+regexTarget = "match"
+regexes = [
+  '''window\.BOOMR_API_key\s*=\s*["'][^"']+["']''',
+]

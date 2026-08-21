@@ -108,35 +108,11 @@ def _parse_announcement_date(raw: str | None) -> datetime | None:
     return _parse_free_text_announcement_date(raw)
 
 
-# 2026-08-19 hotfix (Timex Atelier NBR strap incident: a real blog post,
-# "Timex Atelier NBR Synthetic Rubber Strap: Signature By Design. Now
-# Available Separately.", extracted a real SKU (TW7D18600) via the same
-# image-filename path used for genuine watch launches, and would have
-# created a NEW_REFERENCE Event for a strap). Deliberately a narrow,
-# high-precision phrase match on the title -- NOT a bare "strap" keyword
-# ban, which would misfire on legitimate titles like "... Leather Strap
-# Watch" (a confirmed real, common Timex catalogue title shape). Official
-# marketing copy for an accessory-only post reliably says the product is
-# sold/available "separately" from a watch; a genuine watch launch post
-# never does. False negatives (an accessory post that doesn't use this
-# phrasing slips through) are the accepted cost, matching this module's
-# existing precision-over-recall discipline for anything that could create
-# a confidently-wrong Event.
-_ACCESSORY_ONLY_TITLE_PHRASES = (
-    "available separately",
-    "sold separately",
-    "strap only",
-    "band only",
-    "replacement strap",
-    "replacement band",
-)
-
-
-def _looks_like_accessory_only(title: str | None) -> bool:
-    if not title:
-        return False
-    lowered = title.lower()
-    return any(phrase in lowered for phrase in _ACCESSORY_ONLY_TITLE_PHRASES)
+# 2026-08-19 accessory gate; 2026-08-21 the phrase list moved to
+# app.services.editorial (shared with the specialist-lead classifier,
+# which had the identical hole). Kept as a thin alias here so the
+# pipeline call site reads the same.
+from app.services.editorial import looks_like_accessory_only as _looks_like_accessory_only
 
 
 class PipelineService:
@@ -166,30 +142,46 @@ class PipelineService:
         }
 
     def _auto_baseline_for_first_run(self, collector_id: str) -> bool:
-        """Uninitialized-DB safety invariant (2026-08-17 production reset --
-        see ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md's
-        addendum). A genuinely first-ever run for a collector, on a
-        database that has never had an epoch, must not be able to flood
-        NEW_REFERENCE/NEW_REGION events just because whoever triggered it
-        (a script, a dashboard "RUN ALL SAFE COLLECTORS" click) didn't
-        know to pass --force-baseline -- this is exactly how both the
+        """Collector-initialization safety invariant.
+
+        2026-08-17 (see ai/handoff/INCIDENT_TIMEX_CATALOGUE_BACKFILL_BURST.md's
+        addendum): a genuinely first-ever run for a collector must not be able
+        to flood NEW_REFERENCE/NEW_REGION events just because whoever
+        triggered it (a script, a dashboard "RUN ALL SAFE COLLECTORS" click)
+        didn't know to pass --force-baseline -- this is exactly how both the
         local dev database and a fresh field-test database independently
         reproduced the same Timex flood.
 
-        Deliberately narrow: only True when BOTH conditions hold, so it
-        can never change behavior for a collector that has already run at
-        least once (every currently-active Hetzner source has real run
-        history, so this is always False there) or on a database with a
-        real epoch (where is_baseline_active() already governs baseline
-        state correctly, and should keep doing so unchanged).
-        """
-        from app.services.epoch import get_active_epoch
+        2026-08-21 hostile-audit remediation (Phase 8): that protection
+        previously applied ONLY when no operational epoch existed, so adding
+        a new collector/brand/region to an already-running deployment
+        replayed the same flood unless an operator remembered
+        --force-baseline. Baseline safety must not depend on operator
+        memory: ANY collector with no successful run on this database is
+        auto-baselined on its first run, epoch or no epoch. A first run
+        persists watches/observations/leads normally but emits no Events.
 
-        if get_active_epoch(self.session) is not None:
-            return False
-        return (
-            self.session.query(CollectorRun).filter(CollectorRun.collector_id == collector_id).first() is None
+        Collectors with established successful run history are grandfathered
+        by that history rather than force-re-baselined at deploy (that would
+        silently cost every production source one real collection cycle).
+        The residual risk -- a long-retired collector re-enabled against a
+        large accumulated delta -- is handled by the Phase 6 novelty
+        inversion instead: such discoveries surface as honestly-labelled
+        FIRST_SEEN_BY_CLANK unless they carry affirmative publication
+        evidence, so a flood becomes a visible, low-priority, correctly-
+        labelled review queue rather than a wall of confident false
+        NEW_REFERENCE claims.
+        """
+        has_successful_run = (
+            self.session.query(CollectorRun)
+            .filter(
+                CollectorRun.collector_id == collector_id,
+                CollectorRun.status.in_(("SUCCESS", "PARTIAL", "ZERO_ITEMS")),
+            )
+            .first()
+            is not None
         )
+        return not has_successful_run
 
     def _stale_official_announcement(self, lead) -> str | None:
         """Returns a suppression reason if `lead` (a ReleaseLead) carries a
@@ -424,7 +416,14 @@ class PipelineService:
         collector_version: str = COLLECTOR_VERSION,
         parse_fn=None,
         default_region: str = "JP",
-        emit_events: bool = False,
+        # 2026-08-21 Phase 8: defaults flipped False->True. The historical
+        # casio_multi incident (zero Events ever, silently, for months)
+        # happened because these defaults were False and one runner forgot
+        # the flag. Forgetting now fails LOUD (an unexpected Event surfaces
+        # in review) instead of silent (a Watch row nobody ever hears
+        # about). Observation-only tooling (replay_snapshot, fixture mode)
+        # passes emit_events=False explicitly, making that intent visible.
+        emit_events: bool = True,
         notify: bool = False,
         experimental: bool = False,
         force_baseline: bool = False,
@@ -1068,6 +1067,104 @@ class PipelineService:
             window_hours=get_settings().product_baseline_freshness_window_hours,
         )
 
+    def _publication_cluster_shape(self, *, watch: Watch, published_at: datetime) -> dict:
+        """Is a fresh `published_at` a launch signature or maintenance noise?
+
+        Live evidence from the real Hetzner catalogue (see
+        ai/handoff/INCIDENT_20260819_EMERGENCY_HOTFIX.md, "published_at is
+        not launch authority"): genuine coordinated launches share
+        timestamps SECONDS apart within ONE collection (Cavatina Luxe: 5
+        SKUs / 6 seconds; TW6A E-Line: 3 SKUs / 3 seconds), while routine
+        catalogue-sync batches touch many unrelated collections at once (a
+        23-product cluster spanning Waterbury Classic, Easy Reader,
+        Weekender and Q Timex Marbella off one identical timestamp). A
+        source timestamp can mean launch, migration, maintenance,
+        republishing or localisation -- the cluster SHAPE is what
+        distinguishes them.
+
+        Returns {"siblings": N, "collections": M} where siblings = other
+        watches of the same manufacturer with a parseable published_at
+        within bulk_touch_proximity_seconds (default 90, the same
+        empirically-justified window find_baseline_catchup_candidates
+        uses), and collections = distinct non-null collections among
+        watch + siblings. Deliberately bounded work: only novelty-event
+        paths call this, which are rare in steady state.
+        """
+        proximity = timedelta(seconds=get_settings().bulk_touch_proximity_seconds)
+        rows = (
+            self.session.query(Watch.id, Watch.collection, Watch.extra_specs)
+            .filter(
+                Watch.manufacturer == watch.manufacturer,
+                Watch.id != watch.id,
+            )
+            .all()
+        )
+        siblings = 0
+        collections = {watch.collection}
+        for other_id, other_collection, other_specs in rows:
+            other_published = self._parse_extra_specs_published_at(other_specs)
+            if other_published is None:
+                continue
+            if abs((other_published - published_at).total_seconds()) > proximity.total_seconds():
+                continue
+            siblings += 1
+            collections.add(other_collection)
+        return {"siblings": siblings, "collections": len({c for c in collections if c})}
+
+    def _publication_evidence_strength(
+        self, *, watch: Watch, published_at: datetime | None, reactivation_note: str | None
+    ) -> tuple[str, dict]:
+        """Classify the strength of a first sighting's novelty evidence.
+
+        STRONG -- reserved for the official-news path (a first-party
+            announcement article IS a launch claim); handled in
+            _record_watch_event, never returned here.
+        MEDIUM -- a fresh source publication timestamp whose cluster shape
+            looks like a coordinated family launch (small sibling count,
+            or all siblings in one collection).
+        WEAK -- everything else: local absence only, a reactivation tag,
+            or a fresh timestamp embedded in a large cross-collection
+            sync batch (bulk-touch noise). WEAK never claims
+            NEW_REFERENCE.
+        """
+        if reactivation_note:
+            return "WEAK", {
+                "evidence_strength": "WEAK",
+                "cluster": None,
+                "strength_reason": "source-declared reactivation/backorder contradicts novelty",
+            }
+        if published_at is None:
+            return "WEAK", {
+                "evidence_strength": "WEAK",
+                "cluster": None,
+                "strength_reason": "no publication evidence; local absence is not launch evidence",
+            }
+        cluster = self._publication_cluster_shape(watch=watch, published_at=published_at)
+        suspicious = (
+            cluster["siblings"] + 1 >= get_settings().bulk_touch_cluster_min_size
+            and cluster["collections"] >= get_settings().bulk_touch_cluster_min_collections
+        )
+        if suspicious:
+            return "WEAK", {
+                "evidence_strength": "WEAK",
+                "cluster": cluster,
+                "strength_reason": (
+                    f"fresh published_at sits in a {cluster['siblings'] + 1}-product "
+                    f"{cluster['collections']}-collection same-source sync batch -- "
+                    "maintenance noise, not a launch signature"
+                ),
+            }
+        return "MEDIUM", {
+            "evidence_strength": "MEDIUM",
+            "cluster": cluster,
+            "strength_reason": (
+                f"fresh published_at with launch-like cluster shape "
+                f"({cluster['siblings'] + 1} product(s), "
+                f"{cluster['collections']} collection(s) within "
+                f"{get_settings().bulk_touch_proximity_seconds}s)"
+            ),
+        }
+
     def find_baseline_catchup_candidates(
         self, *, manufacturer: str | None = None, as_of: datetime | None = None
     ) -> list[dict]:
@@ -1105,13 +1202,30 @@ class PipelineService:
         noise) -- it's surfaced so create_baseline_catchup_events's
         required explicit watch_ids list is an informed human decision.
         """
-        from app.models import EventWatch
+        from app.models import Event, EventWatch
 
         now = ensure_utc(as_of) if as_of is not None else datetime.now(UTC)
         window = timedelta(days=get_settings().baseline_catchup_window_days)
 
-        has_event = self.session.query(EventWatch.watch_id).filter(EventWatch.watch_id == Watch.id).exists()
-        query = self.session.query(Watch).filter(~has_event)
+        # 2026-08-21: exclude only watches with an existing NOVELTY-CLAIMING
+        # event (NEW_REFERENCE / NEW_REGION). The original blanket "any
+        # Event" exclusion made sense when every catalogue discovery was
+        # either silent or a NEW_REFERENCE claim, but after the Phase 6
+        # novelty inversion an uncertain discovery carries FIRST_SEEN_BY_CLANK
+        # -- which is exactly the state catch-up exists to promote. Blocking
+        # promotion because of the honest label would have permanently locked
+        # every post-inversion 73-hour launch out of recovery (found by the
+        # Phase 2 semantic specimen corpus).
+        has_claim = (
+            self.session.query(EventWatch.event_id)
+            .join(Event, Event.id == EventWatch.event_id)
+            .filter(
+                EventWatch.watch_id == Watch.id,
+                Event.event_type.in_(("NEW_REFERENCE", "NEW_REGION")),
+            )
+            .exists()
+        )
+        query = self.session.query(Watch).filter(~has_claim)
         if manufacturer:
             query = query.filter(Watch.manufacturer == manufacturer)
 
@@ -1186,7 +1300,7 @@ class PipelineService:
         of Event -- only the reasons and an extra.belated_baseline_catchup
         flag distinguish it, both purely for human transparency.
         """
-        from app.models import EventWatch
+        from app.models import Event, EventWatch
         from app.services.editorial import EventEvidence, score_event
 
         results: list[dict] = []
@@ -1195,10 +1309,20 @@ class PipelineService:
             if watch is None:
                 results.append({"watch_id": watch_id, "created": False, "reason": "watch_not_found"})
                 continue
-            existing_event = (
-                self.session.query(EventWatch).filter(EventWatch.watch_id == watch_id).first()
+            # Same Phase 6 reconciliation as find_baseline_catchup_candidates:
+            # only a prior NOVELTY CLAIM blocks a belated NEW_REFERENCE. A
+            # FIRST_SEEN_BY_CLANK event is the honest-uncertainty state this
+            # function promotes, never a reason to refuse.
+            existing_claim = (
+                self.session.query(EventWatch)
+                .join(Event, Event.id == EventWatch.event_id)
+                .filter(
+                    EventWatch.watch_id == watch_id,
+                    Event.event_type.in_(("NEW_REFERENCE", "NEW_REGION")),
+                )
+                .first()
             )
-            if existing_event is not None:
+            if existing_claim is not None:
                 results.append({"watch_id": watch_id, "created": False, "reason": "already_has_event"})
                 continue
             first_obs = (
@@ -1335,7 +1459,13 @@ class PipelineService:
 
         baseline_active = force_baseline or is_baseline_active(self.session)
         baseline_freshness = None
-        if baseline_active and is_new_watch:
+        if is_new_watch:
+            # 2026-08-21 Phase 6/7: source-publication evidence is now
+            # evaluated for EVERY first sighting, not only while a baseline
+            # is active. It serves two roles with one implementation: the
+            # pre-existing baseline override (INCIDENT_TIMEX_BASELINE_
+            # ABSORPTION), and affirmative novelty evidence in normal
+            # operation -- see the classification rule below.
             baseline_freshness = self._new_reference_baseline_freshness(watch=watch, new_obs=new_obs)
 
         if baseline_active and not (baseline_freshness is not None and baseline_freshness.state == "FRESH"):
@@ -1380,7 +1510,62 @@ class PipelineService:
             # silently become "NEW_REFERENCE" merely because baseline had
             # already ended.
             reactivation_note = self._reactivation_signal(watch.extra_specs)
-            event_type = "FIRST_SEEN_BY_CLANK" if reactivation_note else "NEW_REFERENCE"
+            # 2026-08-21 Phase 6 -- NOVELTY INVERSION. The default for a
+            # first local sighting is now FIRST_SEEN_BY_CLANK: "this
+            # database has never seen this reference" is a discovery
+            # milestone, not launch evidence. NEW_REFERENCE must be EARNED
+            # by affirmative novelty evidence. The qualifying evidence
+            # implemented here is the same bar already trusted for the
+            # baseline override: the source's own structured publication
+            # timestamp, within product_baseline_freshness_window_hours of
+            # this observation (classify_baseline_product_freshness) AND a
+            # launch-like cluster shape -- a fresh timestamp embedded in a
+            # large cross-collection sync batch is maintenance noise, not a
+            # launch signature (_publication_evidence_strength). A source-
+            # declared REACTIVATED/backorder tag is affirmative
+            # counter-evidence and always wins. Absence of prior local
+            # rows, a new URL, and current stock are explicitly NOT
+            # novelty evidence. Recall is preserved, not suppressed: a
+            # FIRST_SEEN_BY_CLANK Event is still created, queued (tier 3),
+            # scored and reviewable -- it just no longer claims a launch
+            # it cannot prove. The official-news path (_record_watch_event)
+            # keeps NEW_REFERENCE for is_new_watch because a first-party
+            # announcement article IS affirmative launch evidence.
+            published_at = self._parse_extra_specs_published_at(watch.extra_specs)
+            strength, strength_detail = self._publication_evidence_strength(
+                watch=watch, published_at=published_at, reactivation_note=reactivation_note
+            )
+            publication_fresh = (
+                baseline_freshness is not None
+                and baseline_freshness.state == "FRESH"
+                and strength == "MEDIUM"
+            )
+            if reactivation_note:
+                event_type = "FIRST_SEEN_BY_CLANK"
+            elif publication_fresh:
+                event_type = "NEW_REFERENCE"
+            else:
+                event_type = "FIRST_SEEN_BY_CLANK"
+
+            novelty_evidence = {
+                "collector_id": new_obs.collector_id,
+                "region": new_obs.region,
+                "local_first_seen_at": ensure_utc(new_obs.observed_at).isoformat(),
+                "source_published_at": published_at.isoformat() if published_at else None,
+                "existed_locally_before": False,
+                "source_reactivation_signal": bool(reactivation_note),
+                "publication_freshness_state": baseline_freshness.state if baseline_freshness else None,
+                "baseline_state": "ACTIVE" if baseline_active else "INACTIVE",
+                "official_article_corroboration": None,
+                "evidence_strength": strength_detail["evidence_strength"],
+                "cluster_shape": strength_detail["cluster"],
+                "classification_reason": (
+                    strength_detail["strength_reason"]
+                    if not publication_fresh
+                    else f"affirmative source publication evidence ({baseline_freshness.reason}; "
+                    f"{strength_detail['strength_reason']})"
+                ),
+            }
 
             evidence = EventEvidence(
                 event_type=event_type,
@@ -1399,8 +1584,11 @@ class PipelineService:
                 "first-ever product-catalogue observation of this reference; "
                 "no prior region or announcement existed"
             ]
-            if baseline_freshness is not None and baseline_freshness.state == "FRESH":
-                reasons.append(f"baseline override: {baseline_freshness.reason}")
+            if publication_fresh:
+                reasons.append(
+                    f"affirmative novelty evidence: {baseline_freshness.reason}"
+                    + (" (baseline override)" if baseline_active else "")
+                )
             if reactivation_note:
                 reasons.append(reactivation_note)
             return self._persist_product_event(
@@ -1412,6 +1600,7 @@ class PipelineService:
                 notify=notify,
                 experimental=experimental,
                 prior_regions=None,
+                novelty_evidence=novelty_evidence,
             )
 
         prior_product_regions = self._prior_product_regions_for_watch(
@@ -1534,8 +1723,16 @@ class PipelineService:
         notify: bool,
         experimental: bool,
         prior_regions: frozenset[str] | None,
+        novelty_evidence: dict | None = None,
     ) -> dict:
-        """Persist a product-state Event after the caller proved its facts."""
+        """Persist a product-state Event after the caller proved its facts.
+
+        novelty_evidence (2026-08-21 Phase 7): the structured provenance of
+        a novelty classification -- source, region, local first-seen time,
+        source publication timestamp, reactivation signal, publication
+        freshness, baseline state, and the final classification reason.
+        Purely additive JSON in Event.extra; every field is data this
+        module already computed, so nothing is duplicated or re-derived."""
         from app.models import Event, EventWatch
         from app.services.discord_notify import DiscordNotifier
         from app.services.editorial import editorial_eligibility, format_alert
@@ -1564,6 +1761,7 @@ class PipelineService:
                 "alerted": False,
                 "editorial_eligible": editorial_eligible,
                 "editorial_eligibility_reasons": eligibility_reasons,
+                **({"novelty_evidence": novelty_evidence} if novelty_evidence else {}),
             },
         )
         self.session.add(event)
@@ -1578,7 +1776,17 @@ class PipelineService:
             score=scored.score,
         )
 
-        if notify and editorial_eligible:
+        # 2026-08-21: FIRST_SEEN_BY_CLANK is reviewable, not audible. The
+        # initial post-baseline crawl of a large catalogue emits hundreds of
+        # honest first-sightings per run (live-verified with casio_jp_sitemap:
+        # 400 in one run); at the experimental lane's threshold of 0 every
+        # one of them would ring Discord. They stay fully visible in the
+        # dashboard and QC queue; only the ping is gated behind an explicit
+        # operator opt-in.
+        first_seen_alertable = (
+            scored.event_type != "FIRST_SEEN_BY_CLANK" or settings.discord_first_seen_enabled
+        )
+        if notify and editorial_eligible and first_seen_alertable:
             notifier = DiscordNotifier(settings)
             threshold = (
                 settings.discord_experimental_min_score if experimental else settings.discord_official_min_score
@@ -1737,7 +1945,8 @@ class PipelineService:
         parse_fn=None,
         merge_key_prefix: str | None = None,
         default_region: str = "INTL",
-        emit_events: bool = False,
+        # See process_fetch_result: Phase 8 default flip, same rationale.
+        emit_events: bool = True,
         notify: bool = False,
         experimental: bool = False,
         force_baseline: bool = False,
@@ -2414,6 +2623,14 @@ class PipelineService:
                 REGION as CASIO_EU_REGION,
             )
             from app.collectors.casio_europe_sitemap import CasioEuropeSitemapCollector
+            from app.collectors.casio_jp_sitemap import (
+                COLLECTOR_ID as CASIO_JP_ID,
+            )
+            from app.collectors.casio_jp_sitemap import (
+                COLLECTOR_VERSION as CASIO_JP_VER,
+            )
+            from app.collectors.casio_jp_sitemap import REGION as CASIO_JP_REGION
+            from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
             from app.collectors.casio_uk_sitemap import (
                 COLLECTOR_ID as CASIO_UK_ID,
             )
@@ -2483,6 +2700,7 @@ class PipelineService:
                 TimexProductsCollector,
             )
             from app.parsers.casio_europe_sitemap import parse_casio_europe_sitemap_item
+            from app.parsers.casio_jp_sitemap import parse_casio_jp_sitemap_item
             from app.parsers.casio_uk_sitemap import parse_casio_uk_sitemap_item
             from app.parsers.citizen_de_products import parse_citizen_de_product_html
             from app.parsers.citizen_products import parse_citizen_search_hit
@@ -2498,6 +2716,16 @@ class PipelineService:
                         "collector_version": CASIO_UK_VER,
                         "parse_fn": parse_casio_uk_sitemap_item,
                         "default_region": CASIO_UK_REGION,
+                        "offline_kwarg": "sitemap_payload",
+                        "default_max_items": 300,
+                        "known_urls_from_observations": True,
+                    },
+                    "casio_jp": {
+                        "collector_cls": CasioJPSitemapCollector,
+                        "collector_id": CASIO_JP_ID,
+                        "collector_version": CASIO_JP_VER,
+                        "parse_fn": parse_casio_jp_sitemap_item,
+                        "default_region": CASIO_JP_REGION,
                         "offline_kwarg": "sitemap_payload",
                         "default_max_items": 300,
                         "known_urls_from_observations": True,
@@ -2652,8 +2880,14 @@ class PipelineService:
                     failures += 1
 
             backfill_context = self._annotate_new_reference_burst(
+                # 2026-08-21 Phase 6: a catalogue-backfill flood is now
+                # mostly FIRST_SEEN_BY_CLANK events (the honest default),
+                # so burst detection counts both first-sighting novelty
+                # types -- the flood signature, not a specific label.
                 new_reference_event_ids=[
-                    pe["event_id"] for pe in events if pe.get("event_type") == "NEW_REFERENCE" and pe.get("event_id")
+                    pe["event_id"]
+                    for pe in events
+                    if pe.get("event_type") in ("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK") and pe.get("event_id")
                 ],
                 discovered_count=len(result.discovered),
             )

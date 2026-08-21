@@ -1,5 +1,6 @@
 """FastAPI application entrypoint for Watch Clank dashboard and API."""
 
+import ipaddress
 import os
 import sys
 import threading
@@ -61,11 +62,22 @@ _jinja_env = Environment(
 templates = Jinja2Templates(env=_jinja_env)
 
 
+def _loopback(value: str | None) -> bool:
+    if not value:
+        return False
+    value = value.strip().strip("[]")
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return value.lower() == "localhost"
+
+
 def _instance_context() -> dict:
     """Instance label + notification authority, computed fresh per request
     (never cached at import time) so a .env change takes effect on reload
     without restarting the process. Available in every template via
     base.html's header -- see Phase 1 of the web catch-up sprint."""
+    from app.local_operator import mutation_authority
     from app.services.discord_notify import DiscordNotifier
 
     current_settings = get_settings()
@@ -75,6 +87,7 @@ def _instance_context() -> dict:
         "instance_label": label or "UNLABELED",
         "instance_configured": bool(label),
         "notification_authority": notifier.notification_authority(),
+        "mutation_authority": mutation_authority(app),
         "field_test": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
         "version": app.version,
         "channel": os.getenv("WATCH_CLANK_RELEASE_CHANNEL", "production"),
@@ -181,6 +194,33 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def phase0_dashboard_containment(request: Request, call_next):
+    """Deny remote reads and every unauthenticated mutation.
+
+    This remains effective even if someone bypasses the supported launcher and
+    tells Uvicorn to listen on a wildcard address.
+    """
+    network_authorizer = getattr(request.app.state, "phase0_network_authorizer", None)
+    client_host = request.client.host if request.client else None
+    host_header = request.headers.get("host", "").rsplit(":", 1)[0]
+    network_ok = (
+        bool(network_authorizer(client_host, host_header))
+        if network_authorizer is not None
+        else _loopback(client_host) and _loopback(host_header)
+    )
+    if not network_ok:
+        return HTMLResponse("Dashboard access is restricted to loopback.", status_code=403)
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        mutation_authorizer = getattr(request.app.state, "phase0_mutation_authorizer", None)
+        if mutation_authorizer is None or not mutation_authorizer(request):
+            return HTMLResponse(
+                "Dashboard mutations are disabled; no authenticated profile exists.",
+                status_code=403,
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -1399,14 +1439,22 @@ def health(db: Session = Depends(get_db)):
 @app.get("/api/runtime")
 def runtime_provenance():
     """Non-secret build/state provenance for operator verification."""
+    from app.local_operator import mutation_authority
+
+    field_test = os.getenv("WATCH_CLANK_FIELD_TEST") == "1"
+    authority = mutation_authority(app)
     return {
         "service": "Watch Clank",
         "version": app.version,
-        "mode": "FIELD TEST" if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" else "default",
+        "mode": "FIELD TEST" if field_test else "default",
         "channel": os.getenv("WATCH_CLANK_RELEASE_CHANNEL", "production"),
         "revision": os.getenv("WATCH_CLANK_BUILD_REVISION", "local development build"),
         "state_root": os.getenv("WATCH_CLANK_STATE_ROOT", "default server paths"),
-        "read_only": False,
-        "local_collection": os.getenv("WATCH_CLANK_FIELD_TEST") == "1",
-        "external_delivery": False if os.getenv("WATCH_CLANK_FIELD_TEST") == "1" else "configured by server settings",
+        # Phase 0 truth-in-provenance: report what this instance can
+        # actually do, derived from the installed authority rather than a
+        # hardcoded False that went stale when containment landed.
+        "mutation_authority": authority,
+        "read_only": authority == "NONE",
+        "local_collection": field_test,
+        "external_delivery": False if field_test else "configured by server settings",
     }

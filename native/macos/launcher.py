@@ -113,7 +113,16 @@ def main() -> int:
 
     import uvicorn
 
+    from app.local_operator import install_local_operator_authority
     from app.main import app
+
+    # The field-test profile is the supported local operator runtime: it
+    # may execute operator-safe mutations (QC triage, corrections, run-one,
+    # run-all-safe) from loopback. Everything else stays fail-closed under
+    # the Phase 0 containment middleware; notification secrets were already
+    # stripped in configure_environment, so authorized local mutations can
+    # never send anything off-machine.
+    install_local_operator_authority(app)
 
     port = available_port()
     url = f"http://127.0.0.1:{port}"
