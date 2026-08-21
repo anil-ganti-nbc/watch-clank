@@ -76,8 +76,13 @@ python -m scripts.run_pipeline --fixture-mode
 ### Start dashboard
 
 ```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8765
+python -m app.serve --host 127.0.0.1 --port 8765
 ```
+
+The dashboard has no authenticated remote profile. The supported launcher
+rejects wildcard, LAN, and invalid hosts; application middleware also rejects
+remote requests if Uvicorn is launched directly. All state-changing dashboard
+actions are disabled during Phase 0.
 
 Open http://127.0.0.1:8765
 
