@@ -15,7 +15,7 @@ services:
       dockerfile: Dockerfile
       args:
         GIT_REVISION: ${GIT_REVISION:-unknown}
-    image: watch-clank:${IMAGE_TAG:-soak-local}
+    image: watch-clank:${IMAGE_TAG:?set IMAGE_TAG to a commit SHA, e.g. IMAGE_TAG=$(git rev-parse --short HEAD)}
     container_name: watch-clank-soak
     restart: "no"
     environment:
@@ -35,7 +35,7 @@ services:
       dockerfile: Dockerfile
       args:
         GIT_REVISION: ${GIT_REVISION:-unknown}
-    image: watch-clank:${IMAGE_TAG:-soak-local}
+    image: watch-clank:${IMAGE_TAG:?set IMAGE_TAG to a commit SHA, e.g. IMAGE_TAG=$(git rev-parse --short HEAD)}
     container_name: watch-clank-migrate
     restart: "no"
     environment:
