@@ -337,7 +337,7 @@ def test_bundled_blocked_source_without_own_runs_reads_blocked(db_session: Sessi
 def test_repeated_same_slice_reads_stagnant_not_healthy_yield(db_session: Session, tmp_settings: Settings):
     """Live case seiko_products: four successful runs re-observing the same
     fixed 222 items. Yield must read STAGNANT with explanatory detail."""
-    from app.models import CollectorRun, SourceObservation, Watch
+    from app.models import CollectorRun, Watch
 
     n_items = 5
     for i in range(n_items):
@@ -405,8 +405,9 @@ def test_noisy_source_after_negative_reviews(db_session: Session, tmp_settings: 
 
 def test_seiko_collector_prioritises_unseen_urls():
     from app.collectors.base import DiscoveredItem
-    from app.collectors.seiko_products import COLLECTOR_ID, COLLECTOR_VERSION, REGION, TRUST_SCORE
-    from app.collectors.seiko_products import SeikoProductsCollector
+    from app.collectors.seiko_products import (
+        SeikoProductsCollector,
+    )
 
     c = SeikoProductsCollector()
 
@@ -436,7 +437,6 @@ def test_seiko_registry_entry_wires_known_urls(db_session: Session, tmp_settings
     cfg = pipeline._PRODUCT_REGISTRY.get("seiko") if pipeline._PRODUCT_REGISTRY else None
     if cfg is None:
         # Registry populates lazily; trigger it.
-        import asyncio
         pipeline._PRODUCT_REGISTRY  # noqa: B018
         # force population via a tiny offline call is overkill; call the loader
         from app.services.pipeline import PipelineService as P
@@ -532,9 +532,13 @@ def test_useful_review_never_deprioritizes(db_session: Session):
 
 
 def test_deprioritized_events_hidden_from_default_queue_visible_on_optin(db_session: Session):
-    from fastapi.testclient import TestClient
 
-    from tests.test_web import _make_event_for_watch, _make_watch, qc_client, web_client  # noqa: F401
+    from tests.test_web import (  # noqa: F401
+        _make_event_for_watch,
+        _make_watch,
+        qc_client,
+        web_client,
+    )
 
     # Covered at web level in test_web.py; this unit check exercises the SQL clause directly.
     filters_default = qc_service.QueueFilters()

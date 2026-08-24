@@ -122,7 +122,7 @@ def test_zero_items_success_shape():
 
 
 def test_unicode_reference_survives_roundtrip():
-    payload = ('{"reference": "T\\u00dcRK0055", "lastmod": ""}').encode()
+    payload = (b'{"reference": "T\\u00dcRK0055", "lastmod": ""}')
     r = parse_sitemap_family_item(payload)
     assert r.success
     assert r.watches[0].reference_raw == "TÜRK0055"

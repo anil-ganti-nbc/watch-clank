@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -2823,10 +2824,12 @@ class PipelineService:
             from app.collectors.timex_products import (
                 TimexProductsCollector,
             )
+            from app.collectors.timex_uk_products import COLLECTOR_ID as TIMEX_UK_COLLECTOR_ID
+            from app.collectors.timex_uk_products import TimexUkProductsCollector
+            from app.collectors.tissot_sitemap import COLLECTOR_ID as TISSOT_COLLECTOR_ID
+
             # Sitemap-family expansion (2026-08-25): reusable family + first brand
             from app.collectors.tissot_sitemap import TissotSitemapCollector
-            from app.collectors.tissot_sitemap import COLLECTOR_ID as TISSOT_COLLECTOR_ID
-            from app.parsers.sitemap_family import parse_sitemap_family_item
             from app.parsers.casio_europe_sitemap import parse_casio_europe_sitemap_item
             from app.parsers.casio_jp_sitemap import parse_casio_jp_sitemap_item
             from app.parsers.casio_uk_sitemap import parse_casio_uk_sitemap_item
@@ -2834,7 +2837,9 @@ class PipelineService:
             from app.parsers.citizen_products import parse_citizen_search_hit
             from app.parsers.seiko_jp_products import parse_seiko_jp_product_json
             from app.parsers.seiko_products import parse_seiko_product_json
+            from app.parsers.sitemap_family import parse_sitemap_family_item
             from app.parsers.timex_products import parse_timex_product_json
+            from app.parsers.timex_uk_products import parse_timex_uk_product_json
 
             self._PRODUCT_REGISTRY.update(
                 {
@@ -2932,12 +2937,28 @@ class PipelineService:
                         "collector_cls": TissotSitemapCollector,
                         "collector_id": TISSOT_COLLECTOR_ID,
                         "collector_version": "0.1.0",
-                        "parse_fn": parse_sitemap_family_item,
+                        "parse_fn": partial(parse_sitemap_family_item, manufacturer="Tissot"),
                         "default_region": "US",
                         "offline_kwarg": "sitemap_payload",
                         "default_max_items": 300,
                         "known_urls_from_observations": True,
                         "manufacturer": "Tissot",
+                    },
+                    # --- Timex UK: regional Shopify catalogue (2026-08-25) ---
+                    # Regional presence lane: primary editorial product is
+                    # NEW_REGION-class evidence on US-known SKUs plus UK-suffix
+                    # regional variants. Identity stays SKU-based; a US+UK SKU
+                    # resolves to ONE canonical watch.
+                    "timex_uk": {
+                        "collector_cls": TimexUkProductsCollector,
+                        "collector_id": TIMEX_UK_COLLECTOR_ID,
+                        "collector_version": "0.1.0",
+                        "parse_fn": parse_timex_uk_product_json,
+                        "default_region": "UK",
+                        "offline_kwarg": "listing_pages",
+                        "default_max_items": 300,
+                        "known_urls_from_observations": True,
+                        "manufacturer": "Timex",
                     },
                 }
             )
@@ -2945,6 +2966,14 @@ class PipelineService:
         if brand not in self._PRODUCT_REGISTRY:
             raise ValueError(f"unsupported experimental product brand: {brand!r}")
         cfg = self._PRODUCT_REGISTRY[brand]
+        # 2026-08-25 initial-catalogue-fill suppression (Law 1): a bounded-budget
+        # brand still walking its FIRST catalogue pass drips FIRST_SEEN events
+        # slice after slice. Gate that window here; the gate closes as soon as
+        # the pass wraps (slice re-serves known URLs) — see
+        # app/services/initial_fill.py.
+        from app.services.initial_fill import initial_fill_active
+
+        fill_gate = emit_events and initial_fill_active(self.session, cfg["collector_id"])
         effective_force_baseline = force_baseline or self._auto_baseline_for_first_run(cfg["collector_id"])
 
         settings = get_settings()
@@ -2997,9 +3026,31 @@ class PipelineService:
                     .distinct()
                     .all()
                 }
+            known_urls_this_run = None
+            if cfg.get("known_urls_from_observations"):
+                known_urls_this_run = {
+                    source_url
+                    for (source_url,) in self.session.query(SourceObservation.source_url)
+                    .filter(SourceObservation.collector_id == cfg["collector_id"])
+                    .distinct()
+                    .all()
+                }
+                run_kwargs["known_product_urls"] = set(known_urls_this_run)
             result = collector.run(**run_kwargs)
             status = result.metadata.get("component_status") or "FAILED"
             self._update_component_state(cfg["collector_id"], status, len(result.discovered))
+
+            # 2026-08-25 initial-fill gate decision: with the fill window armed
+            # (under the run ceiling) AND this slice purely unseen (the pass has
+            # not wrapped -- every processed URL was first-time), suppress
+            # first-sighting events exactly as force_baseline does. Any known
+            # URL in the slice proves the pass wrapped and closes the window.
+            slice_pure_unseen = (
+                known_urls_this_run is not None
+                and len(result.discovered) > 0
+                and all(i.url not in known_urls_this_run for i in result.discovered)
+            )
+            item_suppression_baseline = fill_gate and slice_pure_unseen
 
             # 2026-08-24 batch-complete publication-cluster evaluation: stage
             # the run's parsed records BEFORE any item is persisted, so
@@ -3041,7 +3092,7 @@ class PipelineService:
                     emit_events=emit_events,
                     notify=emit_events,
                     experimental=True,
-                    force_baseline=effective_force_baseline,
+                    force_baseline=effective_force_baseline or item_suppression_baseline,
                 )
                 if out["success"]:
                     parsed += 1

@@ -17,7 +17,8 @@ PARSER_ID = "sitemap_family_item"
 PARSER_VERSION = "0.1.0"
 
 
-def parse_sitemap_family_item(payload: bytes | str | dict, *, source_url: str = "") -> ParseResult:
+def parse_sitemap_family_item(payload: bytes | str | dict, *, source_url: str = "",
+                              manufacturer: str = "Unknown") -> ParseResult:
     if isinstance(payload, dict):
         data = payload
     else:
@@ -35,8 +36,8 @@ def parse_sitemap_family_item(payload: bytes | str | dict, *, source_url: str = 
 
     watch = ParsedWatch(
         reference_raw=str(reference_raw),
-        manufacturer=data.get("manufacturer", "Unknown"),
-        brand=data.get("manufacturer", "Unknown"),
+        manufacturer=data.get("manufacturer") or manufacturer or "Unknown",
+        brand=data.get("manufacturer") or manufacturer or "Unknown",
         extra_specs={"lastmod": data.get("lastmod")} if data.get("lastmod") else {},
         field_confidence={"reference": 0.7},  # URL-derived, not a labeled model-number field -- see module docstring
         parser_warnings=["no_price_availability_data_source_is_sitemap_only"],

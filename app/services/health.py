@@ -226,9 +226,7 @@ def _source_health(session: Session, collector_id: str) -> SourceHealth:
         acquisition = component.last_status  # BLOCKED or BACKED_OFF, verbatim
     elif component is not None and (component.consecutive_blocks or 0) > 0:
         acquisition = "BLOCKED"
-    elif component is not None and component.last_status == "SUCCESS":
-        acquisition = "HEALTHY"
-    elif last_success is not None:
+    elif component is not None and component.last_status == "SUCCESS" or last_success is not None:
         acquisition = "HEALTHY"
     elif last_failure is not None:
         acquisition = "BROKEN"
