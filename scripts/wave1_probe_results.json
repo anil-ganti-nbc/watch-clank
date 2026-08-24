@@ -1,0 +1,75 @@
+{
+ "tissot": {
+  "base": "https://www.tissotwatches.com",
+  "products_json": "/products.json?limit=1",
+  "sitemap": "/en-en/sitemap_index.xml",
+  "notes": "SFCC multi-locale; SKU in URL path (T1374071104100.html); JSON-LD confirmed with sku+price+availability",
+  "products_json_result": {
+   "status": "000",
+   "head": ""
+  },
+  "sitemap_result": {
+   "status": "000",
+   "head": ""
+  }
+ },
+ "hamilton": {
+  "base": "https://www.hamiltonwatch.com",
+  "products_json": "/products.json?limit=1",
+  "sitemap": "/sitemap.xml",
+  "notes": "edge flaky from this network; intermittent 200s then timeouts (rate limit?)",
+  "products_json_result": {
+   "status": "000",
+   "head": ""
+  },
+  "sitemap_result": {
+   "status": "000",
+   "head": ""
+  }
+ },
+ "longines": {
+  "base": "https://www.longines.com",
+  "sitemap": "/robots.txt",
+  "notes": "connection refused/reset from this network",
+  "sitemap_result": {
+   "status": "000",
+   "head": ""
+  }
+ },
+ "bulova": {
+  "base": "https://www.bulova.com",
+  "sitemap": "/sitemap.xml",
+  "notes": "SFCC (on/demandware.store paths); sitemap returns HTML error page",
+  "sitemap_result": {
+   "status": "000",
+   "head": ""
+  }
+ },
+ "swatch": {
+  "base": "https://www.swatch.com",
+  "sitemap": "/sitemap.xml",
+  "notes": "Access Denied edge page on some paths",
+  "sitemap_result": {
+   "status": "000",
+   "head": ""
+  }
+ },
+ "orient_jp": {
+  "base": "https://www.orient-watches.com",
+  "products_json": "/en/products.json?limit=1",
+  "notes": "WordPress-ish landing at /en; products.json 404",
+  "products_json_result": {
+   "status": "000",
+   "head": ""
+  }
+ },
+ "orient_usa": {
+  "base": "https://www.orientwatchusa.com",
+  "products_json": "/products.json?limit=1",
+  "notes": "Cloudflare challenge on products.json (Shopify underneath? check /collections/all)",
+  "products_json_result": {
+   "status": "000",
+   "head": ""
+  }
+ }
+}

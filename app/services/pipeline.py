@@ -29,6 +29,7 @@ from app.models import (
     Watch,
     WatchFamily,
 )
+from app.normalization.generic_reference import normalize_generic_reference
 from app.normalization.references import (
     normalize_casio_reference,
     normalize_citizen_reference,
@@ -51,6 +52,13 @@ _NORMALIZERS = {
     "Citizen": normalize_citizen_reference,
     "Seiko": normalize_seiko_reference,
     "Timex": normalize_timex_reference,
+    # Sitemap-family brands (2026-08-25): conservative passthrough normalization.
+    "Tissot": normalize_generic_reference,
+    "Hamilton": normalize_generic_reference,
+    "Longines": normalize_generic_reference,
+    "Bulova": normalize_generic_reference,
+    "Orient": normalize_generic_reference,
+    "Swatch": normalize_generic_reference,
 }
 
 # Sprint 10 hardening (ai/handoff/TIMEX_FRESHNESS_AUDIT.md): sources whose
@@ -2815,6 +2823,10 @@ class PipelineService:
             from app.collectors.timex_products import (
                 TimexProductsCollector,
             )
+            # Sitemap-family expansion (2026-08-25): reusable family + first brand
+            from app.collectors.tissot_sitemap import TissotSitemapCollector
+            from app.collectors.tissot_sitemap import COLLECTOR_ID as TISSOT_COLLECTOR_ID
+            from app.parsers.sitemap_family import parse_sitemap_family_item
             from app.parsers.casio_europe_sitemap import parse_casio_europe_sitemap_item
             from app.parsers.casio_jp_sitemap import parse_casio_jp_sitemap_item
             from app.parsers.casio_uk_sitemap import parse_casio_uk_sitemap_item
@@ -2912,6 +2924,20 @@ class PipelineService:
                         "offline_kwarg": "listing_pages",
                         "default_max_items": 300,
                         "known_urls_from_observations": True,
+                    },
+                    # --- 2026-08-25 expansion programme: sitemap-family brands ---
+                    # Each entry is configuration + the shared sitemap_family
+                    # collector; brand N+1 should be another block like this.
+                    "tissot": {
+                        "collector_cls": TissotSitemapCollector,
+                        "collector_id": TISSOT_COLLECTOR_ID,
+                        "collector_version": "0.1.0",
+                        "parse_fn": parse_sitemap_family_item,
+                        "default_region": "US",
+                        "offline_kwarg": "sitemap_payload",
+                        "default_max_items": 300,
+                        "known_urls_from_observations": True,
+                        "manufacturer": "Tissot",
                     },
                 }
             )
