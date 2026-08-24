@@ -349,6 +349,7 @@ def recent_intelligence(
     event_type: str | None = None,
     region: str | None = None,
     run_id: int | None = None,
+    include_deprioritized: bool = False,
     lead_manufacturer: str | None = None,
     lead_type: str | None = None,
     lead_region: str | None = None,
@@ -409,6 +410,7 @@ def recent_intelligence(
         event_type=event_type or None,
         region=region or None,
         run_id=run_id,
+        include_deprioritized=include_deprioritized,
     )
     current_events = qc_service.fetch_queue_page(db, qc_filters, limit=qc_service.DEFAULT_PAGE_SIZE)
     unreviewed_total = qc_service.unreviewed_count(db, qc_filters)
@@ -514,18 +516,24 @@ def qc_queue_api(
     run_id: int | None = None,
     before_id: int | None = None,
     limit: int = qc_service.DEFAULT_PAGE_SIZE,
+    include_deprioritized: bool = False,
     db: Session = Depends(get_db),
 ):
     """Next page of the QC active queue (unreviewed, editorially eligible
     Events), for the "Load more" button and for pulling in one replacement
     row after a review action -- see Phase 10 of
     ai/handoff/HUMAN_QC_FEEDBACK_CONTRACT.md ("entire-run/entire-queue
-    access")."""
+    access").
+
+    include_deprioritized=true (2026-08-24 QC-memory repair) reveals events
+    the pipeline flagged human_qc_deprioritized -- repeat weak events for
+    references the operator already rejected. Annotation, not deletion."""
     filters = qc_service.QueueFilters(
         manufacturer=manufacturer or None,
         event_type=event_type or None,
         region=region or None,
         run_id=run_id,
+        include_deprioritized=include_deprioritized,
     )
     limit = max(1, min(limit, 100))
     events = qc_service.fetch_queue_page(db, filters, before_id=before_id, limit=limit)

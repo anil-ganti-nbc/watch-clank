@@ -46,6 +46,35 @@ from app.core.time import ensure_utc
 # were "published" (Phase 2D of the freshness bugfix brief).
 _OBSERVATION_TIME_SOURCE_TYPES = frozenset({"RETAILER_EARLY_LISTING"})
 
+# 2026-08-24 Windows field-test repair: a `published_at` materially AFTER the
+# observation cannot be launch evidence -- the source clock disagrees with our
+# own or the value is a bulk-catalogue-touch artifact (live case:
+# TW2Y70900VQ/TW4B34900VQ carried published_at minutes-to-hours AFTER their
+# own first observation; Shopify re-publishes catalogue rows during routine
+# maintenance). The tolerance below only forgives plausible sub-minute clock
+# skew; anything beyond it makes the timestamp unusable for positive
+# freshness/launch evidence. The raw value stays preserved in provenance
+# (extra_specs / novelty_evidence.source_published_at) -- we reject it as
+# EVIDENCE, never delete it.
+_FUTURE_TIMESTAMP_TOLERANCE = timedelta(minutes=1)
+
+
+def publication_timestamp_is_usable(
+    *, published_at: datetime | None, observed_at: datetime
+) -> bool:
+    """May ``published_at`` contribute POSITIVE freshness/launch evidence?
+
+    True only when the timestamp exists and is not in the future relative to
+    the observation (beyond a small documented clock-skew tolerance). A
+    False return means "no positive evidence available"; it never asserts
+    the opposite direction (an old timestamp is separately judged by each
+    caller's window). Callers should keep surfacing the raw value as
+    provenance either way.
+    """
+    if published_at is None:
+        return False
+    return ensure_utc(published_at) <= ensure_utc(observed_at) + _FUTURE_TIMESTAMP_TOLERANCE
+
 
 @dataclass(frozen=True)
 class FreshnessResult:
@@ -139,13 +168,17 @@ def classify_baseline_product_freshness(
         return FreshnessResult(
             "UNKNOWN_TIMESTAMP", "no publication timestamp available for this source; baseline stays silent"
         )
-    age = ensure_utc(observed_at) - ensure_utc(published_at)
-    if age < timedelta(0):
+    # 2026-08-24: a future-dated timestamp is bulk-touch/clock noise, not
+    # launch evidence -- see publication_timestamp_is_usable. Treated exactly
+    # like "no usable evidence"; the raw value stays in provenance.
+    if not publication_timestamp_is_usable(published_at=published_at, observed_at=observed_at):
         return FreshnessResult(
-            "UNKNOWN_TIMESTAMP",
-            "publication timestamp is after the observation; untrusted, baseline stays silent",
+            "FUTURE_TIMESTAMP",
+            "publication timestamp is after the observation beyond clock-skew tolerance; "
+            "rejected as freshness evidence (bulk-catalogue-touch or clock artifact)",
         )
     window = timedelta(hours=window_hours)
+    age = ensure_utc(observed_at) - ensure_utc(published_at)
     if age <= window:
         return FreshnessResult(
             "FRESH", f"published {age} before baseline discovery, within the {window_hours}h window"

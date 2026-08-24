@@ -45,9 +45,25 @@
 </div>
 
 <div class="section">
+  <h2>Database history state</h2>
+  <p>
+    <span class="badge {{ 'badge-warn' if snapshot.history_state in ('EMPTY', 'BASELINING', 'UNKNOWN') else 'badge-ok' }}">{{ snapshot.history_state }}</span>
+    {% if snapshot.history_state == 'EMPTY' %}
+      <span class="small muted">No successful run has ever been recorded on this database — every source will be silently baselined and nothing here is news.</span>
+    {% elif snapshot.history_state == 'BASELINING' %}
+      <span class="small muted">One or more sources have not yet completed enough runs for their novelty evidence to be seasoned. Early FIRST_SEEN events from these runs deserve extra suspicion (catalogue backfill, not launches).</span>
+    {% elif snapshot.history_state == 'ESTABLISHED' %}
+      <span class="small muted">All known sources have accumulated established run history.</span>
+    {% else %}
+      <span class="small muted">History state could not be determined.</span>
+    {% endif %}
+  </p>
+</div>
+
+<div class="section">
   <h2>Sources ({{ snapshot.sources|length }})</h2>
   <table>
-    <thead><tr><th>Collector</th><th>State</th><th>Last success</th><th>Last failure</th><th>Last items</th><th>Reason</th></tr></thead>
+    <thead><tr><th>Collector</th><th>State</th><th>Acquisition</th><th>Editorial yield</th><th>Last success</th><th>Last failure</th><th>Last items</th><th>Reason</th></tr></thead>
     <tbody>
     {% for s in snapshot.sources %}
       <tr>
@@ -55,6 +71,13 @@
         <td>
           <span class="badge {{ 'badge-ok' if s.state == 'HEALTHY' else 'badge-warn' if s.state == 'WARNING' else 'badge-err' if s.state == 'FAILED' else 'badge-neutral' }}">{{ s.state }}</span>
           {% if s.heartbeat_overdue %}<br><span class="small muted">heartbeat overdue</span>{% endif %}
+        </td>
+        <td>
+          <span class="badge {{ 'badge-ok' if s.acquisition_state == 'HEALTHY' else 'badge-err' if s.acquisition_state in ('BLOCKED', 'BROKEN') else 'badge-warn' if s.acquisition_state not in ('UNKNOWN',) else 'badge-neutral' }}">{{ s.acquisition_state }}</span>
+        </td>
+        <td>
+          <span class="badge {{ 'badge-ok' if s.yield_state == 'HEALTHY' else 'badge-warn' if s.yield_state in ('LOW', 'NOISY', 'STAGNANT', 'ZERO') else 'badge-neutral' }}">{{ s.yield_state }}</span>
+          {% if s.yield_detail %}<br><span class="small muted">{{ s.yield_detail }}</span>{% endif %}
         </td>
         <td class="small">{% if s.last_success_at %}{{ s.last_success_at|humantime }}<br><span class="muted">{{ s.last_success_at|relative }}</span>{% else %}<span class="muted">never</span>{% endif %}</td>
         <td class="small">{% if s.last_failure_at %}{{ s.last_failure_at|humantime }}<br><span class="muted">{{ s.last_failure_at|relative }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>

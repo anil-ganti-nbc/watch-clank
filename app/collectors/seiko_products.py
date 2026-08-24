@@ -114,7 +114,13 @@ class SeikoProductsCollector:
 
         return all_items, fetches
 
-    def run(self, *, max_items: int | None = 250, listing_pages: list[bytes] | None = None) -> CollectorRunResult:
+    def run(
+        self,
+        *,
+        max_items: int | None = 250,
+        listing_pages: list[bytes] | None = None,
+        known_product_urls: set[str] | None = None,
+    ) -> CollectorRunResult:
         result = CollectorRunResult(
             collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, region=REGION, trust_score=TRUST_SCORE
         )
@@ -130,7 +136,21 @@ class SeikoProductsCollector:
             result.fetched = discovery_fetches
             return result
 
-        if max_items is not None:
+        known = known_product_urls or set()
+        # 2026-08-24 Windows field-test repair (slice starvation): the plain
+        # positional items[:max_items] slice re-read the SAME first ~222
+        # catalogue entries on every run while unseen items beyond the cap
+        # were never reached -- live evidence: all 222 observed Seiko US
+        # watches had exactly 4 observations (one per run), 956 of ~888+
+        # discovered never re-surfaced, and zero novelty was possible from a
+        # frozen slice. Mirrors timex_products.py/citizen_products.py's
+        # proven pattern: unseen URLs are processed before already-known
+        # ones; known URLs are deprioritized, never dropped.
+        if max_items is not None and known:
+            new_items = [i for i in items if i.url not in known]
+            known_items = [i for i in items if i.url in known]
+            items = (new_items + known_items)[:max_items]
+        elif max_items is not None:
             items = items[:max_items]
         result.discovered = items
         result.metadata["discovered_count"] = len(items)

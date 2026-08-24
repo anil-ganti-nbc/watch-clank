@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, text
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -102,6 +102,14 @@ class SourceHealth:
     last_failure_at: str | None
     last_item_count: int | None
     heartbeat_overdue: bool = False
+    # 2026-08-24 repair (truthful health): two dimensions a single state
+    # used to conflate. ACQUISITION answers "can this source currently reach
+    # and interpret the OEM?" -- a persistent 403 that exits 0 is BLOCKED,
+    # never healthy. YIELD answers "what has it produced for editorial
+    # review lately?" -- successful-but-empty is ZERO, not healthy.
+    acquisition_state: str = "UNKNOWN"  # HEALTHY | DEGRADED | BLOCKED | BACKED_OFF | BROKEN | NEVER_RUN
+    yield_state: str = "UNKNOWN"        # HEALTHY | LOW | NOISY | ZERO | STAGNANT | UNKNOWN
+    yield_detail: str | None = None
 
 
 @dataclass
@@ -114,6 +122,10 @@ class HealthSnapshot:
     latest_observation_at: str | None
     latest_event_at: str | None
     latest_specialist_lead_at: str | None
+    # 2026-08-24 repair: explicit EMPTY/BASELINING/ESTABLISHED state so a
+    # fresh database can never silently present itself as established
+    # operation (see app.services.history).
+    history_state: str = "UNKNOWN"
     sources: list[SourceHealth] = field(default_factory=list)
     active_locks: list[str] = field(default_factory=list)
     stale_running_count: int = 0
@@ -128,7 +140,38 @@ def _source_health(session: Session, collector_id: str) -> SourceHealth:
         .all()
     )
     if not runs:
-        return SourceHealth(collector_id, "NEVER_RUN", None, None, None)
+        # casio_japan never gets its own CollectorRun (it is bundled inside
+        # casio_multi's multi-source run), but its per-source operational
+        # state still records BLOCKED/BACKED_OFF truthfully -- surface that
+        # rather than a misleading NEVER_RUN.
+        component = _component_state(session, collector_id)
+        if component is not None and component.last_status:
+            acq = component.last_status  # BLOCKED / BACKED_OFF / SUCCESS, verbatim
+            return SourceHealth(
+                collector_id,
+                "WARNING" if acq in ("BLOCKED", "BACKED_OFF") else "NEVER_RUN",
+                None,
+                None,
+                component.last_item_count or 0,
+                acquisition_state=acq,
+                yield_state="UNKNOWN",
+                yield_detail=(
+                    f"bundled inside another run (no own collector_runs rows); "
+                    f"last component status: {acq}"
+                    if acq in ("BLOCKED", "BACKED_OFF")
+                    else f"no own runs; last component status: {acq}"
+                ),
+            )
+        return SourceHealth(
+            collector_id,
+            "NEVER_RUN",
+            None,
+            None,
+            None,
+            acquisition_state="NEVER_RUN",
+            yield_state="UNKNOWN",
+            yield_detail="no run has ever been recorded for this source on this database",
+        )
 
     last_success = next((r for r in runs if r.status in SUCCESS_STATUSES), None)
     last_failure = next((r for r in runs if r.status == "FAILED"), None)
@@ -172,6 +215,34 @@ def _source_health(session: Session, collector_id: str) -> SourceHealth:
             if state == "HEALTHY":
                 state = "WARNING"
 
+    # --- 2026-08-24: two-dimensional truthful health -------------------
+    component = _component_state(session, collector_id)
+
+    # ACQUISITION: can this source currently execute and acquire
+    # interpretable data? Driven by the per-source operational record
+    # (source_component_states), which distinguishes BLOCKED/BACKED_OFF from
+    # SUCCESS -- a persistent 403 that exits 0 must never render healthy.
+    if component is not None and component.last_status in ("BLOCKED", "BACKED_OFF"):
+        acquisition = component.last_status  # BLOCKED or BACKED_OFF, verbatim
+    elif component is not None and (component.consecutive_blocks or 0) > 0:
+        acquisition = "BLOCKED"
+    elif component is not None and component.last_status == "SUCCESS":
+        acquisition = "HEALTHY"
+    elif last_success is not None:
+        acquisition = "HEALTHY"
+    elif last_failure is not None:
+        acquisition = "BROKEN"
+    else:
+        acquisition = "UNKNOWN"
+
+    # YIELD: what recent useful output exists? Deliberately conservative
+    # vocabulary. UNKNOWN while the database is still EMPTY/BASELINING
+    # (early first-sightings are baseline noise, not yield evidence);
+    # ZERO when acquisitions succeed but nothing new surfaces;
+    # STAGNANT when the same fixed slice of items repeats run after run;
+    # NOISY when surfaced candidates are predominantly judged NOT_USEFUL.
+    yield_state, yield_detail = _yield_state(session, collector_id, runs)
+
     return SourceHealth(
         collector_id=collector_id,
         state=state,
@@ -179,6 +250,106 @@ def _source_health(session: Session, collector_id: str) -> SourceHealth:
         last_failure_at=ensure_utc(last_failure.started_at).isoformat() if last_failure else None,
         last_item_count=most_recent.discovered_count,
         heartbeat_overdue=heartbeat_overdue,
+        acquisition_state=acquisition,
+        yield_state=yield_state,
+        yield_detail=yield_detail,
+    )
+
+
+def _component_state(session: Session, collector_id: str):
+    """Per-source operational row (last_status/consecutive_blocks), or None."""
+    from app.models.release_lead import SourceComponentState
+
+    return (
+        session.query(SourceComponentState)
+        .filter(SourceComponentState.source_id == collector_id)
+        .one_or_none()
+    )
+
+
+# How many recent successful runs the yield evaluation looks at.
+_YIELD_RUN_WINDOW = 4
+
+
+def _yield_state(session: Session, collector_id: str, runs: list[CollectorRun]) -> tuple[str, str | None]:
+    """Recent editorial-yield classification for one source.
+
+    HEALTHY   -- at least one Event surfaced within the run window.
+    NOISY     -- events surfaced but most recent human verdicts on this
+                 source's events were NOT_USEFUL/DUPLICATE/FALSE_POSITIVE.
+    STAGNANT  -- successful acquisitions keep re-observing the same items
+                 with nothing genuinely new (fixed-slice signature: live
+                 case -- all 222 observed Seiko US watches had exactly one
+                 observation per run across four runs).
+    ZERO      -- successful acquisition, zero observations beyond the first
+                 catalogue pass, no events.
+    UNKNOWN   -- too little history (EMPTY/BASELINING databases).
+    """
+    from app.models import EventReview
+
+    successful_runs = [r for r in runs if r.status in ("SUCCESS", "PARTIAL", "ZERO_ITEMS")]
+    if len(successful_runs) < 2:
+        return "UNKNOWN", "fewer than two successful runs on this database -- yield not yet assessable"
+
+    total_new = sum(r.new_watch_count or 0 for r in successful_runs)
+    total_obs = sum(r.observation_count or 0 for r in successful_runs)
+    if total_obs == 0:
+        # Older runs may not carry per-run observation counters; fall back to
+        # the persisted evidence itself.
+        total_obs = session.scalar(
+            select(func.count()).select_from(SourceObservation).where(
+                SourceObservation.collector_id == collector_id
+            )
+        ) or 0
+    latest_obs_total = session.scalar(
+        select(func.count()).select_from(SourceObservation).where(SourceObservation.collector_id == collector_id)
+    ) or 0
+
+    # Events attributed to this collector via its runs' summary metadata ids.
+    event_ids: list[int] = []
+    for r in successful_runs:
+        meta = r.summary_metadata if isinstance(r.summary_metadata, dict) else None
+        for ev in (meta or {}).get("events", []) or []:
+            if isinstance(ev, dict) and ev.get("event_id"):
+                event_ids.append(ev["event_id"])
+
+    if event_ids:
+        verdicts = [
+            v
+            for (v,) in session.execute(
+                select(EventReview.disposition).where(EventReview.event_id.in_(event_ids))
+            ).all()
+        ]
+        if verdicts:
+            negative = {"NOT_USEFUL", "DUPLICATE", "FALSE_POSITIVE"}
+            if len([v for v in verdicts if v in negative]) > len(verdicts) / 2:
+                return (
+                    "NOISY",
+                    f"{len(verdicts)} reviewed events, majority ({len([v for v in verdicts if v in negative])}) "
+                    "judged NOT_USEFUL/DUPLICATE/FALSE_POSITIVE by the operator",
+                )
+        return "HEALTHY", f"{len(event_ids)} event(s) surfaced within the last {len(successful_runs)} successful runs"
+
+    if total_new == 0:
+        if total_obs > 0 and latest_obs_total > 0:
+            distinct = session.scalar(
+                select(func.count(func.distinct(SourceObservation.watch_id))).where(
+                    SourceObservation.collector_id == collector_id
+                )
+            ) or 0
+            obs_per_collector_run = latest_obs_total / max(len(successful_runs), 1)
+            if abs(obs_per_collector_run - distinct) <= max(2.0, distinct * 0.05):
+                return (
+                    "STAGNANT",
+                    f"each of the last {len(successful_runs)} successful runs re-observes essentially the same "
+                    f"{distinct} item(s); no unseen catalogue content reached",
+                )
+            return "ZERO", f"{len(successful_runs)} successful runs, {total_obs} observations, 0 new references"
+        return "ZERO", f"{len(successful_runs)} successful runs produced no observations"
+
+    return (
+        "LOW",
+        f"{total_new} new reference(s) over {len(successful_runs)} successful runs, no Events yet",
     )
 
 
@@ -199,6 +370,17 @@ def get_health_snapshot(session: Session, settings: Settings, *, engine: Engine 
     latest_lead = session.query(SpecialistLead).order_by(SpecialistLead.discovered_at.desc()).first()
 
     sources = [_source_health(session, cid) for cid in KNOWN_COLLECTORS]
+
+    # 2026-08-24 repair: explicit history state (EMPTY/BASELINING/ESTABLISHED)
+    # -- see app.services.history. Computed defensively so a health check
+    # can never itself fail on a brand-new database.
+    from app.services.history import history_state
+
+    try:
+        h_state = history_state(session)
+    except Exception:
+        h_state = "UNKNOWN"
+
     stale_cutoff = datetime.now(UTC) - timedelta(minutes=settings.stale_run_threshold_minutes)
 
     running = session.query(CollectorRun).filter(CollectorRun.status == "RUNNING").all()
@@ -220,6 +402,7 @@ def get_health_snapshot(session: Session, settings: Settings, *, engine: Engine 
         latest_specialist_lead_at=(
             ensure_utc(latest_lead.discovered_at).isoformat() if latest_lead else None
         ),
+        history_state=h_state,
         sources=sources,
         active_locks=active_locks,
         stale_running_count=stale_running_count,

@@ -1152,3 +1152,41 @@ def test_history_page_renders_toggle_links_for_both_sections(qc_client: TestClie
     assert resp.status_code == 200
     assert "include_corrected=1" in resp.text
     assert "lead_include_corrected=1" in resp.text
+
+
+# --- 2026-08-24 Windows field-test repair: QC-memory queue behaviour --------
+
+
+def test_deprioritized_event_hidden_from_default_queue_and_recoverable(qc_client: TestClient, db: Session):
+    """A repeat weak event flagged human_qc_deprioritized must stay out of
+    the DEFAULT queue but remain fully retrievable via the explicit opt-in
+    filter. Annotation, never deletion -- recall-first contract preserved."""
+    watch = _make_watch(db, manufacturer="Timex", brand="Timex",
+                        reference_raw="TWQCMEM001VQ", reference_canonical="TWQCMEM001VQ")
+    hidden = _make_event_for_watch(db, watch)
+    hidden.extra = {**hidden.extra, "human_qc_deprioritized": True,
+                    "human_qc_context": {"prior_review_verdict": "NOT_USEFUL"}}
+    visible = _make_event_for_watch(db, watch)  # unflagged sibling
+    db.commit()
+
+    default_ids = {i["event_id"] for i in qc_client.get("/api/qc/queue").json()["items"]}
+    assert hidden.id not in default_ids
+    assert visible.id in default_ids
+
+    optin_ids = {
+        i["event_id"]
+        for i in qc_client.get("/api/qc/queue", params={"include_deprioritized": "true"}).json()["items"]
+    }
+    assert hidden.id in optin_ids
+
+
+def test_intelligence_page_accepts_include_deprioritized_flag(qc_client: TestClient, db: Session):
+    watch = _make_watch(db, manufacturer="Timex", brand="Timex",
+                        reference_raw="TWQCMEM002VQ", reference_canonical="TWQCMEM002VQ")
+    ev = _make_event_for_watch(db, watch)
+    ev.extra = {**ev.extra, "human_qc_deprioritized": True}
+    db.commit()
+
+    resp = qc_client.get("/intelligence", params={"include_deprioritized": "true"})
+    assert resp.status_code == 200
+    assert "TWQCMEM002VQ" in resp.text

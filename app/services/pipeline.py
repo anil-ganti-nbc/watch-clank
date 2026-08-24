@@ -119,6 +119,12 @@ class PipelineService:
     def __init__(self, session: Session, storage: SnapshotStorageService | None = None) -> None:
         self.session = session
         self.storage = storage or SnapshotStorageService()
+        # 2026-08-24 batch-complete publication-cluster evaluation: armed by
+        # run_product_observation_pipeline with {collector_id: [staged parsed
+        # records]} for the current run so novelty evidence sees the WHOLE
+        # source batch, not insertion-order prefix state. Unarmed (None) in
+        # every other path -- behavior is unchanged there.
+        self._current_publication_batch: dict[str, list[dict]] | None = None
 
     def _epoch_fields(self, *, force_baseline: bool = False) -> dict:
         """epoch_id/is_baseline kwargs for a new CollectorRun -- see
@@ -1091,6 +1097,33 @@ class PipelineService:
         paths call this, which are rare in steady state.
         """
         proximity = timedelta(seconds=get_settings().bulk_touch_proximity_seconds)
+        # 2026-08-24 batch-complete evaluation: when the runner staged the
+        # current run's parsed records, judge cluster shape against the WHOLE
+        # source batch (plus already-persisted watches from earlier runs),
+        # never against insertion-order prefix state.
+        batch = self._current_publication_batch
+        if batch is not None:
+            staged = []
+            for records in batch.values():
+                staged.extend(records)
+            rows = [
+                (None, rec.get("collection"), {"published_at": rec.get("published_at")})
+                for rec in staged
+                if rec.get("reference_canonical") != watch.reference_canonical
+            ]
+            persisted = (
+                self.session.query(Watch.id, Watch.collection, Watch.extra_specs)
+                .filter(
+                    Watch.manufacturer == watch.manufacturer,
+                    Watch.id != watch.id,
+                )
+                .all()
+            )
+            return self._cluster_shape_from_rows(
+                watch=watch, published_at=published_at,
+                rows=rows + [(r[0], r[1], r[2]) for r in persisted],
+                proximity=proximity,
+            )
         rows = (
             self.session.query(Watch.id, Watch.collection, Watch.extra_specs)
             .filter(
@@ -1099,6 +1132,21 @@ class PipelineService:
             )
             .all()
         )
+        return self._cluster_shape_from_rows(
+            watch=watch, published_at=published_at, rows=rows, proximity=proximity
+        )
+
+    def _cluster_shape_from_rows(
+        self,
+        *,
+        watch: Watch,
+        published_at: datetime,
+        rows,
+        proximity: timedelta,
+    ) -> dict:
+        """Shared cluster-shape computation for persisted-row and
+        batch-payload sources. ``rows`` is an iterable of
+        (watch_id, collection, extra_specs) EXCLUDING the subject watch."""
         siblings = 0
         collections = {watch.collection}
         for other_id, other_collection, other_specs in rows:
@@ -1111,8 +1159,24 @@ class PipelineService:
             collections.add(other_collection)
         return {"siblings": siblings, "collections": len({c for c in collections if c})}
 
+    def _publication_batch_payload(self) -> dict[str, list[dict]] | None:
+        """The current run's staged parsed records, if a batch evaluation was
+        armed by run_product_observation_pipeline (2026-08-24 repair).
+
+        Why this exists: _record_product_transition runs DURING sequential
+        ingest, so the persisted-Watch query in _publication_cluster_shape
+        cannot yet see later members of the same source bulk-touch batch --
+        the first item of a 100-product maintenance sync looked like an
+        isolated launch (live case: Timex's 2026-08-21T05:48-06:11 catalogue
+        touch produced 26 "launch-shaped" FIRST_SEEN events). When the
+        runner arms this payload, evidence-strength classification sees the
+        COMPLETE batch instead of insertion-order prefix state.
+        """
+        return self._current_publication_batch
+
     def _publication_evidence_strength(
-        self, *, watch: Watch, published_at: datetime | None, reactivation_note: str | None
+        self, *, watch: Watch, published_at: datetime | None, reactivation_note: str | None,
+        observed_at=None,
     ) -> tuple[str, dict]:
         """Classify the strength of a first sighting's novelty evidence.
 
@@ -1138,6 +1202,23 @@ class PipelineService:
                 "evidence_strength": "WEAK",
                 "cluster": None,
                 "strength_reason": "no publication evidence; local absence is not launch evidence",
+            }
+        # 2026-08-24: a future-dated source timestamp is bulk-touch/clock
+        # noise, not launch evidence -- see
+        # app.services.freshness.publication_timestamp_is_usable. The raw
+        # value stays in novelty_evidence.source_published_at as provenance.
+        from app.services.freshness import publication_timestamp_is_usable
+
+        if not publication_timestamp_is_usable(
+            published_at=published_at, observed_at=observed_at
+        ):
+            return "WEAK", {
+                "evidence_strength": "WEAK",
+                "cluster": None,
+                "strength_reason": (
+                    f"source published_at ({published_at.isoformat()}) is after the observation "
+                    "-- rejected as freshness evidence (bulk-catalogue-touch or clock artifact)"
+                ),
             }
         cluster = self._publication_cluster_shape(watch=watch, published_at=published_at)
         suspicious = (
@@ -1533,7 +1614,8 @@ class PipelineService:
             # announcement article IS affirmative launch evidence.
             published_at = self._parse_extra_specs_published_at(watch.extra_specs)
             strength, strength_detail = self._publication_evidence_strength(
-                watch=watch, published_at=published_at, reactivation_note=reactivation_note
+                watch=watch, published_at=published_at, reactivation_note=reactivation_note,
+                observed_at=new_obs.observed_at,
             )
             publication_fresh = (
                 baseline_freshness is not None
@@ -1742,6 +1824,21 @@ class PipelineService:
             scored, availability_min_score=settings.availability_editorial_min_score
         )
 
+        # 2026-08-24 QC-memory repair: consult prior human reviews for this
+        # canonical reference. The Event is always created (recall-first --
+        # annotation, never deletion); a repeat WEAK event for an already-
+        # rejected reference is additionally flagged human_qc_deprioritized,
+        # which keeps it out of the DEFAULT queue but fully visible via the
+        # explicit opt-in filter and /qc/history.
+        from app.services.qc import qc_memory_context
+
+        qc_context, qc_deprioritize = qc_memory_context(
+            self.session,
+            watch=watch,
+            event_type=scored.event_type,
+            editorial_eligible=editorial_eligible,
+        )
+
         event = Event(
             event_type=scored.event_type,
             title=f"{watch.manufacturer} {watch.reference_raw}: {scored.event_type}",
@@ -1761,6 +1858,22 @@ class PipelineService:
                 "alerted": False,
                 "editorial_eligible": editorial_eligible,
                 "editorial_eligibility_reasons": eligibility_reasons,
+                **(
+                    {
+                        "human_qc_deprioritized": True,
+                        "human_qc_context": qc_context,
+                        "human_qc_deprioritization_reason": (
+                            f"reference already reviewed {qc_context['prior_review_verdict']} "
+                            f"({qc_context['prior_review_count']} prior review(s)); this "
+                            f"{scored.event_type} is an equivalent weak repeat class"
+                        )
+                        if qc_deprioritize and qc_context
+                        else None,
+                    }
+                    if qc_deprioritize
+                    else {}
+                ),
+                **({"human_qc_context": qc_context} if qc_context and not qc_deprioritize else {}),
                 **({"novelty_evidence": novelty_evidence} if novelty_evidence else {}),
             },
         )
@@ -2575,6 +2688,9 @@ class PipelineService:
             self.session.commit()
             raise
         finally:
+            # Disarm the batch payload (2026-08-24): it describes THIS run
+            # only and must never leak into later, unrelated evaluations.
+            self._current_publication_batch = None
             lock.release()
 
     # --- Experimental multi-brand product/catalogue observation (Sprint 3) -
@@ -2768,6 +2884,14 @@ class PipelineService:
                         "default_region": SEIKO_PROD_REGION,
                         "offline_kwarg": "listing_pages",
                         "default_max_items": 300,
+                        # 2026-08-24 Windows field-test repair: seiko_products'
+                        # run() now accepts known_product_urls (new-first
+                        # slicing, same pattern as timex/citizen). This was
+                        # the only product registry entry whose collector
+                        # supported the parameter but was never wired to it,
+                        # which froze its 300-item slice on the same
+                        # catalogue prefix forever.
+                        "known_urls_from_observations": True,
                     },
                     "seiko_jp": {
                         "collector_cls": SeikoJapanProductsCollector,
@@ -2850,6 +2974,30 @@ class PipelineService:
             result = collector.run(**run_kwargs)
             status = result.metadata.get("component_status") or "FAILED"
             self._update_component_state(cfg["collector_id"], status, len(result.discovered))
+
+            # 2026-08-24 batch-complete publication-cluster evaluation: stage
+            # the run's parsed records BEFORE any item is persisted, so
+            # novelty evidence for the FIRST processed item already sees the
+            # same complete source batch as the LAST. Deterministic:
+            # independent of input order and ingest timing.
+            if emit_events and getattr(result, "fetched", None):
+                staged_records: list[dict] = []
+                for fr_staged in result.fetched:
+                    if not fr_staged.success or not fr_staged.payload:
+                        continue
+                    try:
+                        parse_staged = cfg["parse_fn"](fr_staged.payload)
+                    except Exception:
+                        continue
+                    for pw_staged in getattr(parse_staged, "watches", []) or []:
+                        staged_records.append(
+                            {
+                                "reference_canonical": pw_staged.reference_raw,
+                                "collection": pw_staged.collection,
+                                "published_at": (pw_staged.extra_specs or {}).get("published_at"),
+                            }
+                        )
+                self._current_publication_batch = {cfg["collector_id"]: staged_records}
 
             new_watches = parsed = failures = 0
             events: list[dict] = []

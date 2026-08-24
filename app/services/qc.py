@@ -50,6 +50,12 @@ class QueueFilters:
     event_type: str | None = None
     region: str | None = None
     run_id: int | None = None
+    # 2026-08-24 QC-memory repair: events flagged human_qc_deprioritized are
+    # kept out of the DEFAULT queue (the operator already rejected this
+    # reference's equivalent event) but are never deleted and remain
+    # reachable via this explicit opt-in -- recall-first: annotation, not
+    # suppression.
+    include_deprioritized: bool = False
 
 
 def _run_window(db: Session, run_id: int) -> tuple[datetime, datetime] | None:
@@ -104,6 +110,15 @@ def _base_unreviewed_query(db: Session, filters: QueueFilters):
         .where(EventReview.id.is_(None))
         .where(_eligibility_clause())
     )
+    # 2026-08-24 QC-memory repair: default queue hides events the pipeline
+    # flagged human_qc_deprioritized (a repeat weak event for a reference
+    # whose equivalent event was already reviewed NOT_USEFUL). They stay in
+    # the database and reappear with ?include_deprioritized=1 or on the
+    # history view -- annotation, not deletion.
+    if not filters.include_deprioritized:
+        stmt = stmt.where(
+            func.json_extract(Event.extra, "$.human_qc_deprioritized").is_(None)
+        )
     return _apply_filters(stmt, filters, db=db)
 
 
@@ -269,6 +284,79 @@ def prior_reviews_for_reference(db: Session, *, manufacturer: str, reference_can
             .order_by(desc(EventReview.reviewed_at))
         ).all()
     )
+
+
+# --- 2026-08-24 Windows field-test repair: reference-level QC memory ------
+#
+# The HUMAN_QC_FEEDBACK_CONTRACT's recall-first rule stays intact: a Review
+# is feedback about one Event, never a blacklist of a reference, and a
+# meaningful NEW event class for the same reference must still surface.
+# What was missing is any memory at all: nothing downstream consulted prior
+# reviews, so an equivalent weak repeat event for a reference the operator
+# had just rejected queued identically to a fresh discovery.
+#
+# The mechanism below is annotation + queue deprioritisation only:
+# - it runs AFTER the event is created (the Event row always exists);
+# - strong evidence classes are exempt (see _QC_MEMORABLE_EVENT_TYPES);
+# - the flag lives in Event.extra and is fully explainable in metadata;
+# - ?include_deprioritized=1 reveals everything again.
+
+# Event types considered "weak/redundant repeats" when a reference already
+# carries a negative human verdict. Anything NOT here (NEW_REFERENCE with
+# strong evidence, RESTOCK after material absence, PRICE_CHANGE...) is a
+# distinct claim that must surface regardless of past verdicts. FIRST_SEEN_
+# BY_CLANK is inherently weak by design ("this DB hasn't seen it" is not
+# launch evidence); SOLD_OUT/AVAILABILITY_CHANGE are catalogue noise unless
+# editorially eligible, which the eligibility stamp already encodes.
+_WEAK_REPEAT_EVENT_TYPES = frozenset({"FIRST_SEEN_BY_CLANK", "SOLD_OUT", "AVAILABILITY_CHANGE"})
+_NEGATIVE_DISPOSITIONS = frozenset({"NOT_USEFUL", "DUPLICATE", "FALSE_POSITIVE"})
+
+
+def qc_memory_context(
+    db: Session,
+    *,
+    watch: Watch | None,
+    event_type: str,
+    editorial_eligible: bool,
+) -> tuple[dict | None, bool]:
+    """Return (context_dict_or_None, should_deprioritize).
+
+    Consults prior human reviews for the same canonical reference via the
+    existing prior_reviews_for_reference helper. Deprioritization applies
+    ONLY when ALL hold:
+      - a prior review exists for this exact canonical reference,
+      - its disposition is negative (NOT_USEFUL/DUPLICATE/FALSE_POSITIVE),
+      - the new event is another WEAK repeat class (not a materially new
+        claim), or an availability event that already failed the editorial
+        eligibility bar.
+
+    USEFUL verdicts become positive context but never cause automatic
+    surfacing; they also never deprioritize anything.
+    """
+    if watch is None:
+        return None, False
+
+    reviews = prior_reviews_for_reference(
+        db, manufacturer=watch.manufacturer, reference_canonical=watch.reference_canonical
+    )
+    if not reviews:
+        return None, False
+
+    latest = reviews[0]
+    context = {
+        "prior_review_verdict": latest.disposition,
+        "prior_review_event_type": latest.event_type,
+        "prior_reviewed_at": latest.reviewed_at.isoformat() if latest.reviewed_at else None,
+        "prior_review_count": len(reviews),
+        "latest_review_id": latest.id,
+    }
+
+    weak_repeat = (
+        event_type in _WEAK_REPEAT_EVENT_TYPES
+        or (event_type in {"RESTOCK", "OUT_OF_STOCK"} and not editorial_eligible)
+    )
+    should_deprioritize = latest.disposition in _NEGATIVE_DISPOSITIONS and weak_repeat
+    return context, should_deprioritize
 
 
 # --- SpecialistLead (Layer B) QC -- sibling of the Event functions above ---
