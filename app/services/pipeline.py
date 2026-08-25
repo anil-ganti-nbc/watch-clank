@@ -637,6 +637,7 @@ class PipelineService:
                     notify=notify,
                     experimental=experimental,
                     force_baseline=force_baseline,
+                    collector_id=collector_id,
                 )
 
             self.session.commit()
@@ -1512,6 +1513,7 @@ class PipelineService:
     def _record_product_transition(
         self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False,
         experimental: bool = False, force_baseline: bool = False,
+        collector_id: str | None = None,
     ) -> dict:
         """Classify and persist a deterministic PRICE_CHANGE/AVAILABILITY_
         CHANGE/SOLD_OUT/RESTOCK event by comparing new_obs against the most
@@ -1692,6 +1694,7 @@ class PipelineService:
                 experimental=experimental,
                 prior_regions=None,
                 novelty_evidence=novelty_evidence,
+                collector_id=collector_id,
             )
 
         prior_product_regions = self._prior_product_regions_for_watch(
@@ -1734,6 +1737,7 @@ class PipelineService:
                 notify=notify,
                 experimental=experimental,
                 prior_regions=prior_regions,
+                collector_id=collector_id,
             )
 
         prior = (
@@ -1801,12 +1805,14 @@ class PipelineService:
             notify=notify,
             experimental=experimental,
             prior_regions=None,
+            collector_id=collector_id,
         )
 
     def _persist_product_event(
         self,
         *,
         watch: Watch,
+        collector_id: str | None = None,
         new_obs: SourceObservation,
         scored,
         reasons: list[str],
@@ -1908,7 +1914,16 @@ class PipelineService:
         first_seen_alertable = (
             scored.event_type != "FIRST_SEEN_BY_CLANK" or settings.discord_first_seen_enabled
         )
-        if notify and editorial_eligible and first_seen_alertable:
+        # 2026-08-25 fleet-wide maturity gate (canonized per owner decision):
+        # external delivery is a PROMOTION privilege. An experimental-maturity
+        # collector must be externally silent for ANY event type/score; its
+        # events stay visible in dashboard/QC. This replaces the incidental
+        # stacking of discord_first_seen_enabled=False + initial-fill
+        # suppression with an explicit, mechanical gate.
+        from app.services.delivery_gate import experimental_delivery_blocked
+
+        maturity_allows_delivery = not experimental_delivery_blocked(collector_id)
+        if notify and editorial_eligible and first_seen_alertable and maturity_allows_delivery:
             notifier = DiscordNotifier(settings)
             threshold = (
                 settings.discord_experimental_min_score if experimental else settings.discord_official_min_score

@@ -60,6 +60,18 @@ _CONTROLS: dict[str, CollectorControl] = {
     "timex_products": CollectorControl(
         "timex_products", "Timex products", "OFFICIAL", ("--experimental-product", "timex")
     ),
+    # 2026-08-25 expansion wave (EXPERIMENTAL): sitemap/Shopify-family
+    # brands. Registered here so render_units.py emits canonical systemd
+    # units and the dashboard/health surface knows them -- see
+    # WATCH_SOAK_CONTRACT.md for soak/promotion rules.
+    "tissot_sitemap": CollectorControl(
+        "tissot_sitemap", "Tissot products (US sitemap-delta, no price/availability)", "OFFICIAL",
+        ("--experimental-product", "tissot"),
+    ),
+    "timex_uk_products": CollectorControl(
+        "timex_uk_products", "Timex products (UK Shopify, regional lane, GBP)", "OFFICIAL",
+        ("--experimental-product", "timex_uk"),
+    ),
     "casioblog_rss": CollectorControl(
         "casioblog_rss", "CASIOBLOG", "SPECIALIST", ("--experimental-specialist", "casioblog")
     ),

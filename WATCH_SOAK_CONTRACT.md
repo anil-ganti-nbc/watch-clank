@@ -3,6 +3,20 @@
 NO_PROMOTION_POLICY.md, WATCH_EVENT_SEMANTICS.md.
 "a Clank is never finished" — promotion is evidence accumulation, never completion.
 
+## Delivery-silence canon (fleet-wide maturity gate)
+
+External delivery (Discord/editorial notifications) is a **promotion
+privilege**, not a configuration default. Collectors in EXPERIMENTAL
+maturity are externally silent for ANY event type and ANY score; their
+events remain fully visible in dashboard/QC. This is enforced at runtime by
+`app/services/delivery_gate.py::experimental_delivery_blocked`, consulted
+by the notify path — not merely by `discord_first_seen_enabled=false` plus
+initial-fill suppression, which were incidental mechanisms that happened to
+stack. Promotion review removes the collector id from
+`EXPERIMENTAL_MATURITY_COLLECTORS`; nothing is auto-added or auto-removed.
+The gate set is mechanically cross-checked against this document by
+`tests/test_production_wiring.py::test_soak_contract_experimental_set_matches_registry_controls`.
+
 ## Collectors entering soak
 
 | Collector | Brand | Region | Family | Maturity |
