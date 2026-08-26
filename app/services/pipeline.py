@@ -1846,12 +1846,40 @@ class PipelineService:
         # which keeps it out of the DEFAULT queue but fully visible via the
         # explicit opt-in filter and /qc/history.
         from app.services.qc import qc_memory_context
+        from app.services.pipeline_constants import WEAK_FIRST_SEEN_QC_THRESHOLD
 
         qc_context, qc_deprioritize = qc_memory_context(
             self.session,
             watch=watch,
             event_type=scored.event_type,
             editorial_eligible=editorial_eligible,
+        )
+
+        # 2026-08-26 QC-volume incident repair: a WEAK first-sighting (score
+        # <= WEAK_FIRST_SEEN_QC_THRESHOLD — no affirmative novelty evidence)
+        # is catalogue bookkeeping, not an editorial lead. It is auto-flagged
+        # human_qc_deprioritized: fully persisted and auditable, hidden from
+        # the default queue, visible via the explicit opt-in filter / history.
+        # Stronger FS events (named collaboration etc.) still queue normally.
+        # Evidence: the 2026-08-25 flood was 581 weak-FS rows; every USEFUL FS
+        # in history scored >= 25.
+        weak_fs_suppressed = (
+            scored.event_type == "FIRST_SEEN_BY_CLANK"
+            and not qc_deprioritize
+            and scored.score <= WEAK_FIRST_SEEN_QC_THRESHOLD
+        )
+        deprioritize_reason = (
+            f"weak FIRST_SEEN_BY_CLANK (score {scored.score:g} <= "
+            f"{WEAK_FIRST_SEEN_QC_THRESHOLD}): catalogue discovery without "
+            "affirmative novelty evidence; reviewable via history/opt-in"
+            if weak_fs_suppressed
+            else (
+                f"reference already reviewed {qc_context['prior_review_verdict']} "
+                f"({qc_context['prior_review_count']} prior review(s)); this "
+                f"{scored.event_type} is an equivalent weak repeat class"
+            )
+            if qc_deprioritize and qc_context
+            else None
         )
 
         event = Event(
@@ -1877,15 +1905,9 @@ class PipelineService:
                     {
                         "human_qc_deprioritized": True,
                         "human_qc_context": qc_context,
-                        "human_qc_deprioritization_reason": (
-                            f"reference already reviewed {qc_context['prior_review_verdict']} "
-                            f"({qc_context['prior_review_count']} prior review(s)); this "
-                            f"{scored.event_type} is an equivalent weak repeat class"
-                        )
-                        if qc_deprioritize and qc_context
-                        else None,
+                        "human_qc_deprioritization_reason": deprioritize_reason,
                     }
-                    if qc_deprioritize
+                    if qc_deprioritize or weak_fs_suppressed
                     else {}
                 ),
                 **({"human_qc_context": qc_context} if qc_context and not qc_deprioritize else {}),
@@ -3147,6 +3169,14 @@ class PipelineService:
                 "new_watches": new_watches,
                 "events": events,
                 "auto_baseline_applied": effective_force_baseline and not force_baseline,
+                # 2026-08-26 initial-fill qualification provenance: records the
+                # invocation's bounded budget so downstream logic (and humans)
+                # can distinguish a real unbounded catalogue pass from a
+                # smoke/validation run with a small max_items. A run is a
+                # catalogue pass iff it ran UNBOUNDED (max_items=None) or at
+                # its full default budget — never if invoked with an explicit
+                # small cap.
+                "max_items": effective_max_items,
                 **({"backfill_context": backfill_context} if backfill_context else {}),
             }
             self.session.commit()

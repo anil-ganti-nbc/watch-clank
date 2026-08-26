@@ -134,6 +134,40 @@ def reviewed_today_count(db: Session) -> int:
     ) or 0
 
 
+def reviewed_today_breakdown(db: Session) -> dict:
+    """2026-08-26 truthfulness repair, revised per owner directive: split
+    today's reviews into THREE accounting classes.
+
+    - ``individual``: mode explicitly recorded as "individual";
+    - ``bulk``: mode explicitly recorded as "bulk" (mass triage);
+    - ``unspecified``: no mode recorded — legacy rows and any submission
+      path that did not declare its application mode.
+
+    Historical NULL-mode rows are NEVER silently relabelled "individual":
+    the 603 emergency-cleared rows of 2026-08-25 must not be presented as
+    item-by-item editorial decisions. Reclassifying them requires a
+    separately approved migration; this function only reports honestly.
+    """
+    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    base = select(func.count(func.distinct(EventReview.event_id))).where(
+        EventReview.reviewed_at >= start
+    )
+    bulk = db.scalar(
+        base.where(func.json_extract(EventReview.review_metadata, "$.mode") == "bulk")
+    ) or 0
+    individual = db.scalar(
+        base.where(func.json_extract(EventReview.review_metadata, "$.mode") == "individual")
+    ) or 0
+    total = db.scalar(base) or 0
+    unspecified = total - bulk - individual
+    return {
+        "individual": individual,
+        "bulk": bulk,
+        "unspecified": unspecified,
+        "total": total,
+    }
+
+
 # 2026-08-19 hotfix (TW2Y38700 Pan Am RESTOCK -- an 11-month-old collab
 # restocking cleared the availability editorial bar and sat in the queue
 # at equal priority to a genuine NEW_REFERENCE). RESTOCK/SOLD_OUT are real,
@@ -211,7 +245,10 @@ def fetch_history_page(
     return list(db.scalars(stmt).unique().all())
 
 
-def submit_review(db: Session, *, event: Event, disposition: str, reason: str | None = None) -> EventReview:
+def submit_review(
+    db: Session, *, event: Event, disposition: str, reason: str | None = None,
+    mode: str | None = None,
+) -> EventReview:
     """Persist (or correct) the operator's verdict on ``event``.
 
     Idempotent-by-correction: a second submission for the same event_id
@@ -221,9 +258,18 @@ def submit_review(db: Session, *, event: Event, disposition: str, reason: str | 
     correction stays auditable without a separate history table. Never
     touches the Event row itself or any other Event for the same
     watch/reference.
+
+    mode (2026-08-26): provenance of how the verdict was applied —
+    "individual" (deliberate item-level review) or "bulk" (operator mass
+    triage under queue pressure). Recorded orthogonally in review_metadata;
+    the human disposition vocabulary is unchanged, but reviewed-today
+    analytics can separate the two instead of conflating 603 emergency bulk
+    rejections with 603 editorial decisions.
     """
     if disposition not in DISPOSITIONS:
         raise InvalidDispositionError(f"unknown disposition: {disposition!r}")
+    if mode is not None and mode not in ("individual", "bulk"):
+        raise InvalidDispositionError(f"unknown review mode: {mode!r}")
 
     watch = event.watches[0].watch if event.watches else None
     latest_obs = None
@@ -248,10 +294,16 @@ def submit_review(db: Session, *, event: Event, disposition: str, reason: str | 
             existing.review_metadata = metadata
             existing.disposition = disposition
             existing.is_corrected = True
+        if mode is not None:
+            # Provenance update on correction: latest application wins.
+            md = dict(existing.review_metadata or {})
+            md["mode"] = mode
+            existing.review_metadata = md
         existing.reason = reason or existing.reason
         db.flush()
         return existing
 
+    review_metadata = {"mode": mode} if mode else None
     review = EventReview(
         event_id=event.id,
         watch_id=watch.id if watch else None,
@@ -265,6 +317,7 @@ def submit_review(db: Session, *, event: Event, disposition: str, reason: str | 
         availability_status=latest_obs.availability_status if latest_obs else None,
         provenance_url=latest_obs.source_url if latest_obs else None,
         reason=reason,
+        review_metadata=review_metadata,
     )
     db.add(review)
     db.flush()

@@ -18,6 +18,9 @@
   <div class="qc-toolbar">
     <span class="badge badge-warn" id="qc-unreviewed-badge">Unreviewed: {{ unreviewed_total }}</span>
     <span class="badge badge-ok" id="qc-reviewed-today-badge">Reviewed today: {{ reviewed_today }}</span>
+    {% if reviewed_today_split %}
+    <span class="badge" title="individual = item-by-item editorial review; bulk = operator mass-triage; unspecified = legacy rows with no recorded mode">({{ reviewed_today_split.individual }} individual / {{ reviewed_today_split.bulk }} bulk / {{ reviewed_today_split.unspecified }} unspecified)</span>
+    {% endif %}
     <form method="get" action="/intelligence" class="qc-filter-form">
       <select name="manufacturer">
         <option value="">All manufacturers</option>

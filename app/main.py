@@ -415,6 +415,9 @@ def recent_intelligence(
     current_events = qc_service.fetch_queue_page(db, qc_filters, limit=qc_service.DEFAULT_PAGE_SIZE)
     unreviewed_total = qc_service.unreviewed_count(db, qc_filters)
     reviewed_today = qc_service.reviewed_today_count(db)
+    # 2026-08-26 truthfulness: expose the individual/bulk split so hundreds of
+    # emergency bulk rejections never again read as item-level editorial work.
+    reviewed_today_split = qc_service.reviewed_today_breakdown(db)
     next_cursor = current_events[-1].id if len(current_events) == qc_service.DEFAULT_PAGE_SIZE else None
 
     manufacturer_choices = [
@@ -463,6 +466,7 @@ def recent_intelligence(
             "historical_suppressed_count": historical_suppressed_count,
             "unreviewed_total": unreviewed_total,
             "reviewed_today": reviewed_today,
+            "reviewed_today_split": reviewed_today_split,
             "next_cursor": next_cursor,
             "qc_filters": {
                 "manufacturer": manufacturer or "",
@@ -548,6 +552,13 @@ def qc_queue_api(
 class ReviewSubmission(BaseModel):
     disposition: str
     reason: str | None = None
+    # 2026-08-26 review provenance: how was this verdict applied? "individual"
+    # (default, one-at-a-time editorial decision) or "bulk" (operator mass
+    # triage under queue pressure). Orthogonal audit metadata recorded in
+    # EventReview.review_metadata — the human disposition vocabulary is
+    # unchanged. Reviewed-today analytics can separate deliberate item-level
+    # review from emergency bulk rejection via this field.
+    mode: str | None = None  # "individual" | "bulk"
 
 
 @app.post("/api/qc/review/{event_id}")
@@ -561,7 +572,10 @@ def qc_submit_review(event_id: int, request: Request, payload: ReviewSubmission,
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
     try:
-        review = qc_service.submit_review(db, event=event, disposition=payload.disposition, reason=payload.reason)
+        review = qc_service.submit_review(
+            db, event=event, disposition=payload.disposition, reason=payload.reason,
+            mode=payload.mode,
+        )
     except qc_service.InvalidDispositionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
