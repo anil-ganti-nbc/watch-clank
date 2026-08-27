@@ -112,6 +112,32 @@ def wait_for_ready(url: str, server, timeout: float = 30.0) -> bool:
 
 
 def main() -> int:
+    # app.main._run_collector_subprocess spawns EVERY RUN NOW / RUN ALL
+    # SAFE COLLECTORS click as `[sys.executable, "--collector-worker",
+    # "--live", *cli_args]` when frozen (see its own docstring: "shell out
+    # to the exact same scripts/run_pipeline.py entry point Task
+    # Scheduler/systemd use"). Under a frozen PyInstaller build,
+    # sys.executable IS this exe -- so every single collector run
+    # re-launches Watch Clank Dashboard.exe itself with these extra argv.
+    # native/macos/launcher.py already dispatches this correctly; this
+    # file never did, so every worker "launch" fell straight through into
+    # the normal dashboard-startup path below: found the real dashboard's
+    # port already bound, printed/treated that as an "already running"
+    # success, opened a browser tab, and exited 0 -- reporting fake success
+    # back to app.main while never actually running the pipeline. Repeated
+    # once per collector, sequentially, this is exactly the reported "Run
+    # All opens N tabs and doesn't actually collect anything" (2026-08-27).
+    # This dispatch MUST run first, before any port/browser logic below.
+    if len(sys.argv) > 1 and sys.argv[1] == "--collector-worker":
+        sys.argv = ["scripts.run_pipeline", *sys.argv[2:]]
+        try:
+            from scripts.run_pipeline import main as run_pipeline_main
+
+            run_pipeline_main()
+        except SystemExit as exit_status:
+            return int(exit_status.code or 0)
+        return 0
+
     url = f"http://{HOST}:{PORT}"
 
     # A double-click while an instance is already running used to silently
