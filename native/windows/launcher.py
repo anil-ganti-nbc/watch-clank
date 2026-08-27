@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -76,6 +77,25 @@ os.environ.setdefault("LOG_DIR", str(REPO_ROOT / "logs"))
 os.chdir(REPO_ROOT)
 
 
+def _port_in_use(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _existing_instance_url(url: str) -> bool:
+    """True if something already answering on HOST:PORT looks like a
+    healthy Watch Clank dashboard. Distinguishes "another instance is
+    already up, just open the browser to it" from "something unrelated has
+    this port" (in which case we should refuse loudly, not silently claim
+    success)."""
+    try:
+        with urllib.request.urlopen(f"{url}/health", timeout=2) as response:
+            return response.status == 200
+    except OSError:
+        return False
+
+
 def wait_for_ready(url: str, server, timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -92,13 +112,38 @@ def wait_for_ready(url: str, server, timeout: float = 30.0) -> bool:
 
 
 def main() -> int:
+    url = f"http://{HOST}:{PORT}"
+
+    # A double-click while an instance is already running used to silently
+    # "succeed" here: this process's own uvicorn.Server would fail its bind
+    # (port already held by the earlier instance) and die in the background,
+    # but wait_for_ready() polls the URL, not "did MY server bind" -- so it
+    # happily observed the *other* process's /health responding 200, printed
+    # success, and opened another browser tab pointed at the same dashboard.
+    # Every re-launch (deliberate double-click, Explorer/AV re-invocation,
+    # whatever) repeated this, each looking like a fresh "run" to the user
+    # while doing nothing new -- reported 2026-08-27 as "Run All opens N
+    # tabs and doesn't collect anything." Check for an existing healthy
+    # instance BEFORE starting a doomed server thread, so a re-launch either
+    # cleanly focuses the real instance once or refuses loudly, instead of
+    # multiplying tabs. (Still a narrow TOCTOU race if two launches happen
+    # in the same instant -- acceptable; the common case is sequential
+    # re-launches seconds/minutes apart, not simultaneous ones.)
+    if _port_in_use(HOST, PORT):
+        if _existing_instance_url(url):
+            print(f"Watch Clank is already running -> {url}")
+            if os.environ.get("WATCH_CLANK_NO_BROWSER") != "1":
+                webbrowser.open(url)
+            return 0
+        print(f"Port {PORT} is already in use by something that isn't a healthy Watch Clank dashboard. Not starting a second instance.")
+        return 1
+
     import uvicorn
 
     from app.serve import prepare_app
 
     app = prepare_app(PROFILE)
 
-    url = f"http://{HOST}:{PORT}"
     config = uvicorn.Config(app, host=HOST, port=PORT, log_level="info")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, name="watch-clank-dashboard", daemon=False)

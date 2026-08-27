@@ -885,7 +885,7 @@ def operations(
     db: Session = Depends(get_db),
 ):
     from app.db.session import get_engine
-    from app.services.collector_registry import all_controls
+    from app.services.collector_registry import SAFE_COLLECTOR_IDS, all_controls
     from app.services.health import get_health_snapshot
     from app.services.run_lock import RunLockService
 
@@ -906,6 +906,7 @@ def operations(
         {
             "active_nav": "operations",
             "rows": rows,
+            "safe_collector_ids": SAFE_COLLECTOR_IDS,
             "is_locked": is_locked,
             "is_loopback": (request.client.host if request.client else None) in ("127.0.0.1", "::1", "localhost"),
             "ran": ran,

@@ -34,7 +34,7 @@
 {% endif %}
 
 <div class="section">
-  <form id="run-all-form" method="post" action="/operations/run-all-safe" {% if not field_test %}onsubmit="return confirm('Run all {{ rows|length }} collectors sequentially? This makes real network requests and can take several minutes.');"{% endif %}>
+  <form id="run-all-form" method="post" action="/operations/run-all-safe" {% if not field_test %}onsubmit="return confirm('Run all {{ safe_collector_ids|length }} safe collectors sequentially? This makes real network requests and can take several minutes.');"{% endif %}>
     <button type="submit" class="btn btn-primary" {{ 'disabled' if not is_loopback else '' }}>RUN ALL SAFE COLLECTORS</button>
     <span class="muted small">Runs every registered collector below, sequentially, real network requests{% if field_test %} — writes only to this Mac's isolated field-test database{% endif %}.</span>
   </form>
@@ -95,7 +95,7 @@ async function poll(reload=false){const s=show(await(await fetch('/operations/st
 collectorForms.forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();allButtons.forEach(b=>b.disabled=true);const response=await fetch(form.action,{method:'POST'});show(await response.json());poll(true)}));
 runAllForm.addEventListener('submit',async event=>{
   event.preventDefault();
-  if(!confirm(`Run all {{ rows|length }} collectors sequentially? This makes real network requests and can take several minutes.`))return;
+  if(!confirm(`Run all {{ safe_collector_ids|length }} safe collectors sequentially? This makes real network requests and can take several minutes.`))return;
   allButtons.forEach(b=>b.disabled=true);
   const response=await fetch(runAllForm.action,{method:'POST'});
   show(await response.json());
