@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.request
 import webbrowser
+from pathlib import Path
 
 # A frozen, console=False PyInstaller exe has no attached console, so
 # sys.stdout/stderr are None -- both our own print() calls and uvicorn's
@@ -39,6 +40,40 @@ if sys.stderr is None:
 HOST = "127.0.0.1"
 PORT = 8765
 PROFILE = "local-operator"
+
+
+def _repo_root() -> Path:
+    """app.core.config.Settings.project_root is `Path(__file__).resolve().parents[2]`
+    -- correct when running from source, but under a frozen PyInstaller
+    onefile build `__file__` resolves inside the transient _MEIxxxx temp
+    extraction dir, not the real checkout. Unlike native/macos/launcher.py
+    (which deliberately wants an isolated bundle-relative state root), this
+    launcher's whole point is to reproduce the real dev repo's own
+    data/watch_clank.db -- see module docstring -- so that bug can't be left
+    to resolve on its own here. Walk up from the running .exe looking for
+    the repo's own alembic.ini; fall back to this fleet's one known Windows
+    checkout location (same fallback sibling launchers use, and what the
+    existing hand-written .cmd already hardcodes).
+    """
+    if getattr(sys, "frozen", False):
+        candidate = Path(sys.executable).resolve().parent
+        for _ in range(5):
+            if (candidate / "alembic.ini").exists():
+                return candidate
+            candidate = candidate.parent
+    return Path(r"C:\Users\anil\Clanks\watch-clank")
+
+
+REPO_ROOT = _repo_root()
+
+# Point every project_root-derived path at the real repo instead of letting
+# Settings.project_root resolve into the frozen exe's temp extraction dir --
+# same fix shape as native/macos/launcher.py's configure_environment(), but
+# pointed at the real checkout's data/ rather than an isolated state root.
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{REPO_ROOT / 'data' / 'watch_clank.db'}")
+os.environ.setdefault("SNAPSHOT_STORAGE_ROOT", str(REPO_ROOT / "data" / "snapshots"))
+os.environ.setdefault("LOG_DIR", str(REPO_ROOT / "logs"))
+os.chdir(REPO_ROOT)
 
 
 def wait_for_ready(url: str, server, timeout: float = 30.0) -> bool:
