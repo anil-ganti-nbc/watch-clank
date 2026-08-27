@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import case, desc, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
@@ -320,7 +321,20 @@ def submit_review(
         review_metadata=review_metadata,
     )
     db.add(review)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # Two near-simultaneous submissions for the same event both saw
+        # "no existing review" before either committed. uq_event_review_
+        # event_id makes a duplicate archive row impossible at the DB
+        # level; recover by discarding this insert and applying the same
+        # verdict as a correction to whichever row actually won the race,
+        # rather than surfacing a raw 500 to the operator.
+        db.rollback()
+        winner = db.scalar(select(EventReview).where(EventReview.event_id == event.id))
+        if winner is None:
+            raise
+        return submit_review(db, event=event, disposition=disposition, reason=reason, mode=mode)
     return review
 
 
@@ -542,5 +556,18 @@ def submit_lead_review(
         reason=reason,
     )
     db.add(review)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # Same race-recovery as submit_review: uq_specialist_lead_review_
+        # lead_id already prevents a duplicate archive row at the DB level;
+        # fall back to applying this verdict as a correction to whichever
+        # row won the race instead of surfacing a raw 500.
+        db.rollback()
+        winner = db.scalar(
+            select(SpecialistLeadReview).where(SpecialistLeadReview.specialist_lead_id == lead.id)
+        )
+        if winner is None:
+            raise
+        return submit_lead_review(db, lead=lead, disposition=disposition, reason=reason)
     return review
