@@ -81,6 +81,7 @@ temp/
 local_windows/
 *.spec
 !native/macos/*.spec
+!native/windows/*.spec
 WatchClank*.exe
 
 # Native launcher build products
