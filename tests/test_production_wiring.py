@@ -27,8 +27,11 @@ def _controls():
 
 
 def test_expansion_collectors_are_in_known_collectors():
-    """Single source of truth: without KNOWN_COLLECTORS membership there is no
-    health surface, no SAFE RUN ALL inclusion, no unit rendering."""
+    """Single source of truth: without KNOWN_COLLECTORS membership there is
+    no health surface, no individual RUN NOW control, no unit rendering.
+    (KNOWN_COLLECTORS membership no longer implies RUN ALL/SAFE_COLLECTOR_IDS
+    inclusion -- see test_run_all_excludes_experimental_maturity_by_default
+    below, the 2026-08-27 eligibility-gate closeout.)"""
     from app.services.health import KNOWN_COLLECTORS
 
     assert "tissot_sitemap" in KNOWN_COLLECTORS
@@ -116,3 +119,45 @@ def test_soak_contract_experimental_set_matches_registry_controls():
     for cid in ("tissot_sitemap", "timex_uk_products"):
         assert cid in contract, f"{cid} missing from soak contract"
         assert cid in controls, f"{cid} lacks a production invocation control"
+
+
+def test_run_all_excludes_experimental_maturity_by_default():
+    """2026-08-27 operator closeout decision: EXPERIMENTAL-maturity
+    collectors must be excluded from RUN ALL/SAFE_COLLECTOR_IDS at the
+    eligibility layer itself, independent of delivery_gate's external-
+    delivery silence (the operator's explicit instruction: "Do not rely on
+    delivery gating as the UI eligibility mechanism"). They stay fully
+    wired for individual RUN NOW/COLLECT -- only bulk-run membership
+    changes."""
+    from app.services.collector_registry import SAFE_COLLECTOR_IDS, all_controls
+    from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
+    from app.services.health import KNOWN_COLLECTORS
+
+    for cid in EXPERIMENTAL_MATURITY_COLLECTORS:
+        assert cid in KNOWN_COLLECTORS, f"{cid} should still be a known/health-tracked collector"
+        assert cid in {c.collector_id for c in all_controls()}, (
+            f"{cid} must remain individually runnable via RUN NOW/COLLECT"
+        )
+        assert cid not in SAFE_COLLECTOR_IDS, (
+            f"{cid} is EXPERIMENTAL maturity and must not be swept into RUN ALL by default"
+        )
+
+    # Every non-experimental known collector is still eligible by default --
+    # this gate only removes the soak set, nothing else.
+    assert set(KNOWN_COLLECTORS) - EXPERIMENTAL_MATURITY_COLLECTORS == set(SAFE_COLLECTOR_IDS)
+
+
+def test_run_all_experimental_reenable_flag_restores_full_set(monkeypatch):
+    """Config-driven re-enable: WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL=1
+    folds the current EXPERIMENTAL_MATURITY_COLLECTORS set back into RUN
+    ALL eligibility -- a deliberate operator opt-in, off by default."""
+    from app.services.collector_registry import _resolve_safe_collector_ids
+    from app.services.health import KNOWN_COLLECTORS
+
+    monkeypatch.setenv("WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL", "1")
+    assert set(_resolve_safe_collector_ids()) == set(KNOWN_COLLECTORS)
+
+    monkeypatch.delenv("WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL", raising=False)
+    from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
+
+    assert set(_resolve_safe_collector_ids()) == set(KNOWN_COLLECTORS) - EXPERIMENTAL_MATURITY_COLLECTORS

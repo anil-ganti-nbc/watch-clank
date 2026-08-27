@@ -16,11 +16,18 @@ control surface. Every entry here is a reviewed, explicit inclusion.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 # Matches app.services.health.KNOWN_COLLECTORS exactly -- deliberately
 # imported from there rather than redefined, so the two can never drift.
 from app.services.health import KNOWN_COLLECTORS
+
+# Single source of truth for which collectors are still in soak/EXPERIMENTAL
+# maturity (see WATCH_SOAK_CONTRACT.md) -- imported rather than redefined so
+# the eligibility gate below can never drift from the delivery-silence gate
+# in app.services.delivery_gate.
+from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
 
 
 @dataclass(frozen=True)
@@ -119,12 +126,44 @@ if _extra_controls:
         f"collector_registry.py has entries not in health.py's KNOWN_COLLECTORS: {sorted(_extra_controls)}"
     )
 
-# "RUN ALL SAFE COLLECTORS" -- every registered collector is included. There
-# is currently no collector considered unsafe-to-run-on-demand (casio_japan
-# is Akamai-BLOCKED but that's bundled inside casio_multi and fails closed,
-# not unsafe to attempt). If a future collector needs to be excluded from
-# bulk runs, exclude it here explicitly with a reason, not silently.
-SAFE_COLLECTOR_IDS: tuple[str, ...] = tuple(KNOWN_COLLECTORS)
+# "RUN ALL SAFE COLLECTORS" -- eligibility, not just delivery.
+#
+# 2026-08-27 operator closeout decision: EXPERIMENTAL-maturity collectors
+# (WATCH_SOAK_CONTRACT.md) must not be silently swept into a bulk local run
+# by default. app.services.delivery_gate.experimental_delivery_blocked()
+# already keeps their events externally silent, but that is a downstream
+# defense -- "does this collector's evidence ring Discord" -- and was never
+# meant to double as "should RUN ALL invoke this collector at all." Explicit
+# operator instruction: "Do not rely on delivery gating as the UI
+# eligibility mechanism." So this is a second, independent gate at the
+# eligibility layer itself.
+#
+# Every OTHER registered collector is still considered safe-to-run-on-demand
+# (casio_japan is Akamai-BLOCKED but that's bundled inside casio_multi and
+# fails closed, not unsafe to attempt). If a future finalized collector
+# needs to be excluded from bulk runs for some other reason, exclude it here
+# explicitly with a reason, not silently.
+#
+# Nothing is ripped out: an EXPERIMENTAL collector remains fully wired and
+# individually runnable via RUN NOW / COLLECT (see get_control/all_controls
+# and /operations/run/{collector_id} in app/main.py) -- soak evidence
+# collection still works exactly as before, one collector at a time. Only
+# its default membership in the *bulk* "Run all" set changes.
+#
+# Config-driven re-enable for a deliberate soak-via-Run-All decision: set
+# WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL=1 (env/.env) to fold the current
+# EXPERIMENTAL_MATURITY_COLLECTORS set back into Run All. Off by default.
+# Requires a process restart to take effect, matching every other
+# env-sourced config value in this app (see app.core.config.Settings).
+
+
+def _resolve_safe_collector_ids() -> tuple[str, ...]:
+    if os.getenv("WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL") == "1":
+        return tuple(KNOWN_COLLECTORS)
+    return tuple(cid for cid in KNOWN_COLLECTORS if cid not in EXPERIMENTAL_MATURITY_COLLECTORS)
+
+
+SAFE_COLLECTOR_IDS: tuple[str, ...] = _resolve_safe_collector_ids()
 
 
 def get_control(collector_id: str) -> CollectorControl:

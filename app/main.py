@@ -1080,6 +1080,12 @@ def run_all_safe_collectors(request: Request):
     collectors concurrently from a single web request has no operational
     justification and makes failure attribution harder). Localhost-only.
 
+    SAFE_COLLECTOR_IDS excludes EXPERIMENTAL-maturity collectors
+    (WATCH_SOAK_CONTRACT.md) by default (2026-08-27 operator closeout
+    decision) -- they remain individually runnable via RUN NOW/COLLECT
+    above, just not swept into this bulk action. See the comment above
+    SAFE_COLLECTOR_IDS's definition for the config-driven re-enable.
+
     Field-test mode runs the exact same sequential job list through
     _local_collection's background-thread batch mode instead of blocking
     the request for the full duration -- matching the async, polled UX
