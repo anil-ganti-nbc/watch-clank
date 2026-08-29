@@ -44,6 +44,13 @@ def setup_logging() -> None:
     root.handlers.clear()
     root.setLevel(level)
 
+    # httpx logs every request line at INFO, including
+    # "HTTP Request: POST <full webhook URL incl. token>" for Discord
+    # deliveries. Keep those out of journald and the rotating file log;
+    # delivery outcomes are still logged by the app itself.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(level)
     root.addHandler(console)
