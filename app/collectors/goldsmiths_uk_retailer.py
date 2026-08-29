@@ -267,9 +267,16 @@ class GoldsmithsUkRetailerCollector:
             }
         )
 
+        # Offline contract: once a fixture index is supplied, detail pages may
+        # ONLY come from the fixture. A fixture without a "details" mapping is
+        # a broken fixture, never permission to hit the live site.
+        offline_details: dict = {}
+        if fixture is not None and isinstance(fixture.get("details"), dict):
+            offline_details = fixture["details"]
+
         for item in pending:
-            if fixture is not None and isinstance(fixture.get("details"), dict):
-                detail = fixture["details"].get(item.url)
+            if fixture is not None:
+                detail = offline_details.get(item.url)
                 detail_fetch = FetchResult(
                     url=item.url,
                     success=detail is not None,

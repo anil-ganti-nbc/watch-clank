@@ -50,19 +50,28 @@ def test_expansion_collectors_have_production_cli_controls():
 
 
 def test_run_pipeline_accepts_both_brands_via_argparse():
-    """The exact production invocation path must accept the brand choices."""
+    """The exact production invocation path must accept the brand choices.
+
+    --help short-circuits at argparse, so the subprocess exercises choices
+    validation without touching the database or the network. An invalid
+    choice errors with rc==2 before --help is ever reached, so this stays a
+    real check of the choices list.
+    """
     import subprocess
     import sys
 
     for brand in ("tissot", "timex_uk", "goldsmiths_uk"):
-        # --help exercises argparse choices validation without running anything.
         result = subprocess.run(
             [sys.executable, "-m", "scripts.run_pipeline", "--experimental-product", brand,
-             "--force-baseline", "--max-items", "1"],
+             "--force-baseline", "--max-items", "1", "--help"],
             cwd=str(ROOT), capture_output=True, text=True, timeout=120,
         )
-        # argparse choices must ACCEPT both brands (rc==2 means invalid choice).
-        assert result.returncode != 2, f"{brand} rejected by production CLI choices"
+        # --help exits 0 for an accepted choice; rc==2 means the choice was
+        # rejected (argparse validates choices before --help short-circuits).
+        assert result.returncode == 0, (
+            f"{brand} rejected by production CLI choices: rc={result.returncode} "
+            f"stdout={result.stdout[-400:]!r} stderr={result.stderr[-400:]!r}"
+        )
         assert "--experimental-product: invalid choice" not in result.stderr
 
 

@@ -105,6 +105,53 @@ def test_goldsmiths_parser_rejects_non_gbp_price():
     assert not parsed.success and "unexpected currency" in parsed.error
 
 
+def test_goldsmiths_parser_rejects_price_without_currency():
+    html = (
+        '<script id="ng-state" type="application/json">'
+        + json.dumps({"product": {"mpn": "AW1911-53E", "manufacturer": "Citizen", "price": {"value": 279}}})
+        + "</script>"
+    )
+    parsed = parse_goldsmiths_uk_product_html(html)
+    assert not parsed.success and "currency missing" in parsed.error
+
+
+def test_goldsmiths_parser_accepts_literal_zero_price():
+    """A real 0 value must not silently fall through to formattedValue."""
+    html = (
+        '<script id="ng-state" type="application/json">'
+        + json.dumps({"product": {"mpn": "AW1911-53E", "manufacturer": "Citizen", "price": {"value": 0, "currencyIso": "GBP"}}})
+        + "</script>"
+    )
+    parsed = parse_goldsmiths_uk_product_html(html)
+    assert parsed.success
+    assert parsed.watches[0].price == 0.0 and parsed.watches[0].currency == "GBP"
+
+
+def test_offline_fixture_without_details_never_touches_the_network(monkeypatch):
+    """A fixture index without a details mapping is a broken fixture, not
+    permission to fetch live pages from supposedly-offline test code."""
+    from app.collectors import goldsmiths_uk_retailer as collector_module
+
+    def forbidden_fetch(*args, **kwargs):
+        raise AssertionError("live fetch attempted in offline fixture mode")
+
+    monkeypatch.setattr(collector_module, "fetch_url", forbidden_fetch)
+    child = PRODUCT_SITEMAP_PREFIX + "0.xml"
+    url = "https://www.goldsmiths.co.uk/Citizen-AW1911-53A/p/1"
+    result = collector_module.GoldsmithsUkRetailerCollector().run(
+        sitemap_payload={
+            "index": {"sitemap": [{"loc": child}]},
+            "children": {child: _child_xml([url])},
+        },
+        max_items=5,
+    )
+    assert len(result.fetched) == 1
+    assert not result.fetched[0].success
+    assert result.fetched[0].error == "missing offline detail fixture"
+    assert result.metadata["component_status"] == "FAILED"
+    assert result.metadata["healthy"] is False
+
+
 def test_manual_uk_evidence_requires_attestation_and_gbp():
     good = parse_manual_uk_evidence({
         "reference": "AW1911-53A",

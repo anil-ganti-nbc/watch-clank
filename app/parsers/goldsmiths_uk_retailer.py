@@ -58,7 +58,10 @@ def _price(product: dict[str, Any]) -> tuple[float | None, str | None, str | Non
     value = product.get("price")
     if isinstance(value, dict):
         currency = value.get("currencyIso") or value.get("currency")
-        raw_price = value.get("value") or value.get("formattedValue")
+        # Not `or`: a literal 0 price must not fall through to formattedValue.
+        raw_price = value.get("value")
+        if raw_price is None:
+            raw_price = value.get("formattedValue")
     else:
         currency = product.get("currencyIso") or product.get("currency")
         raw_price = value
@@ -112,12 +115,11 @@ def parse_goldsmiths_uk_product_html(html: str | bytes, *, source_url: str = "")
     if price_error:
         return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=price_error)
     if price is not None and currency != EXPECTED_CURRENCY:
-        return ParseResult(
-            success=False,
-            parser_id=PARSER_ID,
-            parser_version=PARSER_VERSION,
-            error=f"unexpected currency for GB retailer evidence: {currency!r}",
-        )
+        if currency is None:
+            error = "price present but currency missing for GB retailer evidence"
+        else:
+            error = f"unexpected currency for GB retailer evidence: {currency!r}"
+        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=error)
 
     availability = _availability(product)
     confidence: dict[str, float] = {"reference": 1.0}
