@@ -64,6 +64,7 @@ KNOWN_COLLECTORS = [
     # 360-min cadence mirrors timex_products per WATCH_SOAK_CONTRACT.md.
     "tissot_sitemap",
     "timex_uk_products",
+    "goldsmiths_uk_retailer",
 ]
 
 SUCCESS_STATUSES = {"SUCCESS", "PARTIAL", "ZERO_ITEMS"}
@@ -99,6 +100,7 @@ EXPECTED_CADENCE_MINUTES = {
     # 360-min cadence mirrors timex_products per WATCH_SOAK_CONTRACT.md.
     "tissot_sitemap": 360,
     "timex_uk_products": 360,
+    "goldsmiths_uk_retailer": 360,
 }
 
 

@@ -442,6 +442,10 @@ class PipelineService:
         notify: bool = False,
         experimental: bool = False,
         force_baseline: bool = False,
+        source_trust_score: float = 100.0,
+        is_first_party: bool = True,
+        evidence_grade: str | None = None,
+        source_class: str | None = None,
     ) -> dict[str, Any]:
         """Process one fetched item (product/catalogue page) under a single
         transaction boundary.
@@ -529,13 +533,16 @@ class PipelineService:
                 self.session.flush()
 
             # Fetch (always new, preserves URL + collector metadata)
+            fetch_metadata = dict(getattr(fr, "metadata", None) or {})
+            if fr.elapsed_ms is not None:
+                fetch_metadata["elapsed_ms"] = fr.elapsed_ms
             fetch = SnapshotFetch(
                 blob_id=blob.id,
                 source_url=fr.url,
                 collector_id=collector_id,
                 collector_version=collector_version,
                 http_status=fr.status_code,
-                extra_metadata={"elapsed_ms": fr.elapsed_ms} if fr.elapsed_ms else None,
+                extra_metadata=fetch_metadata or None,
             )
             self.session.add(fetch)
             self.session.flush()
@@ -605,7 +612,7 @@ class PipelineService:
                 availability_status=pw.availability_status,
                 price=pw.price,
                 currency=pw.currency,
-                source_trust_score=100.0,
+                source_trust_score=source_trust_score,
                 overall_confidence=overall,
                 field_confidence=pw.field_confidence or {},
                 parser_warnings=pw.parser_warnings or [],
@@ -638,6 +645,9 @@ class PipelineService:
                     experimental=experimental,
                     force_baseline=force_baseline,
                     collector_id=collector_id,
+                    is_first_party=is_first_party,
+                    evidence_grade=evidence_grade,
+                    source_class=source_class,
                 )
 
             self.session.commit()
@@ -1514,6 +1524,9 @@ class PipelineService:
         self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False,
         experimental: bool = False, force_baseline: bool = False,
         collector_id: str | None = None,
+        is_first_party: bool = True,
+        evidence_grade: str | None = None,
+        source_class: str | None = None,
     ) -> dict:
         """Classify and persist a deterministic PRICE_CHANGE/AVAILABILITY_
         CHANGE/SOLD_OUT/RESTOCK event by comparing new_obs against the most
@@ -1551,7 +1564,7 @@ class PipelineService:
 
         baseline_active = force_baseline or is_baseline_active(self.session)
         baseline_freshness = None
-        if is_new_watch:
+        if is_new_watch and is_first_party:
             # 2026-08-21 Phase 6/7: source-publication evidence is now
             # evaluated for EVERY first sighting, not only while a baseline
             # is active. It serves two roles with one implementation: the
@@ -1629,7 +1642,8 @@ class PipelineService:
                 observed_at=new_obs.observed_at,
             )
             publication_fresh = (
-                baseline_freshness is not None
+                is_first_party
+                and baseline_freshness is not None
                 and baseline_freshness.state == "FRESH"
                 and strength == "MEDIUM"
             )
@@ -1666,7 +1680,7 @@ class PipelineService:
                 brand=watch.brand,
                 collection=watch.collection,
                 region=new_obs.region,
-                is_first_party=True,
+                is_first_party=is_first_party,
                 reference_raw=watch.reference_raw,
                 price=new_obs.price,
                 currency=new_obs.currency,
@@ -1695,6 +1709,9 @@ class PipelineService:
                 prior_regions=None,
                 novelty_evidence=novelty_evidence,
                 collector_id=collector_id,
+                is_first_party=is_first_party,
+                evidence_grade=evidence_grade,
+                source_class=source_class,
             )
 
         prior_product_regions = self._prior_product_regions_for_watch(
@@ -1718,7 +1735,7 @@ class PipelineService:
                 brand=watch.brand,
                 collection=watch.collection,
                 region=new_obs.region,
-                is_first_party=True,
+                is_first_party=is_first_party,
                 prior_regions=prior_regions,
                 reference_raw=watch.reference_raw,
                 price=new_obs.price,
@@ -1730,7 +1747,7 @@ class PipelineService:
                 new_obs=new_obs,
                 scored=score_event(evidence),
                 reasons=[
-                    "first successful first-party product observation in a new region; "
+                    "first successful product observation in a new region; "
                     "price and currency are regional facts, not a cross-market price change"
                 ],
                 prior_observation=None,
@@ -1738,6 +1755,9 @@ class PipelineService:
                 experimental=experimental,
                 prior_regions=prior_regions,
                 collector_id=collector_id,
+                is_first_party=is_first_party,
+                evidence_grade=evidence_grade,
+                source_class=source_class,
             )
 
         prior = (
@@ -1778,7 +1798,7 @@ class PipelineService:
             brand=watch.brand,
             collection=watch.collection,
             region=new_obs.region,
-            is_first_party=True,
+            is_first_party=is_first_party,
             reference_raw=watch.reference_raw,
             price=new_obs.price,
             currency=new_obs.currency,
@@ -1806,6 +1826,9 @@ class PipelineService:
             experimental=experimental,
             prior_regions=None,
             collector_id=collector_id,
+            is_first_party=is_first_party,
+            evidence_grade=evidence_grade,
+            source_class=source_class,
         )
 
     def _persist_product_event(
@@ -1821,6 +1844,9 @@ class PipelineService:
         experimental: bool,
         prior_regions: frozenset[str] | None,
         novelty_evidence: dict | None = None,
+        is_first_party: bool = True,
+        evidence_grade: str | None = None,
+        source_class: str | None = None,
     ) -> dict:
         """Persist a product-state Event after the caller proved its facts.
 
@@ -1845,8 +1871,8 @@ class PipelineService:
         # rejected reference is additionally flagged human_qc_deprioritized,
         # which keeps it out of the DEFAULT queue but fully visible via the
         # explicit opt-in filter and /qc/history.
-        from app.services.qc import qc_memory_context
         from app.services.pipeline_constants import WEAK_FIRST_SEEN_QC_THRESHOLD
+        from app.services.qc import qc_memory_context
 
         qc_context, qc_deprioritize = qc_memory_context(
             self.session,
@@ -1898,6 +1924,11 @@ class PipelineService:
                 "region": new_obs.region,
                 "prior_regions": sorted(prior_regions) if prior_regions else None,
                 "experimental": experimental,
+                "source_provenance": {
+                    "is_first_party": is_first_party,
+                    "evidence_grade": evidence_grade,
+                    "source_class": source_class,
+                },
                 "alerted": False,
                 "editorial_eligible": editorial_eligible,
                 "editorial_eligibility_reasons": eligibility_reasons,
@@ -2825,6 +2856,30 @@ class PipelineService:
             from app.collectors.citizen_products import (
                 CitizenProductsCollector,
             )
+            from app.collectors.goldsmiths_uk_retailer import (
+                AUTHORIZED_STOCKIST as GOLDSMITHS_AUTHORIZED_STOCKIST,
+            )
+            from app.collectors.goldsmiths_uk_retailer import (
+                COLLECTOR_ID as GOLDSMITHS_COLLECTOR_ID,
+            )
+            from app.collectors.goldsmiths_uk_retailer import (
+                COLLECTOR_VERSION as GOLDSMITHS_COLLECTOR_VERSION,
+            )
+            from app.collectors.goldsmiths_uk_retailer import (
+                EVIDENCE_GRADE as GOLDSMITHS_EVIDENCE_GRADE,
+            )
+            from app.collectors.goldsmiths_uk_retailer import (
+                REGION as GOLDSMITHS_REGION,
+            )
+            from app.collectors.goldsmiths_uk_retailer import (
+                SOURCE_CLASS as GOLDSMITHS_SOURCE_CLASS,
+            )
+            from app.collectors.goldsmiths_uk_retailer import (
+                TRUST_SCORE as GOLDSMITHS_TRUST_SCORE,
+            )
+            from app.collectors.goldsmiths_uk_retailer import (
+                GoldsmithsUkRetailerCollector,
+            )
             from app.collectors.seiko_jp_products import (
                 COLLECTOR_ID as SEIKO_JP_PROD_ID,
             )
@@ -2872,6 +2927,7 @@ class PipelineService:
             from app.parsers.casio_uk_sitemap import parse_casio_uk_sitemap_item
             from app.parsers.citizen_de_products import parse_citizen_de_product_html
             from app.parsers.citizen_products import parse_citizen_search_hit
+            from app.parsers.goldsmiths_uk_retailer import parse_goldsmiths_uk_product_html
             from app.parsers.seiko_jp_products import parse_seiko_jp_product_json
             from app.parsers.seiko_products import parse_seiko_product_json
             from app.parsers.sitemap_family import parse_sitemap_family_item
@@ -2996,6 +3052,25 @@ class PipelineService:
                         "default_max_items": 300,
                         "known_urls_from_observations": True,
                         "manufacturer": "Timex",
+                    },
+                    # --- Goldsmiths UK Citizen retailer lane (experimental) ---
+                    # Full sitemap traversal is deliberately in the collector;
+                    # only the bounded detail-page slice reaches this pipeline.
+                    "goldsmiths_uk": {
+                        "collector_cls": GoldsmithsUkRetailerCollector,
+                        "collector_id": GOLDSMITHS_COLLECTOR_ID,
+                        "collector_version": GOLDSMITHS_COLLECTOR_VERSION,
+                        "parse_fn": parse_goldsmiths_uk_product_html,
+                        "default_region": GOLDSMITHS_REGION,
+                        "offline_kwarg": "sitemap_payload",
+                        "default_max_items": 300,
+                        "known_urls_from_observations": True,
+                        "manufacturer": "Citizen",
+                        "source_trust_score": GOLDSMITHS_TRUST_SCORE,
+                        "is_first_party": False,
+                        "evidence_grade": GOLDSMITHS_EVIDENCE_GRADE,
+                        "source_class": GOLDSMITHS_SOURCE_CLASS,
+                        "authorized_stockist": GOLDSMITHS_AUTHORIZED_STOCKIST,
                     },
                 }
             )
@@ -3130,6 +3205,10 @@ class PipelineService:
                     notify=emit_events,
                     experimental=True,
                     force_baseline=effective_force_baseline or item_suppression_baseline,
+                    source_trust_score=cfg.get("source_trust_score", 100.0),
+                    is_first_party=cfg.get("is_first_party", True),
+                    evidence_grade=cfg.get("evidence_grade"),
+                    source_class=cfg.get("source_class"),
                 )
                 if out["success"]:
                     parsed += 1
@@ -3177,6 +3256,21 @@ class PipelineService:
                 # its full default budget — never if invoked with an explicit
                 # small cap.
                 "max_items": effective_max_items,
+                **(
+                    {
+                        "source_class": cfg["source_class"],
+                        "evidence_grade": cfg["evidence_grade"],
+                        "authorized_stockist": cfg["authorized_stockist"],
+                        "detail_fetch_cap": result.metadata.get("detail_fetch_cap"),
+                        "detail_fetch_count": result.metadata.get("detail_fetch_count"),
+                        "sitemap_child_count": result.metadata.get("sitemap_child_count"),
+                        "sitemap_urls_fetched": result.metadata.get("sitemap_urls_fetched"),
+                        "raw_sitemap_url_count": result.metadata.get("raw_sitemap_url_count"),
+                        "filtered_candidate_count": result.metadata.get("filtered_candidate_count"),
+                    }
+                    if cfg.get("source_class")
+                    else {}
+                ),
                 **({"backfill_context": backfill_context} if backfill_context else {}),
             }
             self.session.commit()

@@ -18,6 +18,7 @@ from tests.test_core import (
 def test_experimental_collectors_are_delivery_blocked():
     assert experimental_delivery_blocked("tissot_sitemap")
     assert experimental_delivery_blocked("timex_uk_products")
+    assert experimental_delivery_blocked("goldsmiths_uk_retailer")
 
 
 def test_established_collectors_are_not_blocked_by_the_maturity_gate():

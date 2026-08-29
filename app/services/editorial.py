@@ -287,8 +287,9 @@ def score_event(evidence: EventEvidence) -> ScoredEvent:
         )
     elif evidence.event_type == "NEW_REGION":
         score += 30.0
+        source_kind = "first-party" if evidence.is_first_party else "third-party"
         reasons.append(
-            f"+30 first observed official listing in region {evidence.region or 'UNKNOWN'}"
+            f"+30 first observed {source_kind} listing in region {evidence.region or 'UNKNOWN'}"
             + (
                 f" (previously seen in: {', '.join(sorted(evidence.prior_regions))})"
                 if evidence.prior_regions
@@ -297,7 +298,7 @@ def score_event(evidence: EventEvidence) -> ScoredEvent:
         )
         if evidence.price is not None and evidence.currency:
             score += 15.0
-            reasons.append(f"+15 first official local price ({evidence.price:g} {evidence.currency})")
+            reasons.append(f"+15 first local price ({evidence.price:g} {evidence.currency})")
         if evidence.availability_status:
             score += 5.0
             reasons.append(

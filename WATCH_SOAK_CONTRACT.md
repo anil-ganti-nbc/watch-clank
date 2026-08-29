@@ -23,10 +23,11 @@ The gate set is mechanically cross-checked against this document by
 |---|---|---|---|---|
 | tissot_sitemap | Tissot | US (en-us) | Sitemap Delta | EXPERIMENTAL_READY_FOR_HETZNER |
 | timex_uk_products | Timex | UK | Shopify Catalogue | EXPERIMENTAL_READY_FOR_HETZNER |
+| goldsmiths_uk_retailer | Citizen | GB | Retailer Sitemap + Detail | EXPERIMENTAL_READY_FOR_HETZNER |
 
 ## Cadence specification (Claude configures on canonical scheduler)
 
-- Both collectors: 360-minute cadence, matching the established
+- All three collectors: 360-minute cadence, matching the established
   `timex_products` pattern. Do not probe faster; sitemap-delta sources have
   no sub-6-hour signal value and aggressive polling is anti-bot bait.
 - They MAY share an existing run group only if the group already sequences
@@ -34,7 +35,10 @@ The gate set is mechanically cross-checked against this document by
   own `<collector_id>.run.lock` — locks must never be shared.
 - Backoff: existing http_util retry/backoff applies unchanged. A BLOCKED run
   exits the normal path; do NOT add manual re-runs outside schedule.
-- Budget: default_max_items=300 per run. Do not raise during soak.
+- Budget: default_max_items=300 per run. Do not raise during soak. The
+  Goldsmiths lane reads all sitemap children but fetches at most 60 detail
+  pages per run; the 300 value is the invocation/pass budget recorded in the
+  run ledger, not a permission to fetch 300 retailer pages.
 
 ## Soak evidence contract (per collector)
 

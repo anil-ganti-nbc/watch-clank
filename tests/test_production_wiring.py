@@ -36,14 +36,17 @@ def test_expansion_collectors_are_in_known_collectors():
 
     assert "tissot_sitemap" in KNOWN_COLLECTORS
     assert "timex_uk_products" in KNOWN_COLLECTORS
+    assert "goldsmiths_uk_retailer" in KNOWN_COLLECTORS
 
 
 def test_expansion_collectors_have_production_cli_controls():
     controls = {c.collector_id: c for c in _controls()}
     assert "tissot_sitemap" in controls
     assert "timex_uk_products" in controls
+    assert "goldsmiths_uk_retailer" in controls
     assert controls["tissot_sitemap"].cli_args == ("--experimental-product", "tissot")
     assert controls["timex_uk_products"].cli_args == ("--experimental-product", "timex_uk")
+    assert controls["goldsmiths_uk_retailer"].cli_args == ("--experimental-product", "goldsmiths_uk")
 
 
 def test_run_pipeline_accepts_both_brands_via_argparse():
@@ -51,7 +54,7 @@ def test_run_pipeline_accepts_both_brands_via_argparse():
     import subprocess
     import sys
 
-    for brand in ("tissot", "timex_uk"):
+    for brand in ("tissot", "timex_uk", "goldsmiths_uk"):
         # --help exercises argparse choices validation without running anything.
         result = subprocess.run(
             [sys.executable, "-m", "scripts.run_pipeline", "--experimental-product", brand,
@@ -77,12 +80,17 @@ def test_render_units_emits_canonical_systemd_units_for_both(tmp_path):
     assert "watch-clank-tissot-sitemap.timer" in names
     assert "watch-clank-timex-uk-products.service" in names
     assert "watch-clank-timex-uk-products.timer" in names
+    assert "watch-clank-goldsmiths-uk-retailer.service" in names
+    assert "watch-clank-goldsmiths-uk-retailer.timer" in names
 
     service = (tmp_path / "watch-clank-tissot-sitemap.service").read_text()
     assert "--experimental-product tissot" in service
 
     timer = (tmp_path / "watch-clank-timex-uk-products.timer").read_text()
     assert "21600" in timer  # 360 min * 60 s per EXPECTED_CADENCE_MINUTES
+
+    goldsmiths_service = (tmp_path / "watch-clank-goldsmiths-uk-retailer.service").read_text()
+    assert "--experimental-product goldsmiths_uk" in goldsmiths_service
 
     assert "tissot-sitemap" in joined and "timex-uk-products" in joined
 
@@ -116,7 +124,7 @@ def test_soak_contract_experimental_set_matches_registry_controls():
     contract = (ROOT / "WATCH_SOAK_CONTRACT.md").read_text(encoding="utf-8")
     controls = {c.collector_id for c in _controls()}
 
-    for cid in ("tissot_sitemap", "timex_uk_products"):
+    for cid in ("tissot_sitemap", "timex_uk_products", "goldsmiths_uk_retailer"):
         assert cid in contract, f"{cid} missing from soak contract"
         assert cid in controls, f"{cid} lacks a production invocation control"
 

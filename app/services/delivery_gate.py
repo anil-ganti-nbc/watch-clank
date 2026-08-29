@@ -28,6 +28,7 @@ from __future__ import annotations
 EXPERIMENTAL_MATURITY_COLLECTORS: frozenset[str] = frozenset({
     "tissot_sitemap",
     "timex_uk_products",
+    "goldsmiths_uk_retailer",
 })
 
 

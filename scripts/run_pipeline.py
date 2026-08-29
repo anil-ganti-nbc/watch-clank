@@ -282,6 +282,110 @@ def ingest_manual_lead(args: argparse.Namespace) -> int:
         return EXIT_OK
 
 
+def ingest_manual_uk_evidence(args: argparse.Namespace) -> int:
+    """Record one operator-attested UK Citizen purchasing observation.
+
+    This path is intentionally not a scheduled collector and never asks the
+    product pipeline to emit an Event or send a notification. It exists to
+    preserve human evidence while the compliant automated GB signal path is
+    being evaluated.
+    """
+    required = {
+        "--uk-reference": args.uk_reference,
+        "--uk-url": args.uk_url,
+        "--uk-submitter": args.uk_submitter,
+        "--uk-captured-at": args.uk_captured_at,
+    }
+    missing = [flag for flag, value in required.items() if not value]
+    if not args.uk_confirmed:
+        missing.append("--uk-confirmed")
+    if missing:
+        print(f"FATAL: manual UK evidence requires {', '.join(missing)}")
+        return EXIT_FATAL
+
+    import json
+
+    from app.parsers.manual_uk_evidence import PARSER_VERSION, parse_manual_uk_evidence
+
+    payload = {
+        "reference": args.uk_reference,
+        "source_url": args.uk_url,
+        "submitter": args.uk_submitter,
+        "captured_at": args.uk_captured_at,
+        "model_name": args.uk_model_name,
+        "price": args.uk_price,
+        "currency": args.uk_currency,
+        "availability": args.uk_availability,
+        "operator_confirmed": True,
+    }
+
+    with session_scope() as session:
+        started = datetime.now(UTC)
+        run = CollectorRun(
+            collector_id="manual_uk_evidence",
+            collector_version=PARSER_VERSION,
+            started_at=started,
+            status="RUNNING",
+            summary_metadata={
+                "ingestion_method": "manual",
+                "region": "GB",
+                "externally_silent": True,
+            },
+        )
+        session.add(run)
+        session.commit()
+        pipeline = PipelineService(session)
+        outcome = pipeline.process_fetch_result(
+            FetchResult(
+                url=args.uk_url,
+                success=True,
+                status_code=200,
+                content_type="application/json",
+                payload=json.dumps(payload).encode("utf-8"),
+                metadata={
+                    "ingestion_method": "manual",
+                    "submitter": args.uk_submitter,
+                    "captured_at": args.uk_captured_at,
+                    "operator_confirmed": True,
+                    "evidence_grade": "OPERATOR_ATTESTED_UK_EVIDENCE",
+                    "source_class": "MANUAL_OPERATOR_EVIDENCE",
+                },
+            ),
+            run_id=run.id,
+            collector_id="manual_uk_evidence",
+            collector_version=PARSER_VERSION,
+            parse_fn=parse_manual_uk_evidence,
+            default_region="GB",
+            emit_events=False,
+            notify=False,
+            experimental=True,
+            source_trust_score=80.0,
+            is_first_party=False,
+            evidence_grade="OPERATOR_ATTESTED_UK_EVIDENCE",
+            source_class="MANUAL_OPERATOR_EVIDENCE",
+        )
+        completed = datetime.now(UTC)
+        run.completed_at = completed
+        run.status = "SUCCESS" if outcome["success"] else "FAILED"
+        run.fetched_count = 1
+        run.parsed_count = 1 if outcome["success"] else 0
+        run.observation_count = 1 if outcome["success"] else 0
+        run.new_watch_count = 1 if outcome.get("new_watch") else 0
+        run.failure_count = 0 if outcome["success"] else 1
+        run.duration_ms = int((completed - started).total_seconds() * 1000)
+        run.summary_metadata = {
+            "ingestion_method": "manual",
+            "region": "GB",
+            "externally_silent": True,
+            "evidence_grade": "OPERATOR_ATTESTED_UK_EVIDENCE",
+            "source_class": "MANUAL_OPERATOR_EVIDENCE",
+            "outcome": outcome,
+        }
+        session.commit()
+        print(f"[manual_uk_evidence] Run id={run.id} status={run.status} outcome={outcome}")
+        return EXIT_OK if outcome["success"] else EXIT_FAILED
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Watch Clank Casio pipeline")
     parser.add_argument("--fixture-mode", action="store_true")
@@ -305,7 +409,7 @@ def main() -> None:
         # underlying pipeline method remains reachable directly from Python
         # for tests/archaeology only.
         choices=["casio_uk", "casio_europe", "casio_jp", "citizen", "seiko", "seiko_jp", "timex",
-                 "tissot", "timex_uk"],
+                 "tissot", "timex_uk", "goldsmiths_uk"],
         default=None,
         help="Run an EXPERIMENTAL product/catalogue-observation lane instead of Casio",
     )
@@ -338,6 +442,24 @@ def main() -> None:
     parser.add_argument("--lead-manufacturer", default="Casio")
     parser.add_argument("--lead-confidence", type=float, default=35.0)
     parser.add_argument(
+        "--ingest-manual-uk-evidence",
+        action="store_true",
+        help="Record one operator-attested GB Citizen observation without emitting an event",
+    )
+    parser.add_argument("--uk-reference", default=None)
+    parser.add_argument("--uk-url", default=None)
+    parser.add_argument("--uk-submitter", default=None)
+    parser.add_argument("--uk-captured-at", default=None, help="Timezone-aware ISO 8601 timestamp")
+    parser.add_argument("--uk-model-name", default=None)
+    parser.add_argument("--uk-price", type=float, default=None)
+    parser.add_argument("--uk-currency", default="GBP")
+    parser.add_argument("--uk-availability", default="UNKNOWN", choices=["AVAILABLE", "SOLD_OUT", "UNKNOWN"])
+    parser.add_argument(
+        "--uk-confirmed",
+        action="store_true",
+        help="Explicitly attest that the supplied UK evidence was reviewed by the operator",
+    )
+    parser.add_argument(
         "--max-items", type=int, default=None,
         help="Override per-mode default (Casio modes default 10; product lanes use their documented per-source limits)",
     )
@@ -353,6 +475,8 @@ def main() -> None:
 
     if args.ingest_manual_lead:
         sys.exit(ingest_manual_lead(args))
+    if args.ingest_manual_uk_evidence:
+        sys.exit(ingest_manual_uk_evidence(args))
     if args.experimental_specialist:
         sys.exit(run_experimental_specialist(args.experimental_specialist, args.max_items or 20, force_baseline=args.force_baseline))
     if args.experimental_brand:
