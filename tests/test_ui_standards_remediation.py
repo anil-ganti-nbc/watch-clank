@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 from tests.test_core import db_session, tmp_settings  # noqa: F401 -- pytest fixtures
 from tests.test_web import db, web_client  # noqa: F401 -- pytest fixtures
 
-_ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+_ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 
 
 def _settings_patch(**overrides):
@@ -33,6 +33,7 @@ def _settings_patch(**overrides):
     settings.discord_official_min_score = 0
     settings.discord_specialist_min_confidence = 0
     settings.editorial_notifications_enabled = True
+    settings.specialist_freshness_window_hours = 24  # staleness gate reads this
     for k, v in overrides.items():
         setattr(settings, k, v)
     return settings
@@ -444,3 +445,149 @@ def test_qc_dict_builders_expose_delivery_and_timing_role(db):
 
     undated = _make_lead(db, published_at=None)
     assert _lead_to_qc_dict(undated)["when_role"] == "discovered"
+
+
+# ------------------------------------------------- post-verification gaps
+# (correlation-path delivery, site-2 notify=False, human attempted_at,
+# run-detail stage ordering)
+
+
+def _make_watch(db, **overrides):
+    from app.models import Watch
+
+    defaults = dict(
+        manufacturer="Timex",
+        brand="Timex",
+        reference_raw="T2N900",
+        reference_canonical="T2N900",
+    )
+    defaults.update(overrides)
+    w = Watch(**defaults)
+    db.add(w)
+    db.commit()
+    return w
+
+
+def test_correlation_followup_sent_records_state_without_touching_notified_at(db):
+    from app.services.specialist_leads import SpecialistLeadService
+    from unittest.mock import MagicMock, patch
+
+    w = _make_watch(db)
+    lead = _make_lead(db, correlated_watch_id=w.id, correlation_type="EXACT_REFERENCE_MATCH")
+    notifier = MagicMock()
+    notifier.editorial_enabled = True
+    notifier.send_editorial_alert.return_value = True
+    service = SpecialistLeadService(db)
+    with patch("app.services.specialist_leads.get_settings", return_value=_settings_patch()):
+        sent = service.notify_correlation(lead, notifier=notifier)
+    assert sent is True
+    assert lead.delivery_state == "sent"
+    assert lead.notified_at is None, "notified_at is the early-warning dedup guard; follow-up must not set it"
+
+
+def test_correlation_followup_gated_and_failed_states(db):
+    from app.services.specialist_leads import SpecialistLeadService
+    from unittest.mock import MagicMock, patch
+
+    # gated: notifier disabled
+    w = _make_watch(db, reference_raw="T2N901", reference_canonical="T2N901")
+    lead = _make_lead(db, correlated_watch_id=w.id, correlation_type="EXACT_REFERENCE_MATCH",
+                      source_url="https://example.com/corr-gated")
+    disabled = MagicMock()
+    disabled.editorial_enabled = False
+    service = SpecialistLeadService(db)
+    with patch("app.services.specialist_leads.get_settings", return_value=_settings_patch()):
+        assert service.notify_correlation(lead, notifier=disabled) is False
+    assert lead.delivery_state == "gated"
+
+    # failed: attempted, Discord did not accept
+    w2 = _make_watch(db, reference_raw="T2N902", reference_canonical="T2N902")
+    lead2 = _make_lead(db, correlated_watch_id=w2.id, correlation_type="EXACT_REFERENCE_MATCH",
+                       source_url="https://example.com/corr-failed")
+    failing = MagicMock()
+    failing.editorial_enabled = True
+    failing.send_editorial_alert.return_value = False
+    with patch("app.services.specialist_leads.get_settings", return_value=_settings_patch()):
+        assert service.notify_correlation(lead2, notifier=failing) is False
+    assert lead2.delivery_state == "failed"
+    assert lead2.notified_at is None
+
+
+def test_second_event_path_notify_false_records_gated(db_session, tmp_settings):
+    from unittest.mock import patch
+
+    from app.models import Event, ReleaseLead, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
+    w = Watch(manufacturer="Timex", brand="Timex", reference_raw="T2N910",
+              reference_canonical="T2N910")
+    db_session.add(w)
+    # This path consumes a Layer A ReleaseLead (official announcement), not
+    # a SpecialistLead.
+    lead = ReleaseLead(
+        source_id="timex_news",
+        announcement_title="Timex announces T2N910",
+        announcement_url="https://example.com/announce-1",
+        announcement_date="August 31, 2026",  # current: passes the staleness gate
+        completeness_score=90.0,
+    )
+    db_session.add(lead)
+    db_session.flush()
+
+    with patch("app.services.pipeline.get_settings", return_value=_settings_patch()):
+        result = pipeline._record_watch_event(
+            watch=w, is_new_watch=True, lead=lead, region="US", notify=False,
+        )
+    assert result.get("event_id"), result
+    event = db_session.get(Event, result["event_id"])
+    assert event.extra["alerted"] is False
+    assert event.extra["delivery"] == {"state": "gated", "reason": "notify_disabled"}
+
+
+def test_attempted_at_is_rendered_as_human_time(db):
+    from app.main import _event_delivery_view
+    from app.models import Event
+
+    event = Event(
+        event_type="NEW_REFERENCE",
+        title="t",
+        extra={"delivery": {"state": "sent", "attempted_at": "2026-08-31T10:00:00+00:00"}},
+    )
+    human = _event_delivery_view(event)["attempted_human"]
+    assert human
+    assert re.search(r"\d{2} [A-Z][a-z]{2} \d{4}", human), human
+    assert not _ISO_RE.search(human), human
+
+
+def test_run_detail_orders_stages_by_pipeline_sequence(db, web_client):
+    from app.models import CollectorRun, PipelineLedger
+
+    run = CollectorRun(
+        collector_id="casio_jp_sitemap",
+        collector_version="1",
+        status="SUCCESS",
+        started_at=datetime.now(UTC),
+    )
+    db.add(run)
+    db.flush()
+    # Insert in NON-pipeline order with increasing timestamps: the page must
+    # present stages in canonical pipeline sequence, not insertion order.
+    for stage in ("parsing", "discovery", "normalization"):
+        db.add(
+            PipelineLedger(
+                correlation_id="CORR-ORDER-1",
+                run_id=run.id,
+                entity_type="watch",
+                entity_id="1",
+                stage=stage,
+                action="ok",
+                created_at=datetime.now(UTC),
+            )
+        )
+    db.commit()
+
+    page = web_client.get(f"/runs/{run.id}")
+    assert page.status_code == 200
+    assert page.text.index("discovery") < page.text.index("parsing") < page.text.index("normalization")

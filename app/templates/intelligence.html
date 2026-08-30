@@ -237,6 +237,7 @@
         <td class="small">{{ L.confidence|round(0) }}</td>
         <td class="small">
           {% if L.notified_at %}<span class="badge badge-ok">sent</span> <span class="muted">{{ L.notified_at|humantime }}</span>
+          {% elif L.delivery_state == 'sent' %}<span class="badge badge-ok">sent</span>
           {% elif L.delivery_state == 'failed' %}<span class="badge badge-err">failed</span>
           {% elif L.delivery_state == 'gated' %}<span class="badge badge-neutral">gated</span>
           {% else %}<span class="muted">not delivered</span>{% endif %}

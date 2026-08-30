@@ -407,17 +407,22 @@ class SpecialistLeadService:
         not this correlation-followup path)."""
         settings = get_settings()
         if not settings.editorial_notifications_enabled:
+            self._mark_delivery(lead, "gated")
             return False
         if lead.is_baseline:
+            self._mark_delivery(lead, "gated")
             return False
         if lead.editorial_freshness != "FRESH":
+            self._mark_delivery(lead, "gated")
             return False
         notifier = notifier or DiscordNotifier(settings)
         if not notifier.editorial_enabled or lead.correlated_watch_id is None:
+            self._mark_delivery(lead, "gated")
             return False
 
         watch = self.session.get(Watch, lead.correlated_watch_id)
         if watch is None:
+            self._mark_delivery(lead, "gated")
             return False
         profile = get_source_profile(lead.source_id)
         text = format_correlation_followup_alert(
@@ -434,7 +439,17 @@ class SpecialistLeadService:
             lead_time_days=lead.lead_time_days,
             source_url=lead.source_url,
         )
-        return notifier.send_editorial_alert(text)
+        sent = notifier.send_editorial_alert(text)
+        if sent:
+            # Correlation follow-up: record the state only. notified_at is
+            # notify_new_lead's dedup guard for the EARLY WARNING alert and
+            # must not be touched by this second delivery path
+            # (STD-UI-COM-011: a correlation-alerted lead must not read as
+            # "not delivered").
+            lead.delivery_state = "sent"
+        else:
+            self._mark_delivery(lead, "failed")
+        return sent
 
 
 def run_casioblog_pipeline(session: Session, *, feed_xml: bytes | None = None, max_items: int = 20) -> CollectorRun:

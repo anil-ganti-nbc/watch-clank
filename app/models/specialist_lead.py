@@ -200,9 +200,11 @@ class SpecialistLead(Base):
     # STD-UI-COM-011 remediation (2026-08-31): coarse delivery outcome so the
     # UI can distinguish attempted-and-failed / gated-by-policy from
     # never-attempted, instead of collapsing all of those into
-    # notified_at IS NULL. NULL = never considered for delivery. A 'sent'
-    # row always also carries notified_at and is never overwritten (the
-    # notify path only sets this field while it is still NULL).
+    # notified_at IS NULL. NULL = never considered for delivery. An
+    # early-warning 'sent' row also carries notified_at; a correlation-
+    # follow-up 'sent' row does not (notified_at is the early-warning dedup
+    # guard and is never set by the follow-up path). 'sent' is never
+    # downgraded: policy skips only mark fields that are still NULL.
     delivery_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # Sprint 7 epoch/baseline tracking -- see app/models/epoch.py. A lead

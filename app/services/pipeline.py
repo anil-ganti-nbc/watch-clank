@@ -2097,6 +2097,15 @@ class PipelineService:
                 "prior_regions": sorted(prior_regions),
                 "experimental": experimental,
                 "alerted": False,
+                # This first-party news path has no eligibility/maturity/
+                # first-seen gates -- the only determinable pre-send outcome
+                # is "the caller chose not to notify" (STD-UI-COM-011).
+                **_initial_delivery_outcome(
+                    notify=notify,
+                    editorial_eligible=True,
+                    first_seen_alertable=True,
+                    maturity_allows_delivery=True,
+                ),
             },
         )
         self.session.add(event)
