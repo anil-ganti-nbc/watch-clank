@@ -300,6 +300,14 @@ class SpecialistLeadService:
 
         return results
 
+    def _mark_delivery(self, lead: SpecialistLead, state: str) -> None:
+        """Record the coarse delivery outcome (STD-UI-COM-011 remediation).
+        First determination wins: a lead already marked 'sent' (notified_at
+        set) must never be downgraded to 'gated' by a later dedupe pass,
+        and a recorded outcome is never silently re-classified."""
+        if lead.delivery_state is None:
+            lead.delivery_state = state
+
     def notify_new_lead(self, lead: SpecialistLead, *, notifier: DiscordNotifier | None = None) -> bool:
         """Send the EARLY WARNING — UNCONFIRMED alert for one freshly
         created lead, if editorial notifications are enabled, the lead
@@ -308,19 +316,29 @@ class SpecialistLeadService:
         the same lead, since ingest_candidate itself dedups by source_url
         and this checks notified_at on top of that as a second guard).
         Discord failures are swallowed by DiscordNotifier; this never
-        raises and never blocks lead persistence."""
+        raises and never blocks lead persistence.
+
+        Every policy skip records lead.delivery_state='gated' (first
+        determination wins — a 'sent' outcome is never downgraded) and the
+        dispatch attempt records 'sent'/'failed', so the UI can distinguish
+        policy suppression from failure from never-attempted
+        (STD-UI-COM-011)."""
         settings = get_settings()
         if not settings.editorial_notifications_enabled:
+            self._mark_delivery(lead, "gated")
             return False
         if lead.is_baseline:
+            self._mark_delivery(lead, "gated")
             return False
         # STALE_PUBLICATION/UNKNOWN_TIMESTAMP/MANUAL_UNDATED must never
         # alert as current news -- see ai/handoff/INCIDENT_EPOCH1_FRESHNESS.md.
         if lead.editorial_freshness != "FRESH":
+            self._mark_delivery(lead, "gated")
             return False
         if lead.notified_at is not None:
             return False
         if lead.confidence < settings.discord_specialist_min_confidence:
+            self._mark_delivery(lead, "gated")
             return False
         # Preserve every independent article for provenance, but do not send
         # four identical early-warning alerts when several publications name
@@ -334,10 +352,12 @@ class SpecialistLeadService:
                 SpecialistLead.editorial_freshness == "FRESH",
             ).all()
             if any(references.intersection({ref.upper() for ref in other.reference_candidates or []}) for other in already_alerted):
+                self._mark_delivery(lead, "gated")
                 return False
 
         notifier = notifier or DiscordNotifier(settings)
         if not notifier.editorial_enabled:
+            self._mark_delivery(lead, "gated")
             return False
 
         profile = get_source_profile(lead.source_id)
@@ -359,6 +379,9 @@ class SpecialistLeadService:
         sent = notifier.send_editorial_alert(text)
         if sent:
             lead.notified_at = datetime.now(UTC)
+            lead.delivery_state = "sent"
+        else:
+            self._mark_delivery(lead, "failed")
         return sent
 
     def notify_correlation(self, lead: SpecialistLead, *, notifier: DiscordNotifier | None = None) -> bool:

@@ -29,14 +29,14 @@
   <thead>
     <tr>
       <th>ID</th><th>Collector</th><th>Layer</th><th>Status</th><th>Discovered</th><th>Fetched</th>
-      <th>Parsed</th><th>New</th><th>Obs</th><th>Fail</th><th>Duration</th><th>Started</th>
+      <th>Parsed</th><th>New</th><th>Obs</th><th>Fail</th><th>Duration</th><th>Started</th><th>Stages</th>
     </tr>
   </thead>
   <tbody>
   {% for r in runs %}
     {% set c = controls_by_id.get(r.collector_id) %}
     <tr>
-      <td>{{ r.id }}</td>
+      <td><a href="/runs/{{ r.id }}">{{ r.id }}</a></td>
       <td>{{ r.collector_id }}<br><span class="small muted">@{{ r.collector_version }}</span></td>
       <td>{% if c %}<span class="badge {{ 'badge-official' if c.layer == 'OFFICIAL' else 'badge-specialist' }}">{{ c.layer }}</span>{% else %}<span class="muted small">—</span>{% endif %}</td>
       <td><span class="badge {{ 'badge-ok' if r.status == 'SUCCESS' else 'badge-warn' if r.status in ['PARTIAL','ZERO_ITEMS'] else 'badge-err' if r.status == 'FAILED' else 'badge-run' }}">{{ r.status }}</span></td>
@@ -48,6 +48,7 @@
       <td>{{ r.failure_count }}</td>
       <td>{% if r.duration_ms %}{{ (r.duration_ms / 1000)|round(1) }}s{% else %}—{% endif %}</td>
       <td class="small">{{ r.started_at|humantime }}<br><span class="muted">{{ r.started_at|relative }}</span></td>
+      <td class="small"><a href="/runs/{{ r.id }}" title="Pipeline stage detail for this run">stages ↗</a></td>
     </tr>
   {% endfor %}
   </tbody>

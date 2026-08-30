@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Run #{{ run.id }} – Watch Clank{% endblock %}
+{% block content %}
+<h1>Run #{{ run.id }} — {{ run.collector_id }} <span class="badge {{ 'badge-ok' if run.status == 'SUCCESS' else 'badge-warn' if run.status in ['PARTIAL','ZERO_ITEMS'] else 'badge-err' if run.status == 'FAILED' else 'badge-run' }}">{{ run.status }}</span></h1>
+<p class="muted">
+  <a href="/runs">← All runs</a>
+  · layer collector version @{{ run.collector_version }}
+  · started {{ run.started_at|humantime }}
+  {% if run.completed_at %}· completed {{ run.completed_at|humantime }}{% endif %}
+  {% if run.duration_ms %}· {{ (run.duration_ms / 1000)|round(1) }}s{% endif %}
+</p>
+
+<div class="grid">
+  <div class="card">
+    <h3>Funnel</h3>
+    <table>
+      <tr><th>Discovered</th><td>{{ run.discovered_count }}</td></tr>
+      <tr><th>Fetched</th><td>{{ run.fetched_count }}</td></tr>
+      <tr><th>Parsed</th><td>{{ run.parsed_count }}</td></tr>
+      <tr><th>New watches</th><td>{{ run.new_watch_count }}</td></tr>
+      <tr><th>Observations</th><td>{{ run.observation_count }}</td></tr>
+      <tr><th>Warnings</th><td>{{ run.warning_count }}</td></tr>
+      <tr><th>Failures</th><td>{{ run.failure_count }}</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h3>Pipeline stages</h3>
+    {% if stage_entry_count %}
+    <p class="muted small">{{ stage_entry_count }} ledger entries across {{ correlations|length }} correlation(s). Stage order matches the canonical pipeline sequence; unknown stages sort last.</p>
+    {% else %}
+    <p class="muted">No ledger entries recorded for this run (older runs, or stages that wrote no ledger rows).</p>
+    {% endif %}
+  </div>
+</div>
+
+{% for correlation_id, entries in correlations.items() %}
+<div class="card">
+  <h3><a href="/correlation/{{ correlation_id }}">correlation {{ correlation_id[:8] }}…</a> <span class="muted small">({{ entries|length }} entries — full timeline ↗)</span></h3>
+  <ul class="timeline">
+    {% for e in entries %}
+    <li>
+      <strong>{{ e.stage }}</strong> → {{ e.action }}
+      <div class="muted">
+        {{ e.entity_type }}{% if e.entity_id %} #{{ e.entity_id }}{% endif %}
+        · {{ e.created_at|humantime }}
+        {% if e.input_ref %}<br>in: {{ e.input_ref[:80] }}{% endif %}
+        {% if e.output_ref %}<br>out: {{ e.output_ref[:80] }}{% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endfor %}
+{% endblock %}

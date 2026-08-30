@@ -134,6 +134,10 @@ class SpecialistLead(Base):
             "('FRESH','STALE_PUBLICATION','BASELINE','UNKNOWN_TIMESTAMP','MANUAL_UNDATED')",
             name="ck_specialist_lead_editorial_freshness",
         ),
+        CheckConstraint(
+            "delivery_state IS NULL OR delivery_state IN ('sent', 'failed', 'gated')",
+            name="ck_specialist_lead_delivery_state",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -192,6 +196,14 @@ class SpecialistLead(Base):
     # Discord dedup (Sprint 6 Phase 4): set once an alert is actually sent so
     # a repeat pipeline run never re-notifies for the same lead.
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # STD-UI-COM-011 remediation (2026-08-31): coarse delivery outcome so the
+    # UI can distinguish attempted-and-failed / gated-by-policy from
+    # never-attempted, instead of collapsing all of those into
+    # notified_at IS NULL. NULL = never considered for delivery. A 'sent'
+    # row always also carries notified_at and is never overwritten (the
+    # notify path only sets this field while it is still NULL).
+    delivery_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # Sprint 7 epoch/baseline tracking -- see app/models/epoch.py. A lead
     # discovered during Epoch 1's baseline is real data (correlation/

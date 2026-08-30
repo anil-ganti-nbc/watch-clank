@@ -38,7 +38,7 @@
   </div>
   {% if current_events %}
   <table id="qc-table">
-    <thead><tr><th>When</th><th>Manufacturer</th><th>Reference</th><th>Listing</th><th>Event</th><th>QC</th><th>Region</th><th>Score</th></tr></thead>
+    <thead><tr><th>When</th><th>Manufacturer</th><th>Reference</th><th>Listing</th><th>Event</th><th>QC</th><th>Region</th><th>Score</th><th>Delivery</th></tr></thead>
     <tbody id="qc-tbody">
     {% for e in current_events %}
       {% set w = e.watches[0].watch if e.watches else None %}
@@ -57,6 +57,14 @@
         </td>
         <td class="muted">{{ (e.extra or {}).get('region') or '—' }}</td>
         <td class="small">{{ e.story_score|round(0) if e.story_score is not none else '—' }}</td>
+        {% set d = (e.extra or {}).get('delivery') or {} %}
+        <td class="small">
+          {% if d.get('state') == 'sent' %}<span class="badge badge-ok">sent</span>{% if d.get('attempted_at') %} <span class="muted">{{ d.get('attempted_at')|humantime }}</span>{% endif %}
+          {% elif d.get('state') == 'failed' %}<span class="badge badge-err">failed</span>{% if d.get('attempted_at') %} <span class="muted">{{ d.get('attempted_at')|humantime }}</span>{% endif %}
+          {% elif d.get('state') == 'gated' %}<span class="badge badge-neutral">gated</span>{% if d.get('reason') %} <span class="muted">{{ d.get('reason') }}</span>{% endif %}
+          {% elif (e.extra or {}).get('alerted') %}<span class="badge badge-ok">sent</span>
+          {% else %}<span class="muted">not delivered</span>{% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>
@@ -88,6 +96,15 @@
     return p.toString();
   }
 
+  function deliveryCell(d){
+    d = d || {};
+    if (d.state === 'sent') return `<span class="badge badge-ok">sent</span>` + (d.attempted_human ? ` <span class="muted">${d.attempted_human}</span>` : '');
+    if (d.state === 'failed') return `<span class="badge badge-err">failed</span>` + (d.attempted_human ? ` <span class="muted">${d.attempted_human}</span>` : '');
+    if (d.state === 'gated') return `<span class="badge badge-neutral">gated</span>` + (d.reason ? ` <span class="muted">${d.reason}</span>` : '');
+    if (d.legacy_alerted) return `<span class="badge badge-ok">sent</span>`;
+    return `<span class="muted">not delivered</span>`;
+  }
+
   function rowHtml(item){
     const listing = item.listing_url ? `<a href="${item.listing_url}" target="_blank" rel="noopener">Listing ↗</a>` : '—';
     const ref = item.watch_id ? `<a href="/watches/${item.watch_id}">${item.reference||'—'}</a>` : (item.reference||'—');
@@ -103,7 +120,8 @@
         `<button class="qc-btn" data-disposition="OUT_OF_STOCK" title="Out of stock">OOS</button>`+
       `</td>`+
       `<td class="muted">${item.region||'—'}</td>`+
-      `<td class="small">${item.score !== null && item.score !== undefined ? item.score : '—'}</td>`;
+      `<td class="small">${item.score !== null && item.score !== undefined ? item.score : '—'}</td>`+
+      `<td class="small">${deliveryCell(item.delivery)}</td>`;
   }
 
   function appendRow(item){
@@ -195,12 +213,12 @@
   {% endif %}
   {% if specialist_leads %}
   <table id="lead-qc-table">
-    <thead><tr><th>Published / observed</th><th>Manufacturer</th><th>Lead</th><th>Type</th>{% if not show_historical %}<th>QC</th>{% endif %}<th>Source</th><th>Tier</th><th>Confidence</th>{% if show_historical %}<th>Freshness</th>{% endif %}</tr></thead>
+    <thead><tr><th>Timing</th><th>Manufacturer</th><th>Lead</th><th>Type</th>{% if not show_historical %}<th>QC</th>{% endif %}<th>Source</th><th>Tier</th><th>Confidence</th><th>Delivery</th>{% if show_historical %}<th>Freshness</th>{% endif %}</tr></thead>
     <tbody id="lead-qc-tbody">
     {% for L in specialist_leads %}
       <tr id="lead-qc-row-{{ L.id }}" data-lead-id="{{ L.id }}">
         <td class="small">
-          {% if L.published_at %}{{ L.published_at|humantime }}<br><span class="muted">{{ L.published_at|relative }}</span>
+          {% if L.published_at %}published {{ L.published_at|humantime }}<br><span class="muted">{{ L.published_at|relative }}</span>
           {% else %}<span class="muted">discovered {{ L.discovered_at|humantime }}</span>{% endif %}
         </td>
         <td>{{ L.manufacturer or '—' }}</td>
@@ -217,6 +235,12 @@
         <td class="muted">{{ L.source_id }}</td>
         <td class="small">tier {{ L.source_authority_tier }}</td>
         <td class="small">{{ L.confidence|round(0) }}</td>
+        <td class="small">
+          {% if L.notified_at %}<span class="badge badge-ok">sent</span> <span class="muted">{{ L.notified_at|humantime }}</span>
+          {% elif L.delivery_state == 'failed' %}<span class="badge badge-err">failed</span>
+          {% elif L.delivery_state == 'gated' %}<span class="badge badge-neutral">gated</span>
+          {% else %}<span class="muted">not delivered</span>{% endif %}
+        </td>
         {% if show_historical %}<td><span class="badge {{ 'badge-ok' if L.editorial_freshness == 'FRESH' else 'badge-neutral' }}">{{ L.editorial_freshness or 'UNCLASSIFIED' }}</span></td>{% endif %}
       </tr>
     {% endfor %}
@@ -256,7 +280,16 @@
   }
 
   function rowHtml(item){
-    return `<td class="small">${item.when_human}<br><span class="muted">${item.when_relative}</span></td>`+
+    const whenCell = item.when_role === 'published'
+      ? `published ${item.when_human}<br><span class="muted">${item.when_relative}</span>`
+      : `<span class="muted">discovered ${item.when_human}</span>`;
+    const d = item.delivery || {};
+    let deliveryCell;
+    if (d.state === 'sent') deliveryCell = `<span class="badge badge-ok">sent</span>` + (d.human ? ` <span class="muted">${d.human}</span>` : '');
+    else if (d.state === 'failed') deliveryCell = `<span class="badge badge-err">failed</span>`;
+    else if (d.state === 'gated') deliveryCell = `<span class="badge badge-neutral">gated</span>`;
+    else deliveryCell = `<span class="muted">not delivered</span>`;
+    return `<td class="small">${whenCell}</td>`+
       `<td>${item.manufacturer||'—'}</td>`+
       `<td><a href="${item.source_url}" target="_blank" rel="noopener">${(item.title||'').slice(0,90)}</a></td>`+
       `<td><span class="badge badge-specialist">${item.lead_type}</span></td>`+
@@ -268,7 +301,8 @@
       `</td>`+
       `<td class="muted">${item.source_id||'—'}</td>`+
       `<td class="small">tier ${item.source_authority_tier ?? '—'}</td>`+
-      `<td class="small">${item.confidence ?? '—'}</td>`;
+      `<td class="small">${item.confidence ?? '—'}</td>`+
+      `<td class="small">${deliveryCell}</td>`;
   }
 
   function appendRow(item){

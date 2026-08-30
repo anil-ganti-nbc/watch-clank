@@ -493,6 +493,18 @@ def recent_intelligence(
     )
 
 
+def _event_delivery_view(e: Event) -> dict:
+    """Delivery outcome for one Event row (STD-UI-COM-011): the pipeline
+    records extra["delivery"] = {state, reason?, attempted_at?}; rows from
+    before that field existed are reported via their legacy alerted flag."""
+    extra = e.extra or {}
+    d = extra.get("delivery") or {}
+    attempted_human = _humantime(d["attempted_at"]) if d.get("attempted_at") else None
+    if d:
+        return {"state": d.get("state"), "reason": d.get("reason"), "attempted_human": attempted_human}
+    return {"state": None, "reason": None, "attempted_human": None, "legacy_alerted": bool(extra.get("alerted"))}
+
+
 def _event_to_qc_dict(e: Event) -> dict:
     w = e.watches[0].watch if e.watches else None
     latest_obs = None
@@ -509,6 +521,7 @@ def _event_to_qc_dict(e: Event) -> dict:
         "event_type": e.event_type,
         "region": (e.extra or {}).get("region"),
         "score": round(e.story_score) if e.story_score is not None else None,
+        "delivery": _event_delivery_view(e),
     }
 
 
@@ -591,10 +604,17 @@ def qc_submit_review(event_id: int, request: Request, payload: ReviewSubmission,
 
 def _lead_to_qc_dict(lead: SpecialistLead) -> dict:
     published_or_discovered = lead.published_at or lead.discovered_at
+    if lead.notified_at:
+        delivery = {"state": "sent", "human": _humantime(lead.notified_at)}
+    else:
+        delivery = {"state": lead.delivery_state, "human": None}
     return {
         "lead_id": lead.id,
         "when_human": _humantime(published_or_discovered),
         "when_relative": _relative_time(published_or_discovered),
+        # STD-UI-COM-010: the row states which semantic role the time plays
+        # instead of leaving it to a dual-meaning column header.
+        "when_role": "published" if lead.published_at else "discovered",
         "manufacturer": lead.manufacturer,
         "title": lead.title,
         "source_url": lead.source_url,
@@ -602,6 +622,7 @@ def _lead_to_qc_dict(lead: SpecialistLead) -> dict:
         "source_id": lead.source_id,
         "source_authority_tier": lead.source_authority_tier,
         "confidence": round(lead.confidence) if lead.confidence is not None else None,
+        "delivery": delivery,
     }
 
 
@@ -1123,6 +1144,30 @@ def run_all_safe_collectors(request: Request):
     )
 
 
+# Canonical pipeline-stage ordering, shared by /correlation/{id} and
+# /runs/{run_id} so both surfaces present ledger stages in the same order
+# (STD-UI-COM-009: stage detail must be reachable and coherent).
+_PIPELINE_STAGE_ORDER = [
+    "discovery",
+    "fetch",
+    "snapshot_storage",
+    "parsing",
+    "normalization",
+    "identity_resolution",
+    "observation_creation",
+    "family_candidate_assignment",
+    "pipeline",
+]
+
+
+def _ledger_sort_key(e):
+    try:
+        idx = _PIPELINE_STAGE_ORDER.index(e.stage)
+    except ValueError:
+        idx = 99
+    return (idx, e.created_at)
+
+
 @app.get("/runs", response_class=HTMLResponse)
 def run_history(
     request: Request,
@@ -1160,6 +1205,40 @@ def run_history(
             "filter_source": source,
             "filter_status": status,
             "filter_layer": layer,
+        },
+    )
+
+
+@app.get("/runs/{run_id}", response_class=HTMLResponse)
+def run_detail(run_id: int, request: Request, db: Session = Depends(get_db)):
+    """STD-UI-COM-009 remediation (2026-08-31): the primary run surface
+    links each run here, so the pipeline-stage detail the backend already
+    tracks in PipelineLedger is visibly indicated and directly reachable —
+    per-run ledger entries, stage-ordered, grouped per correlation id with
+    links into the existing /correlation/{id} timeline view."""
+    run = db.get(CollectorRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    entries = db.scalars(
+        select(PipelineLedger)
+        .where(PipelineLedger.run_id == run_id)
+        .order_by(PipelineLedger.created_at)
+    ).all()
+    sorted_entries = sorted(entries, key=_ledger_sort_key)
+
+    by_correlation: dict[str, list] = {}
+    for entry in sorted_entries:
+        by_correlation.setdefault(entry.correlation_id, []).append(entry)
+
+    return templates.TemplateResponse(
+        request,
+        "run_detail.html",
+        {
+            "active_nav": "runs",
+            "run": run,
+            "correlations": by_correlation,
+            "stage_entry_count": len(sorted_entries),
         },
     )
 
@@ -1234,26 +1313,7 @@ def correlation_timeline(correlation_id: str, request: Request, db: Session = De
     if not entries:
         raise HTTPException(status_code=404, detail="Correlation not found")
 
-    stage_order = [
-        "discovery",
-        "fetch",
-        "snapshot_storage",
-        "parsing",
-        "normalization",
-        "identity_resolution",
-        "observation_creation",
-        "family_candidate_assignment",
-        "pipeline",
-    ]
-
-    def sort_key(e: PipelineLedger):
-        try:
-            idx = stage_order.index(e.stage)
-        except ValueError:
-            idx = 99
-        return (idx, e.created_at)
-
-    sorted_entries = sorted(entries, key=sort_key)
+    sorted_entries = sorted(entries, key=_ledger_sort_key)
 
     return templates.TemplateResponse(
         request,

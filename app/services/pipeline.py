@@ -45,6 +45,30 @@ from app.services.snapshot_storage import SnapshotStorageService
 
 logger = get_logger(__name__)
 
+
+def _initial_delivery_outcome(
+    *, notify: bool, editorial_eligible: bool, first_seen_alertable: bool, maturity_allows_delivery: bool
+) -> dict[str, Any]:
+    """STD-UI-COM-011 remediation (2026-08-31): record the delivery outcome
+    the control flow can already determine at event-creation time, so the
+    UI can distinguish sent / failed / gated from never-eligible instead of
+    collapsing all non-sent events into alerted=False.
+
+    States: "ineligible" (editorially ineligible), "gated" (delivery
+    suppressed by policy, with a machine-readable reason). "sent"/"failed"
+    are recorded by the send block once a delivery is actually attempted.
+    Purely additive Event.extra JSON under the "delivery" key; "alerted"
+    keeps its existing meaning for backward compatibility."""
+    if not editorial_eligible:
+        return {"delivery": {"state": "ineligible"}}
+    if not maturity_allows_delivery:
+        return {"delivery": {"state": "gated", "reason": "experimental_maturity"}}
+    if not first_seen_alertable:
+        return {"delivery": {"state": "gated", "reason": "first_seen_opt_in"}}
+    if not notify:
+        return {"delivery": {"state": "gated", "reason": "notify_disabled"}}
+    return {}
+
 # Dispatch table for per-manufacturer reference normalization. Casio keeps its
 # exact original call path (default kwargs identical to pre-multi-brand code)
 # so existing Casio behaviour is provably unchanged.
@@ -1882,6 +1906,28 @@ class PipelineService:
             else None
         )
 
+        # Delivery-gate decisions hoisted above Event creation so the
+        # recorded delivery outcome reflects every gate (STD-UI-COM-011).
+        # 2026-08-21: FIRST_SEEN_BY_CLANK is reviewable, not audible. The
+        # initial post-baseline crawl of a large catalogue emits hundreds of
+        # honest first-sightings per run (live-verified with casio_jp_sitemap:
+        # 400 in one run); at the experimental lane's threshold of 0 every
+        # one of them would ring Discord. They stay fully visible in the
+        # dashboard and QC queue; only the ping is gated behind an explicit
+        # operator opt-in.
+        first_seen_alertable = (
+            scored.event_type != "FIRST_SEEN_BY_CLANK" or settings.discord_first_seen_enabled
+        )
+        # 2026-08-25 fleet-wide maturity gate (canonized per owner decision):
+        # external delivery is a PROMOTION privilege. An experimental-maturity
+        # collector must be externally silent for ANY event type/score; its
+        # events stay visible in dashboard/QC. This replaces the incidental
+        # stacking of discord_first_seen_enabled=False + initial-fill
+        # suppression with an explicit, mechanical gate.
+        from app.services.delivery_gate import experimental_delivery_blocked
+
+        maturity_allows_delivery = not experimental_delivery_blocked(collector_id)
+
         event = Event(
             event_type=scored.event_type,
             title=f"{watch.manufacturer} {watch.reference_raw}: {scored.event_type}",
@@ -1901,6 +1947,12 @@ class PipelineService:
                 "alerted": False,
                 "editorial_eligible": editorial_eligible,
                 "editorial_eligibility_reasons": eligibility_reasons,
+                **_initial_delivery_outcome(
+                    notify=notify,
+                    editorial_eligible=editorial_eligible,
+                    first_seen_alertable=first_seen_alertable,
+                    maturity_allows_delivery=maturity_allows_delivery,
+                ),
                 **(
                     {
                         "human_qc_deprioritized": True,
@@ -1926,31 +1978,22 @@ class PipelineService:
             score=scored.score,
         )
 
-        # 2026-08-21: FIRST_SEEN_BY_CLANK is reviewable, not audible. The
-        # initial post-baseline crawl of a large catalogue emits hundreds of
-        # honest first-sightings per run (live-verified with casio_jp_sitemap:
-        # 400 in one run); at the experimental lane's threshold of 0 every
-        # one of them would ring Discord. They stay fully visible in the
-        # dashboard and QC queue; only the ping is gated behind an explicit
-        # operator opt-in.
-        first_seen_alertable = (
-            scored.event_type != "FIRST_SEEN_BY_CLANK" or settings.discord_first_seen_enabled
-        )
-        # 2026-08-25 fleet-wide maturity gate (canonized per owner decision):
-        # external delivery is a PROMOTION privilege. An experimental-maturity
-        # collector must be externally silent for ANY event type/score; its
-        # events stay visible in dashboard/QC. This replaces the incidental
-        # stacking of discord_first_seen_enabled=False + initial-fill
-        # suppression with an explicit, mechanical gate.
-        from app.services.delivery_gate import experimental_delivery_blocked
-
-        maturity_allows_delivery = not experimental_delivery_blocked(collector_id)
         if notify and editorial_eligible and first_seen_alertable and maturity_allows_delivery:
             notifier = DiscordNotifier(settings)
             threshold = (
                 settings.discord_experimental_min_score if experimental else settings.discord_official_min_score
             )
-            if notifier.editorial_enabled and scored.score >= threshold:
+            if not notifier.editorial_enabled:
+                event.extra = {
+                    **event.extra,
+                    "delivery": {"state": "gated", "reason": "editorial_disabled"},
+                }
+            elif scored.score < threshold:
+                event.extra = {
+                    **event.extra,
+                    "delivery": {"state": "gated", "reason": "below_threshold"},
+                }
+            else:
                 text = format_alert(
                     manufacturer=watch.manufacturer,
                     brand=watch.brand,
@@ -1963,7 +2006,14 @@ class PipelineService:
                     experimental=experimental,
                 )
                 sent = notifier.send_editorial_alert(text)
-                event.extra = {**event.extra, "alerted": sent}
+                event.extra = {
+                    **event.extra,
+                    "alerted": sent,
+                    "delivery": {
+                        "state": "sent" if sent else "failed",
+                        "attempted_at": datetime.now(UTC).isoformat(),
+                    },
+                }
                 self.session.commit()
 
         return {"event_type": scored.event_type, "event_id": event.id, "score": scored.score, "confidence": scored.confidence}
@@ -2068,7 +2118,17 @@ class PipelineService:
             threshold = (
                 settings.discord_experimental_min_score if experimental else settings.discord_official_min_score
             )
-            if notifier.editorial_enabled and scored.score >= threshold:
+            if not notifier.editorial_enabled:
+                event.extra = {
+                    **event.extra,
+                    "delivery": {"state": "gated", "reason": "editorial_disabled"},
+                }
+            elif scored.score < threshold:
+                event.extra = {
+                    **event.extra,
+                    "delivery": {"state": "gated", "reason": "below_threshold"},
+                }
+            else:
                 text = format_alert(
                     manufacturer=watch.manufacturer,
                     brand=watch.brand,
@@ -2081,7 +2141,14 @@ class PipelineService:
                     experimental=experimental,
                 )
                 sent = notifier.send_editorial_alert(text)
-                event.extra = {**event.extra, "alerted": sent}
+                event.extra = {
+                    **event.extra,
+                    "alerted": sent,
+                    "delivery": {
+                        "state": "sent" if sent else "failed",
+                        "attempted_at": datetime.now(UTC).isoformat(),
+                    },
+                }
                 self.session.commit()
 
         return {
