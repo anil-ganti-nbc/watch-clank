@@ -101,11 +101,39 @@ def test_operations_ui_exposes_experimental_maturity_at_point_of_control(web_cli
     assert "OFFICIAL" in seiko_row_slice
 
 
+def test_dashboard_ui_exposes_experimental_maturity_at_point_of_control(web_client, monkeypatch):
+    """STD-UI-COM-007: non-production collectors must show an explicit
+    maturity/non-production label at the dashboard first-collect dropdown control."""
+    monkeypatch.setenv("WATCH_CLANK_FIELD_TEST", "1")
+    page = web_client.get("/")
+    assert page.status_code == 200
+
+    # The first-collect select dropdown options
+    assert 'value="tissot_sitemap"' in page.text
+    assert 'value="timex_uk_products"' in page.text
+
+    # Experimental options carry [EXPERIMENTAL] suffix
+    tissot_opt = [line for line in page.text.splitlines() if 'value="tissot_sitemap"' in line][0]
+    assert "[EXPERIMENTAL]" in tissot_opt
+
+    timex_uk_opt = [line for line in page.text.splitlines() if 'value="timex_uk_products"' in line][0]
+    assert "[EXPERIMENTAL]" in timex_uk_opt
+
+    # Production options (e.g. seiko_products) do not carry [EXPERIMENTAL]
+    seiko_opt = [line for line in page.text.splitlines() if 'value="seiko_products"' in line][0]
+    assert "[EXPERIMENTAL]" not in seiko_opt
+
+
 def test_run_now_remains_available_and_semantics_unchanged(web_client, monkeypatch):
-    """RUN NOW endpoint POST remains available for both experimental and production collectors."""
+    """RUN NOW endpoint POST remains available for both experimental and production collectors, hermetically mocked."""
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    monkeypatch.setattr(
+        main_module,
+        "_run_collector_subprocess",
+        lambda cli_args, timeout_seconds=180: {"ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""},
+    )
 
     # Test POST to /operations/run/tissot_sitemap (non-production collector)
     res_exp = web_client.post("/operations/run/tissot_sitemap", follow_redirects=False)

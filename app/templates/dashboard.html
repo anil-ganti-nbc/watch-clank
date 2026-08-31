@@ -9,7 +9,9 @@
   <p>Run a collector to populate this field-test database.</p>
   <form id="first-collect-form">
     <select id="first-collector" class="btn" aria-label="Choose source">
-      {% for c in collector_controls %}<option value="{{ c.collector_id }}">{{ c.display_name }}</option>{% endfor %}
+      {% for c in collector_controls %}
+        <option value="{{ c.collector_id }}">{{ c.display_name }}{% if c.is_experimental %} [EXPERIMENTAL]{% endif %}</option>
+      {% endfor %}
     </select>
     <button class="btn btn-primary" type="submit">COLLECT</button>
   </form>
