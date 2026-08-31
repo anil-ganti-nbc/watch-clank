@@ -55,7 +55,7 @@ def test_run_pipeline_accepts_both_brands_via_argparse():
         # --help exercises argparse choices validation without running anything.
         result = subprocess.run(
             [sys.executable, "-m", "scripts.run_pipeline", "--experimental-product", brand,
-             "--force-baseline", "--max-items", "1"],
+             "--force-baseline", "--max-items", "1", "--help"],
             cwd=str(ROOT), capture_output=True, text=True, timeout=120,
         )
         # argparse choices must ACCEPT both brands (rc==2 means invalid choice).

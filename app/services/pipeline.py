@@ -1924,9 +1924,13 @@ class PipelineService:
         # events stay visible in dashboard/QC. This replaces the incidental
         # stacking of discord_first_seen_enabled=False + initial-fill
         # suppression with an explicit, mechanical gate.
-        from app.services.delivery_gate import experimental_delivery_blocked
+        from app.services.qualification import QualificationService
 
-        maturity_allows_delivery = not experimental_delivery_blocked(collector_id)
+        # This is the sole runtime external-delivery enforcement boundary.
+        # It records each actual comparison and fails closed on gate drift.
+        maturity_allows_delivery = QualificationService(self.session).delivery_allowed(
+            collector_id or new_obs.collector_id
+        )
 
         event = Event(
             event_type=scored.event_type,

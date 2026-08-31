@@ -90,6 +90,27 @@ Negative QC remains contextual deprioritization, never a blacklist.
 Promotion decision belongs to the operator. No auto-promotion exists or will
 be added.
 
+## Durable gate evidence
+
+The runtime delivery boundary persists its actual maturity comparison in
+`qualification_evidence`.  Each configured maturity-set change creates a new
+qualification epoch and a reset record; evidence from an earlier epoch cannot
+qualify the new one.  A disagreement between configured eligibility and the
+current epoch's durable gate state fails closed.  After reviewed promotion,
+the operator records the existing manual decision with
+`python -m scripts.record_qualification_promotion <collector_id>`; it refuses
+collectors still configured as experimental.  Pre-migration history is not
+backfilled and remains unknown.
+
+## Deployment claims
+
+`python -m scripts.deployment_status --target <scope> --intended-revision <sha>`
+is the only Watch deployment-completion status command.  It reports COMPLETE
+only when a separately authorized host observer supplies an independently
+observed `WATCH_CLANK_RUNNING_REVISION`, matching config/wiring evidence, and
+component convergence.  A build or requested revision is never reused as
+observation.  Host verification remains a separate operational action.
+
 ## Post-soak obligations (even after promotion)
 
 Future source drift, new features, and additional collectors remain normal

@@ -1,6 +1,8 @@
 """Application-level overlap protection for collector runs.
 
-Uses a file lock with PID + timestamp metadata plus DB RUNNING records.
+The operating-system advisory-lock grant is the sole ownership authority.
+The adjacent JSON is intentionally diagnostic: it identifies the holder but
+must never be used to reclaim or deny a lock.
 """
 
 from __future__ import annotations
@@ -201,14 +203,6 @@ class RunLockService:
         """Try to acquire the run lock. Recovers stale runs first."""
         self.recover_stale_runs()
 
-        active = self.find_active_run()
-        if active:
-            return LockResult(
-                acquired=False,
-                reason="active_db_run",
-                active_run_id=active.id,
-            )
-
         if not self._try_grant():
             return LockResult(acquired=False, reason="active_file_grant")
 
@@ -229,26 +223,25 @@ class RunLockService:
         return LockResult(acquired=True, reason="acquired")
 
     def update_run_id(self, run_id: int) -> None:
+        """Update diagnostics without replacing the file that carries a grant."""
+        if self._handle is None:
+            return
         meta = self._read_lock_file() or {}
         meta["run_id"] = run_id
         meta["pid"] = os.getpid()
-        import contextlib
-        with contextlib.suppress(OSError):
-            self.lock_path.write_text(json.dumps(meta), encoding="utf-8")
+        try:
+            self._handle.seek(0)
+            self._handle.truncate()
+            self._handle.write(json.dumps(meta))
+            self._handle.flush()
+        except OSError as exc:
+            logger.warning("lock_metadata_update_failed", error=str(exc))
 
     def release(self) -> None:
         self._drop_grant()
-        # Removing our diagnostic record is cleanup only; exclusivity ended
-        # when the advisory grant was released.
-        try:
-            self.lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     def is_locked(self) -> bool:
         self.recover_stale_runs()
-        if self.find_active_run() is not None:
-            return True
         if self._try_grant():
             self._drop_grant()
             return False

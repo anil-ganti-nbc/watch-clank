@@ -36,10 +36,23 @@ def _post(client: TestClient, path: str, host: str = "127.0.0.1:8765", **kwargs)
 # --- fail-closed default -----------------------------------------------------
 
 
-def test_unsupported_app_is_fail_closed():
+def test_unsupported_app_is_fail_closed(tmp_path, monkeypatch):
     """Direct uvicorn-style usage (no supported launcher): loopback reads
     work, EVERY mutation -- including all four operator families -- is 403,
     and provenance reports it honestly."""
+    from app.core.config import Settings
+    from app.db import session as session_module
+    from app.models.base import Base
+
+    # This direct-app test is intentionally not a migration test.  Give its
+    # read-only dashboard an isolated, initialized schema rather than relying
+    # on a developer's mutable ./data database.
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'operator.db'}")
+    monkeypatch.setattr(session_module, "_settings", settings)
+    monkeypatch.setattr(session_module, "_engine", None)
+    monkeypatch.setattr(session_module, "_SessionLocal", None)
+    Base.metadata.create_all(session_module.get_engine())
+
     from app.main import app
 
     app.state.phase0_mutation_authorizer = None

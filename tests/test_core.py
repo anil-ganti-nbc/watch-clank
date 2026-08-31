@@ -111,7 +111,7 @@ def test_alembic_upgrade_fresh_db(tmp_path: Path):
         "source_observations", "collector_runs", "pipeline_ledger",
         "watch_families", "family_memberships", "events", "event_watches",
         "release_leads", "source_component_states", "specialist_leads",
-        "operational_epochs",
+        "operational_epochs", "qualification_evidence",
     }
     assert expected.issubset(tables)
 
@@ -307,22 +307,17 @@ def test_application_sqlite_engine_sets_configured_busy_timeout(tmp_path: Path, 
 
 
 def test_overlap_prevents_second_run(db_session: Session, tmp_settings: Settings):
-    from app.services.pipeline import PipelineService
+    from app.services.run_lock import RunLockService
 
-    # Simulate active RUNNING
-    active = CollectorRun(
-        collector_id="casio_japan",
-        collector_version="0.1.0",
-        status="RUNNING",
-        started_at=__import__("datetime").datetime.now(__import__("datetime").UTC),
-    )
-    db_session.add(active)
-    db_session.commit()
-
-    pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
-    # Force settings path for lock inside project data - use tmp
-    result = pipeline.run_casio_pipeline(max_items=1, skip_lock=False)
-    assert result.status == "SKIPPED_OVERLAP"
+    # A RUNNING database row is operational history, not an ownership grant.
+    # Only a concurrently-held kernel grant can establish overlap.
+    first = RunLockService(db_session, tmp_settings)
+    second = RunLockService(db_session, tmp_settings)
+    assert first.acquire().acquired
+    result = second.acquire()
+    assert not result.acquired
+    assert result.reason == "active_file_grant"
+    first.release()
 
 
 def test_stale_run_recovery(db_session: Session, tmp_settings: Settings):
@@ -464,7 +459,11 @@ def test_lock_released_after_success(db_session: Session, tmp_settings: Settings
     assert r.acquired
     assert lock.lock_path.exists()
     lock.release()
-    assert not lock.lock_path.exists()
+    # Metadata may remain after a crash/release; only a fresh kernel grant
+    # establishes that the protected lifetime ended.
+    second = RunLockService(db_session, tmp_settings, lock_path=lock.lock_path)
+    assert second.acquire().acquired
+    second.release()
 
 
 def test_stew_report_aggregates(db_session: Session, tmp_settings: Settings):
