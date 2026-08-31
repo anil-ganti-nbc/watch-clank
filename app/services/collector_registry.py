@@ -37,6 +37,10 @@ class CollectorControl:
     layer: str  # "OFFICIAL" or "SPECIALIST"
     cli_args: tuple[str, ...]  # appended to `python -m scripts.run_pipeline --live`
 
+    @property
+    def is_experimental(self) -> bool:
+        return self.collector_id in EXPERIMENTAL_MATURITY_COLLECTORS
+
 
 _CONTROLS: dict[str, CollectorControl] = {
     "casio_multi": CollectorControl("casio_multi", "Casio (intl news + Japan catalogue)", "OFFICIAL", ()),

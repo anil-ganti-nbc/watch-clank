@@ -60,6 +60,9 @@
         <td class="small">{% if h and h.last_success_at %}{{ h.last_success_at|humantime }}<br><span class="muted">{{ h.last_success_at|relative }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
         <td class="small">{{ h.last_item_count if h and h.last_item_count is not none else '—' }}</td>
         <td>
+          {% if c.is_experimental %}
+            <span class="badge badge-warn" style="margin-right:0.35rem;">EXPERIMENTAL</span>
+          {% endif %}
           <form class="collector-form" method="post" action="/operations/run/{{ c.collector_id }}" style="display:inline">
             <button type="submit" class="btn" {{ 'disabled' if not is_loopback else '' }}>{{ 'COLLECT' if field_test else 'RUN NOW' }}</button>
           </form>

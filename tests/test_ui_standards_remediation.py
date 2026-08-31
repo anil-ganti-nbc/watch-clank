@@ -58,6 +58,65 @@ def _gate_obs(watch_id):
     )
 
 
+# ---------------------------------------------------------------- COM-007
+
+
+def test_operations_ui_exposes_experimental_maturity_at_point_of_control(web_client):
+    """STD-UI-COM-007: non-production collectors must show an explicit
+    maturity/non-production label at the point of the control, not merely
+    elsewhere on the page or conflated with the Layer field."""
+    page = web_client.get("/operations")
+    assert page.status_code == 200
+
+    # Non-production (EXPERIMENTAL) collectors show EXPERIMENTAL badge adjacent to RUN NOW / COLLECT
+    assert "EXPERIMENTAL" in page.text
+
+    # Verify layer badges (OFFICIAL/SPECIALIST) exist as distinct fields
+    assert "OFFICIAL" in page.text
+    assert "SPECIALIST" in page.text
+
+    # Parse response or inspect rows:
+    # Check that tissot_sitemap and timex_uk_products have EXPERIMENTAL badge
+    from app.services.collector_registry import all_controls
+
+    controls = {c.collector_id: c for c in all_controls()}
+    assert controls["tissot_sitemap"].is_experimental is True
+    assert controls["timex_uk_products"].is_experimental is True
+    assert controls["seiko_products"].is_experimental is False
+    assert controls["citizen_products"].is_experimental is False
+
+    # Check rendering structure in table rows
+    # Non-prod collectors must have EXPERIMENTAL adjacent to their form/button
+    tissot_pos = page.text.find("tissot_sitemap")
+    assert tissot_pos != -1
+    tissot_row_slice = page.text[tissot_pos:tissot_pos + 800]
+    assert "EXPERIMENTAL" in tissot_row_slice
+    assert "OFFICIAL" in tissot_row_slice  # Layer is OFFICIAL, maturity is EXPERIMENTAL
+
+    # Production collector row (e.g. seiko_products) must NOT have EXPERIMENTAL badge
+    seiko_pos = page.text.find("seiko_products")
+    assert seiko_pos != -1
+    seiko_row_slice = page.text[seiko_pos:seiko_pos + 800]
+    assert "EXPERIMENTAL" not in seiko_row_slice
+    assert "OFFICIAL" in seiko_row_slice
+
+
+def test_run_now_remains_available_and_semantics_unchanged(web_client, monkeypatch):
+    """RUN NOW endpoint POST remains available for both experimental and production collectors."""
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+
+    # Test POST to /operations/run/tissot_sitemap (non-production collector)
+    res_exp = web_client.post("/operations/run/tissot_sitemap", follow_redirects=False)
+    # 303 Redirect to /operations?ran=tissot_sitemap&result=... or 202/409 in field-test
+    assert res_exp.status_code in (303, 202, 409)
+
+    # Test POST to /operations/run/seiko_products (production collector)
+    res_prod = web_client.post("/operations/run/seiko_products", follow_redirects=False)
+    assert res_prod.status_code in (303, 202, 409)
+
+
 # ---------------------------------------------------------------- COM-009
 
 
