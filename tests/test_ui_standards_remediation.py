@@ -17,8 +17,8 @@ import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-from tests.test_core import db_session, tmp_settings  # noqa: F401 -- pytest fixtures
-from tests.test_web import db, web_client  # noqa: F401 -- pytest fixtures
+from tests.test_core import db_session, tmp_settings  # noqa: F401, F811 -- pytest fixtures
+from tests.test_web import db, web_client  # noqa: F401, F811 -- pytest fixtures
 
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 
