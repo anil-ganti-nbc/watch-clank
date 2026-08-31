@@ -2,6 +2,7 @@ from app.models.base import Base
 from app.models.epoch import OperationalEpoch
 from app.models.observation import SourceObservation
 from app.models.pipeline import CollectorRun, Event, EventWatch, PipelineLedger
+from app.models.qualification import QualificationEvidence
 from app.models.release_lead import ReleaseLead, SourceComponentState
 from app.models.review import DISPOSITIONS, EventReview
 from app.models.snapshot import SnapshotBlob, SnapshotFetch
@@ -20,6 +21,7 @@ __all__ = [
     "LEAD_DISPOSITIONS",
     "OperationalEpoch",
     "PipelineLedger",
+    "QualificationEvidence",
     "ReleaseLead",
     "SnapshotBlob",
     "SnapshotFetch",
