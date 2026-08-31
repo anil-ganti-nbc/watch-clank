@@ -310,16 +310,16 @@ def test_intelligence_timing_column_labels_each_row_semantic(db, web_client):
 def _make_lead(db, **overrides):
     from app.models import SpecialistLead
 
-    defaults = dict(
-        source_id="monochrome",  # registered in SOURCE_REGISTRY
-        source_type="SPECIALIST_PUBLICATION",
-        lead_type="POSSIBLE_NEW_REFERENCE",
-        title="Leak: new Timex",
-        source_url=f"https://example.com/{datetime.now(UTC).timestamp()}",
-        published_at=datetime.now(UTC) - timedelta(days=1),
-        confidence=80.0,
-        editorial_freshness="FRESH",
-    )
+    defaults = {
+        "source_id": "monochrome",  # registered in SOURCE_REGISTRY
+        "source_type": "SPECIALIST_PUBLICATION",
+        "lead_type": "POSSIBLE_NEW_REFERENCE",
+        "title": "Leak: new Timex",
+        "source_url": f"https://example.com/{datetime.now(UTC).timestamp()}",
+        "published_at": datetime.now(UTC) - timedelta(days=1),
+        "confidence": 80.0,
+        "editorial_freshness": "FRESH",
+    }
     defaults.update(overrides)
     lead = SpecialistLead(**defaults)
     db.add(lead)
@@ -515,7 +515,7 @@ def test_event_delivery_legacy_rows_still_read_as_sent(db, web_client):
 
 def test_qc_dict_builders_expose_delivery_and_timing_role(db):
     from app.main import _event_to_qc_dict, _lead_to_qc_dict
-    from app.models import Event, SpecialistLead
+    from app.models import Event
 
     event = Event(
         event_type="NEW_REFERENCE",
@@ -542,12 +542,12 @@ def test_qc_dict_builders_expose_delivery_and_timing_role(db):
 def _make_watch(db, **overrides):
     from app.models import Watch
 
-    defaults = dict(
-        manufacturer="Timex",
-        brand="Timex",
-        reference_raw="T2N900",
-        reference_canonical="T2N900",
-    )
+    defaults = {
+        "manufacturer": "Timex",
+        "brand": "Timex",
+        "reference_raw": "T2N900",
+        "reference_canonical": "T2N900",
+    }
     defaults.update(overrides)
     w = Watch(**defaults)
     db.add(w)
@@ -556,8 +556,9 @@ def _make_watch(db, **overrides):
 
 
 def test_correlation_followup_sent_records_state_without_touching_notified_at(db):
-    from app.services.specialist_leads import SpecialistLeadService
     from unittest.mock import MagicMock, patch
+
+    from app.services.specialist_leads import SpecialistLeadService
 
     w = _make_watch(db)
     lead = _make_lead(db, correlated_watch_id=w.id, correlation_type="EXACT_REFERENCE_MATCH")
@@ -573,8 +574,9 @@ def test_correlation_followup_sent_records_state_without_touching_notified_at(db
 
 
 def test_correlation_followup_gated_and_failed_states(db):
-    from app.services.specialist_leads import SpecialistLeadService
     from unittest.mock import MagicMock, patch
+
+    from app.services.specialist_leads import SpecialistLeadService
 
     # gated: notifier disabled
     w = _make_watch(db, reference_raw="T2N901", reference_canonical="T2N901")
