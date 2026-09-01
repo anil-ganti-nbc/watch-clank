@@ -336,14 +336,19 @@ def test_event_delivery_gated_by_maturity_records_reason(db_session, tmp_setting
 def test_event_delivery_records_sent_and_failed(db_session, tmp_settings):
     from unittest.mock import patch
 
-    from app.models import Event, Watch
+    from app.models import CollectorRun, Event, Watch
     from app.services.pipeline import PipelineService
+    from app.services.qualification import QualificationService
     from app.services.snapshot_storage import SnapshotStorageService
 
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     w = Watch(manufacturer="Timex", brand="Timex", reference_raw="T2N001",
               reference_canonical="T2N001")
     db_session.add(w)
+    db_session.flush()
+    qualifying_run = CollectorRun(collector_id="timex_products", collector_version="test", status="SUCCESS")
+    db_session.add(qualifying_run); db_session.flush()
+    QualificationService(db_session).record_execution(qualifying_run, "SCHEDULED")
     db_session.flush()
 
     def run_once(sends: bool) -> Event:

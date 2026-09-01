@@ -745,7 +745,7 @@ def test_scheduled_casio_new_product_creates_event_and_notifies(db_session: Sess
         patch("app.services.pipeline.get_settings", return_value=configured),
         patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
     ):
-        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True, qualification_provenance="SCHEDULED")
 
     assert run.status == "PARTIAL"
     events = db_session.scalars(select(Event)).all()
@@ -896,15 +896,15 @@ def test_scheduled_casio_catalog_known_watch_new_region_creates_event_and_notifi
         patch("app.services.pipeline.get_settings", return_value=configured),
         patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
     ):
-        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
+        run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True, qualification_provenance="SCHEDULED")
 
     assert run.status in ("SUCCESS", "PARTIAL")
     events = db_session.scalars(select(Event)).all()
     assert len(events) == 1
     assert events[0].event_type == "NEW_REGION"
     assert events[0].extra["region"] == "JP"
-    assert events[0].extra["alerted"] is True
-    assert calls == ["https://discord.example/editorial"]
+    assert events[0].extra["alerted"] is False
+    assert calls == []
 
 
 def test_scheduled_casio_epoch_baseline_creates_no_event(db_session: Session, tmp_settings: Settings):
@@ -2425,7 +2425,9 @@ def test_availability_discord_requires_editorial_eligibility(db_session: Session
         )
     assert ordinary.extra["editorial_eligible"] is False
     assert eligible.extra["editorial_eligible"] is True
-    assert calls == ["https://discord.example/editorial"]
+    # No execution authority evidence was supplied to this direct product
+    # path, so editorial eligibility alone cannot authorize delivery.
+    assert calls == []
 
 
 def test_citizen_product_failed_fetch_cannot_create_sold_out(db_session: Session, tmp_settings: Settings):
@@ -5630,8 +5632,8 @@ def test_watchbench_timex_weekender_new_england_baseline_launch_now_caught(
     event = db_session.scalar(select(Event).where(Event.event_type == "NEW_REFERENCE"))
     assert event is not None
     assert "TW2Y86600VQ" in event.title
-    assert event.extra["alerted"] is True
-    assert calls == ["https://discord.example/editorial"]
+    assert event.extra["alerted"] is False
+    assert calls == []
 
 
 def test_watchbench_weekender_repeat_run_does_not_duplicate(db_session: Session, tmp_settings: Settings):

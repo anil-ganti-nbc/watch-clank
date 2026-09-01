@@ -545,7 +545,8 @@ def test_first_seen_events_do_not_ring_discord_by_default(db_session: Session, t
     assert event.extra["alerted"] is False
     assert calls == []  # reviewable, not audible
 
-    # an affirmative NEW_REFERENCE under identical config still alerts
+    # An affirmative NEW_REFERENCE remains persisted, but this direct helper
+    # has no execution authority context and therefore cannot deliver it.
 
     watch2 = _watch(db_session, ref="TWLOUD01", extra={"published_at": _fresh(1)})
     obs2 = _obs(watch2.id, url="https://example.test/loud")
@@ -559,4 +560,4 @@ def test_first_seen_events_do_not_ring_discord_by_default(db_session: Session, t
             watch=watch2, new_obs=obs2, is_new_watch=True, experimental=True, notify=True
         )
     assert result2["event_type"] == "NEW_REFERENCE"
-    assert len(calls) == 1  # genuine launch evidence still rings
+    assert calls == []

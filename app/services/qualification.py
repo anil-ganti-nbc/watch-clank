@@ -68,6 +68,7 @@ class QualificationService:
         reset = QualificationEvidence(
             collector_id=run.collector_id, epoch_id=_epoch_id(), provenance=provenance,
             change_identity=material, material_identity=material, execution_id=run.id,
+            prior_material_identity=prior.material_identity, prior_epoch_id=prior.epoch_id,
             reset_reason="CODE_OR_COLLECTOR_CHANGE", intervention_treatment="RESET",
             eligibility_gate="UNKNOWN", qualification_gate="RESET", outcome="RUNNING",
         )
@@ -98,15 +99,10 @@ class QualificationService:
                     qualification_gate="RESET",
                 ))
                 return False
-            latest = QualificationEvidence(
-                collector_id=collector_id, epoch_id=epoch_id, provenance="NATURAL",
-                change_identity=get_identity()["source_revision"],
-                intervention_treatment="NONE", eligibility_gate=configured,
-                qualification_gate=configured,
-                observed_at=datetime.now(UTC),
-            )
-            self.session.add(latest)
-            return configured == "ELIGIBLE"
+            # Delivery is not an execution authority.  Absence of durable,
+            # authority-supplied qualification remains unknown and cannot
+            # authorize external delivery.
+            return False
 
         # Do not overwrite a contradictory durable record: it is evidence of
         # gate drift and external delivery must remain silent until reconciled.

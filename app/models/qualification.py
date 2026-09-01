@@ -18,4 +18,8 @@ class QualificationEvidence(Base):
     qualification_gate: Mapped[str] = mapped_column(String(16), default="UNKNOWN")
     execution_id: Mapped[int | None] = mapped_column(ForeignKey("collector_runs.id", ondelete="SET NULL"), index=True)
     material_identity: Mapped[str | None] = mapped_column(String(256))
+    # A reset is a transition record.  Keep the prior state with the event,
+    # rather than requiring a later lookup of mutable history to reconstruct it.
+    prior_material_identity: Mapped[str | None] = mapped_column(String(256))
+    prior_epoch_id: Mapped[str | None] = mapped_column(String(64))
     outcome: Mapped[str | None] = mapped_column(String(32))

@@ -23,13 +23,18 @@ def test_deployment_completion_requires_observed_congruence(monkeypatch):
     assert verify_completion(observed_evidence("staging", "abc"))["state"] == "UNVERIFIED"
 
 
-def test_real_delivery_gate_persists_natural_evidence_and_fails_closed_on_drift(db_session):
+def test_real_delivery_gate_does_not_fabricate_provenance_and_fails_closed_on_drift(db_session):
     service = QualificationService(db_session)
-    assert service.delivery_allowed("casio_japan")
+    assert not service.delivery_allowed("casio_japan")
     db_session.flush()
-    evidence = db_session.query(QualificationEvidence).filter_by(collector_id="casio_japan").one()
-    assert evidence.provenance == "NATURAL"
-    assert evidence.eligibility_gate == evidence.qualification_gate == "ELIGIBLE"
+    assert db_session.query(QualificationEvidence).filter_by(collector_id="casio_japan").count() == 0
+    # Authority-supplied scheduled evidence is consumed without rewriting it.
+    run = CollectorRun(collector_id="casio_japan", collector_version="test", status="SUCCESS")
+    db_session.add(run); db_session.flush()
+    evidence = service.record_execution(run, "SCHEDULED")
+    db_session.flush()
+    assert evidence.provenance == "SCHEDULED"
+    assert service.delivery_allowed("casio_japan")
     evidence.qualification_gate = "BLOCKED"
     db_session.flush()
     assert not service.delivery_allowed("casio_japan")
@@ -39,9 +44,8 @@ def test_material_gate_change_creates_reset_epoch_and_excludes_prior_evidence(db
     import app.services.qualification as qualification
 
     service = QualificationService(db_session)
-    assert service.delivery_allowed("casio_japan")
-    db_session.flush()
-    prior = db_session.query(QualificationEvidence).filter_by(collector_id="casio_japan").one()
+    prior = QualificationEvidence(collector_id="casio_japan", epoch_id=qualification._epoch_id(), provenance="SCHEDULED", material_identity="old", eligibility_gate="ELIGIBLE", qualification_gate="ELIGIBLE")
+    db_session.add(prior); db_session.flush()
     monkeypatch.setattr(qualification, "EXPERIMENTAL_MATURITY_COLLECTORS", frozenset({"tissot_sitemap", "changed"}))
     assert not service.delivery_allowed("casio_japan")
     db_session.flush()
@@ -89,6 +93,33 @@ def test_unknown_execution_provenance_is_never_promoted_to_natural(db_session):
     assert evidence.qualification_gate == "UNKNOWN"
 
 
+def test_execution_authority_provenance_is_preserved_without_downstream_rewrite(db_session):
+    """All recognised execution authorities retain their supplied identity."""
+    from datetime import UTC, datetime
+
+    service = QualificationService(db_session)
+    for index, provenance in enumerate(("SCHEDULED", "MANUAL", "DEPLOY", "RECOVERY")):
+        run = CollectorRun(
+            collector_id=f"authority-{index}", collector_version="test", status="SUCCESS",
+            started_at=datetime.now(UTC), completed_at=datetime.now(UTC),
+        )
+        db_session.add(run); db_session.flush()
+        evidence = service.record_execution(run, provenance)
+        assert evidence.provenance == provenance
+        assert service.delivery_allowed(run.collector_id) is (provenance == "SCHEDULED")
+
+
+def test_historical_reset_without_lineage_remains_unknown_and_readable(db_session):
+    row = QualificationEvidence(
+        collector_id="historical", epoch_id="current", provenance="UNKNOWN",
+        material_identity="new", reset_reason="CODE_OR_COLLECTOR_CHANGE",
+        intervention_treatment="RESET", eligibility_gate="UNKNOWN", qualification_gate="RESET",
+    )
+    db_session.add(row); db_session.flush()
+    assert row.prior_material_identity is None
+    assert row.prior_epoch_id is None
+
+
 def test_first_changed_run_resets_before_gate_can_use_prior_evidence(db_session):
     """Regression for M4B.1: pipeline pre-event boundary, not delivery side effect."""
     from datetime import UTC, datetime
@@ -106,6 +137,8 @@ def test_first_changed_run_resets_before_gate_can_use_prior_evidence(db_session)
     pipeline._prepare_qualification_epoch(changed, "SCHEDULED")
     reset = db_session.query(QualificationEvidence).filter_by(execution_id=changed.id, reset_reason="CODE_OR_COLLECTOR_CHANGE").one()
     assert reset.material_identity != old.material_identity
+    assert reset.prior_material_identity == old.material_identity
+    assert reset.prior_epoch_id == old.epoch_id
     assert reset.qualification_gate == "RESET"
     assert db_session.get(QualificationEvidence, old.id).execution_id == old_run.id
     assert not QualificationService(db_session).delivery_allowed("casio_japan")
