@@ -88,7 +88,7 @@ def run_fixture_mode(max_items: int = 5) -> int:
         return EXIT_OK if run.status != "FAILED" else EXIT_FAILED
 
 
-def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
+def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False, *, qualification_provenance: str | None = None) -> int:
     settings = get_settings()
     db_url = settings.resolved_database_url
     print(f"database_url={db_url}")
@@ -113,7 +113,10 @@ def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
     with session_scope() as session:
         pipeline = PipelineService(session)
         try:
-            run = pipeline.run_multi_source_pipeline(max_items=max_items)
+            run = pipeline.run_multi_source_pipeline(
+                max_items=max_items,
+                qualification_provenance=qualification_provenance or ("SCHEDULED" if scheduled else "MANUAL"),
+            )
         except Exception as exc:
             logger.exception("scheduled_run_fatal", error=str(exc))
             print(f"FATAL: {exc}")
@@ -148,7 +151,7 @@ def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
         return EXIT_FAILED
 
 
-def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: bool = False) -> int:
+def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: bool = False, qualification_provenance: str = "UNKNOWN") -> int:
     """EXPERIMENTAL lane: Citizen/Seiko/Timex news discovery. Isolated overlap
     protection (own lock file + collector_id, see RunLockService), own
     collector_runs rows — cannot interact with the Casio production run
@@ -161,7 +164,7 @@ def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: b
     with session_scope() as session:
         pipeline = PipelineService(session)
         try:
-            run = pipeline.run_brand_news_pipeline(brand, max_items=max_items, force_baseline=force_baseline)
+            run = pipeline.run_brand_news_pipeline(brand, max_items=max_items, force_baseline=force_baseline, qualification_provenance=qualification_provenance)
         except Exception as exc:
             logger.exception("experimental_brand_run_fatal", brand=brand, error=str(exc))
             print(f"FATAL: {exc}")
@@ -172,7 +175,7 @@ def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: b
         return EXIT_FAILED
 
 
-def run_experimental_product(brand: str, max_items: int | None = None, *, force_baseline: bool = False) -> int:
+def run_experimental_product(brand: str, max_items: int | None = None, *, force_baseline: bool = False, qualification_provenance: str = "UNKNOWN") -> int:
     """EXPERIMENTAL lane: Citizen (US/DE), Seiko, or Timex catalogue observation.
     Same isolation as run_experimental_brand above — own lock file +
     collector_id, own collector_runs rows, cannot touch Casio state.
@@ -184,7 +187,7 @@ def run_experimental_product(brand: str, max_items: int | None = None, *, force_
     with session_scope() as session:
         pipeline = PipelineService(session)
         try:
-            run = pipeline.run_product_observation_pipeline(brand, max_items=max_items, force_baseline=force_baseline)
+            run = pipeline.run_product_observation_pipeline(brand, max_items=max_items, force_baseline=force_baseline, qualification_provenance=qualification_provenance)
         except Exception as exc:
             logger.exception("experimental_product_run_fatal", brand=brand, error=str(exc))
             print(f"FATAL: {exc}")
@@ -286,6 +289,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Watch Clank Casio pipeline")
     parser.add_argument("--fixture-mode", action="store_true")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--qualification-provenance", choices=["SCHEDULED", "MANUAL", "DEPLOY", "RECOVERY", "UNKNOWN"], default=None)
     parser.add_argument(
         "--scheduled",
         action="store_true",
@@ -356,14 +360,14 @@ def main() -> None:
     if args.experimental_specialist:
         sys.exit(run_experimental_specialist(args.experimental_specialist, args.max_items or 20, force_baseline=args.force_baseline))
     if args.experimental_brand:
-        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10, force_baseline=args.force_baseline))
+        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10, force_baseline=args.force_baseline, qualification_provenance=args.qualification_provenance or "UNKNOWN"))
     if args.experimental_product:
         kwargs = {} if args.max_items is None else {"max_items": args.max_items}
-        sys.exit(run_experimental_product(args.experimental_product, force_baseline=args.force_baseline, **kwargs))
+        sys.exit(run_experimental_product(args.experimental_product, force_baseline=args.force_baseline, qualification_provenance=args.qualification_provenance or "UNKNOWN", **kwargs))
     if args.fixture_mode:
         sys.exit(run_fixture_mode(args.max_items or 10))  # preserves prior argparse-default behavior (10, not the function's own 5)
     if args.live or args.scheduled:
-        sys.exit(run_live_or_scheduled(args.max_items or 10, scheduled=args.scheduled))
+        sys.exit(run_live_or_scheduled(args.max_items or 10, scheduled=args.scheduled, qualification_provenance=args.qualification_provenance))
     parser.print_help()
     sys.exit(1)
 

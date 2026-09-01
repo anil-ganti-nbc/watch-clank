@@ -29,6 +29,51 @@ class QualificationService:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def record_execution(self, run, provenance: str) -> QualificationEvidence:
+        """Attach one durable qualification record to one terminal execution.
+
+        The caller supplies provenance from its real entrypoint.  UNKNOWN is
+        intentional where legacy wrappers have not established authority.
+        """
+        if provenance not in {"SCHEDULED", "MANUAL", "DEPLOY", "RECOVERY", "UNKNOWN"}:
+            raise ValueError(f"unsupported qualification provenance: {provenance}")
+        existing = self.session.query(QualificationEvidence).filter_by(execution_id=run.id).first()
+        if existing is not None:
+            return existing
+        material = "|".join((get_identity()["source_revision"], run.collector_id, run.collector_version, _epoch_id()))
+        current_epoch = _epoch_id()
+        evidence = QualificationEvidence(
+            collector_id=run.collector_id, epoch_id=current_epoch,
+            provenance=provenance, change_identity=get_identity()["source_revision"], material_identity=material,
+            intervention_treatment="NONE", eligibility_gate="ELIGIBLE" if provenance == "SCHEDULED" else "UNKNOWN",
+            qualification_gate="ELIGIBLE" if provenance == "SCHEDULED" else "UNKNOWN",
+            execution_id=run.id, outcome=run.status, observed_at=datetime.now(UTC),
+        )
+        self.session.add(evidence)
+        return evidence
+
+    def prepare_epoch_for_run(self, run, provenance: str) -> QualificationEvidence | None:
+        """Fail-closed pre-event material reset; idempotent for this run."""
+        if provenance not in {"SCHEDULED", "MANUAL", "DEPLOY", "RECOVERY", "UNKNOWN"}:
+            raise ValueError(f"unsupported qualification provenance: {provenance}")
+        material = "|".join((get_identity()["source_revision"], run.collector_id, run.collector_version, _epoch_id()))
+        existing = self.session.query(QualificationEvidence).filter_by(execution_id=run.id, reset_reason="CODE_OR_COLLECTOR_CHANGE").first()
+        if existing is not None:
+            return existing
+        prior = (self.session.query(QualificationEvidence).filter_by(collector_id=run.collector_id)
+                 .filter(QualificationEvidence.material_identity.is_not(None))
+                 .order_by(QualificationEvidence.id.desc()).first())
+        if prior is None or prior.material_identity == material:
+            return None
+        reset = QualificationEvidence(
+            collector_id=run.collector_id, epoch_id=_epoch_id(), provenance=provenance,
+            change_identity=material, material_identity=material, execution_id=run.id,
+            reset_reason="CODE_OR_COLLECTOR_CHANGE", intervention_treatment="RESET",
+            eligibility_gate="UNKNOWN", qualification_gate="RESET", outcome="RUNNING",
+        )
+        self.session.add(reset)
+        return reset
+
     def delivery_allowed(self, collector_id: str | None) -> bool:
         """Persist the actual gate comparison and return a fail-closed result."""
         if not collector_id:

@@ -1,6 +1,6 @@
 """Durable, non-fabricated soak/promotion evidence."""
 from datetime import datetime
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base
 
@@ -16,3 +16,6 @@ class QualificationEvidence(Base):
     intervention_treatment: Mapped[str | None] = mapped_column(String(32))
     eligibility_gate: Mapped[str] = mapped_column(String(16), default="UNKNOWN")
     qualification_gate: Mapped[str] = mapped_column(String(16), default="UNKNOWN")
+    execution_id: Mapped[int | None] = mapped_column(ForeignKey("collector_runs.id", ondelete="SET NULL"), index=True)
+    material_identity: Mapped[str | None] = mapped_column(String(256))
+    outcome: Mapped[str | None] = mapped_column(String(32))

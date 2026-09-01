@@ -62,7 +62,7 @@ def test_db_at_older_revision_does_not_match(tmp_path: Path):
     status = check_schema(engine, alembic_ini_path=str(ROOT / "alembic.ini"))
     assert not status.matches
     assert status.actual_version == "002_ops_statuses"
-    assert status.expected_head == "013_qualification_evidence"
+    assert status.expected_head == "014_qualification_execution_identity"
 
 
 def test_run_pipeline_refuses_on_schema_mismatch(tmp_path, monkeypatch):

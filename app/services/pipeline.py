@@ -159,6 +159,16 @@ class PipelineService:
         # every other path -- behavior is unchanged there.
         self._current_publication_batch: dict[str, list[dict]] | None = None
 
+    def _record_qualification_execution(self, run: CollectorRun, provenance: str) -> None:
+        """Persist one qualification credit at the terminal run boundary."""
+        from app.services.qualification import QualificationService
+        QualificationService(self.session).record_execution(run, provenance)
+
+    def _prepare_qualification_epoch(self, run: CollectorRun, provenance: str) -> None:
+        from app.services.qualification import QualificationService
+        QualificationService(self.session).prepare_epoch_for_run(run, provenance)
+        self.session.commit()
+
     def _epoch_fields(self, *, force_baseline: bool = False) -> dict:
         """epoch_id/is_baseline kwargs for a new CollectorRun -- see
         app/services/epoch.py. Every real (non-skip) CollectorRun creation
@@ -705,7 +715,7 @@ class PipelineService:
         max_items: int | None = 10,
         known_product_urls: list[str] | None = None,
         discovery_urls: list[str] | None = None,
-        skip_lock: bool = False,
+        skip_lock: bool = False, qualification_provenance: str = "UNKNOWN",
     ) -> CollectorRun:
         """Full end-to-end run for Casio Japan with overlap protection."""
         settings = get_settings()
@@ -750,6 +760,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        self._prepare_qualification_epoch(run, qualification_provenance)
         if not skip_lock:
             lock.update_run_id(run.id)
 
@@ -832,6 +843,7 @@ class PipelineService:
             else:
                 run.status = "FAILED"
 
+            self._record_qualification_execution(run, qualification_provenance)
             self.session.commit()
             logger.info(
                 "pipeline_completed",
@@ -2388,7 +2400,7 @@ class PipelineService:
         skip_lock: bool = False,
         include_catalog: bool = True,
         news_index_html: bytes | None = None,
-        emit_events: bool = True,
+        emit_events: bool = True, qualification_provenance: str = "UNKNOWN",
     ) -> CollectorRun:
         """Run accessible official Casio sources + optional catalog enrichment.
 
@@ -2464,6 +2476,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        self._prepare_qualification_epoch(run, qualification_provenance)
         if not skip_lock:
             lock.update_run_id(run.id)
 
@@ -2581,6 +2594,7 @@ class PipelineService:
                 "new_watches": new_watches,
                 "auto_baseline_applied": auto_baseline,
             }
+            self._record_qualification_execution(run, qualification_provenance)
             self.session.commit()
             logger.info(
                 "multi_pipeline_completed",
@@ -2617,7 +2631,7 @@ class PipelineService:
         max_items: int | None = 10,
         index_html: bytes | None = None,
         emit_events: bool = True,
-        force_baseline: bool = False,
+        force_baseline: bool = False, qualification_provenance: str = "UNKNOWN",
     ) -> CollectorRun:
         """Run an experimental single-brand news-discovery pipeline.
 
@@ -2737,6 +2751,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        self._prepare_qualification_epoch(run, qualification_provenance)
         lock.update_run_id(run.id)
 
         try:
@@ -2795,6 +2810,7 @@ class PipelineService:
                 "events": events,
                 "auto_baseline_applied": effective_force_baseline and not force_baseline,
             }
+            self._record_qualification_execution(run, qualification_provenance)
             self.session.commit()
             logger.info(
                 "brand_news_pipeline_completed",
@@ -2832,7 +2848,7 @@ class PipelineService:
         max_items: int | None = None,
         offline_fixture: object = None,
         emit_events: bool = True,
-        force_baseline: bool = False,
+        force_baseline: bool = False, qualification_provenance: str = "UNKNOWN",
     ) -> CollectorRun:
         """Run an experimental single-brand product/catalogue observation
         pipeline. brand: "citizen", "seiko", or "timex". Casio's product
@@ -3123,6 +3139,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        self._prepare_qualification_epoch(run, qualification_provenance)
         lock.update_run_id(run.id)
 
         try:
@@ -3259,6 +3276,7 @@ class PipelineService:
                 "max_items": effective_max_items,
                 **({"backfill_context": backfill_context} if backfill_context else {}),
             }
+            self._record_qualification_execution(run, qualification_provenance)
             self.session.commit()
             logger.info(
                 "product_observation_pipeline_completed",

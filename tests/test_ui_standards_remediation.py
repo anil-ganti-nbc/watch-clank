@@ -515,6 +515,7 @@ def test_correlation_followup_gated_and_failed_states(db):
 
 def test_second_event_path_notify_false_records_gated(db_session, tmp_settings):
     from unittest.mock import patch
+    from datetime import UTC, datetime
 
     from app.models import Event, ReleaseLead, Watch
     from app.services.pipeline import PipelineService
@@ -530,7 +531,7 @@ def test_second_event_path_notify_false_records_gated(db_session, tmp_settings):
         source_id="timex_news",
         announcement_title="Timex announces T2N910",
         announcement_url="https://example.com/announce-1",
-        announcement_date="August 31, 2026",  # current: passes the staleness gate
+            announcement_date=datetime.now(UTC).strftime("%B %d, %Y"),  # current: passes the staleness gate
         completeness_score=90.0,
     )
     db_session.add(lead)
