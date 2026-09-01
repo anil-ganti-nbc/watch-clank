@@ -17,8 +17,8 @@ import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-from tests.test_core import db_session, tmp_settings  # noqa: F401 -- pytest fixtures
-from tests.test_web import db, web_client  # noqa: F401 -- pytest fixtures
+from tests.test_core import db_session, tmp_settings  # noqa: F401, F811 -- pytest fixtures
+from tests.test_web import db, web_client  # noqa: F401, F811 -- pytest fixtures
 
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 
@@ -56,6 +56,93 @@ def _gate_obs(watch_id):
         overall_confidence=90.0,
         observed_at=datetime.now(UTC),
     )
+
+
+# ---------------------------------------------------------------- COM-007
+
+
+def test_operations_ui_exposes_experimental_maturity_at_point_of_control(web_client):
+    """STD-UI-COM-007: non-production collectors must show an explicit
+    maturity/non-production label at the point of the control, not merely
+    elsewhere on the page or conflated with the Layer field."""
+    page = web_client.get("/operations")
+    assert page.status_code == 200
+
+    # Non-production (EXPERIMENTAL) collectors show EXPERIMENTAL badge adjacent to RUN NOW / COLLECT
+    assert "EXPERIMENTAL" in page.text
+
+    # Verify layer badges (OFFICIAL/SPECIALIST) exist as distinct fields
+    assert "OFFICIAL" in page.text
+    assert "SPECIALIST" in page.text
+
+    # Parse response or inspect rows:
+    # Check that tissot_sitemap and timex_uk_products have EXPERIMENTAL badge
+    from app.services.collector_registry import all_controls
+
+    controls = {c.collector_id: c for c in all_controls()}
+    assert controls["tissot_sitemap"].is_experimental is True
+    assert controls["timex_uk_products"].is_experimental is True
+    assert controls["seiko_products"].is_experimental is False
+    assert controls["citizen_products"].is_experimental is False
+
+    # Check rendering structure in table rows
+    # Non-prod collectors must have EXPERIMENTAL adjacent to their form/button
+    tissot_pos = page.text.find("tissot_sitemap")
+    assert tissot_pos != -1
+    tissot_row_slice = page.text[tissot_pos:tissot_pos + 800]
+    assert "EXPERIMENTAL" in tissot_row_slice
+    assert "OFFICIAL" in tissot_row_slice  # Layer is OFFICIAL, maturity is EXPERIMENTAL
+
+    # Production collector row (e.g. seiko_products) must NOT have EXPERIMENTAL badge
+    seiko_pos = page.text.find("seiko_products")
+    assert seiko_pos != -1
+    seiko_row_slice = page.text[seiko_pos:seiko_pos + 800]
+    assert "EXPERIMENTAL" not in seiko_row_slice
+    assert "OFFICIAL" in seiko_row_slice
+
+
+def test_dashboard_ui_exposes_experimental_maturity_at_point_of_control(web_client, monkeypatch):
+    """STD-UI-COM-007: non-production collectors must show an explicit
+    maturity/non-production label at the dashboard first-collect dropdown control."""
+    monkeypatch.setenv("WATCH_CLANK_FIELD_TEST", "1")
+    page = web_client.get("/")
+    assert page.status_code == 200
+
+    # The first-collect select dropdown options
+    assert 'value="tissot_sitemap"' in page.text
+    assert 'value="timex_uk_products"' in page.text
+
+    # Experimental options carry [EXPERIMENTAL] suffix
+    tissot_opt = [line for line in page.text.splitlines() if 'value="tissot_sitemap"' in line][0]
+    assert "[EXPERIMENTAL]" in tissot_opt
+
+    timex_uk_opt = [line for line in page.text.splitlines() if 'value="timex_uk_products"' in line][0]
+    assert "[EXPERIMENTAL]" in timex_uk_opt
+
+    # Production options (e.g. seiko_products) do not carry [EXPERIMENTAL]
+    seiko_opt = [line for line in page.text.splitlines() if 'value="seiko_products"' in line][0]
+    assert "[EXPERIMENTAL]" not in seiko_opt
+
+
+def test_run_now_remains_available_and_semantics_unchanged(web_client, monkeypatch):
+    """RUN NOW endpoint POST remains available for both experimental and production collectors, hermetically mocked."""
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "_require_loopback", lambda request: None)
+    monkeypatch.setattr(
+        main_module,
+        "_run_collector_subprocess",
+        lambda cli_args, timeout_seconds=180: {"ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""},
+    )
+
+    # Test POST to /operations/run/tissot_sitemap (non-production collector)
+    res_exp = web_client.post("/operations/run/tissot_sitemap", follow_redirects=False)
+    # 303 Redirect to /operations?ran=tissot_sitemap&result=... or 202/409 in field-test
+    assert res_exp.status_code in (303, 202, 409)
+
+    # Test POST to /operations/run/seiko_products (production collector)
+    res_prod = web_client.post("/operations/run/seiko_products", follow_redirects=False)
+    assert res_prod.status_code in (303, 202, 409)
 
 
 # ---------------------------------------------------------------- COM-009
@@ -223,16 +310,16 @@ def test_intelligence_timing_column_labels_each_row_semantic(db, web_client):
 def _make_lead(db, **overrides):
     from app.models import SpecialistLead
 
-    defaults = dict(
-        source_id="monochrome",  # registered in SOURCE_REGISTRY
-        source_type="SPECIALIST_PUBLICATION",
-        lead_type="POSSIBLE_NEW_REFERENCE",
-        title="Leak: new Timex",
-        source_url=f"https://example.com/{datetime.now(UTC).timestamp()}",
-        published_at=datetime.now(UTC) - timedelta(days=1),
-        confidence=80.0,
-        editorial_freshness="FRESH",
-    )
+    defaults = {
+        "source_id": "monochrome",  # registered in SOURCE_REGISTRY
+        "source_type": "SPECIALIST_PUBLICATION",
+        "lead_type": "POSSIBLE_NEW_REFERENCE",
+        "title": "Leak: new Timex",
+        "source_url": f"https://example.com/{datetime.now(UTC).timestamp()}",
+        "published_at": datetime.now(UTC) - timedelta(days=1),
+        "confidence": 80.0,
+        "editorial_freshness": "FRESH",
+    }
     defaults.update(overrides)
     lead = SpecialistLead(**defaults)
     db.add(lead)
@@ -433,7 +520,7 @@ def test_event_delivery_legacy_rows_still_read_as_sent(db, web_client):
 
 def test_qc_dict_builders_expose_delivery_and_timing_role(db):
     from app.main import _event_to_qc_dict, _lead_to_qc_dict
-    from app.models import Event, SpecialistLead
+    from app.models import Event
 
     event = Event(
         event_type="NEW_REFERENCE",
@@ -460,12 +547,12 @@ def test_qc_dict_builders_expose_delivery_and_timing_role(db):
 def _make_watch(db, **overrides):
     from app.models import Watch
 
-    defaults = dict(
-        manufacturer="Timex",
-        brand="Timex",
-        reference_raw="T2N900",
-        reference_canonical="T2N900",
-    )
+    defaults = {
+        "manufacturer": "Timex",
+        "brand": "Timex",
+        "reference_raw": "T2N900",
+        "reference_canonical": "T2N900",
+    }
     defaults.update(overrides)
     w = Watch(**defaults)
     db.add(w)
@@ -474,8 +561,9 @@ def _make_watch(db, **overrides):
 
 
 def test_correlation_followup_sent_records_state_without_touching_notified_at(db):
-    from app.services.specialist_leads import SpecialistLeadService
     from unittest.mock import MagicMock, patch
+
+    from app.services.specialist_leads import SpecialistLeadService
 
     w = _make_watch(db)
     lead = _make_lead(db, correlated_watch_id=w.id, correlation_type="EXACT_REFERENCE_MATCH")
@@ -491,8 +579,9 @@ def test_correlation_followup_sent_records_state_without_touching_notified_at(db
 
 
 def test_correlation_followup_gated_and_failed_states(db):
-    from app.services.specialist_leads import SpecialistLeadService
     from unittest.mock import MagicMock, patch
+
+    from app.services.specialist_leads import SpecialistLeadService
 
     # gated: notifier disabled
     w = _make_watch(db, reference_raw="T2N901", reference_canonical="T2N901")
