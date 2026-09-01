@@ -37,7 +37,13 @@ class QualificationService:
         """
         if provenance not in {"SCHEDULED", "MANUAL", "DEPLOY", "RECOVERY", "UNKNOWN"}:
             raise ValueError(f"unsupported qualification provenance: {provenance}")
-        existing = self.session.query(QualificationEvidence).filter_by(execution_id=run.id).first()
+        # A reset is an event associated with this execution, not its terminal
+        # evidence.  Deduplicate terminal evidence only against another
+        # terminal record, so both durable facts can coexist for one run.
+        existing = (self.session.query(QualificationEvidence)
+                    .filter_by(execution_id=run.id)
+                    .filter(QualificationEvidence.reset_reason.is_(None))
+                    .first())
         if existing is not None:
             return existing
         material = "|".join((get_identity()["source_revision"], run.collector_id, run.collector_version, _epoch_id()))

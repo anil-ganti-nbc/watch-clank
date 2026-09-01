@@ -144,6 +144,20 @@ def test_first_changed_run_resets_before_gate_can_use_prior_evidence(db_session)
     assert not QualificationService(db_session).delivery_allowed("casio_japan")
     pipeline._prepare_qualification_epoch(changed, "SCHEDULED")
     assert db_session.query(QualificationEvidence).filter_by(execution_id=changed.id, reset_reason="CODE_OR_COLLECTOR_CHANGE").count() == 1
+    # Reset and terminal evidence are distinct durable facts for the same run.
+    changed.status = "SUCCESS"
+    changed.completed_at = datetime.now(UTC)
+    db_session.flush()
+    terminal = QualificationService(db_session).record_execution(changed, "SCHEDULED")
+    db_session.flush()
+    assert terminal.id != reset.id
+    assert terminal.execution_id == reset.execution_id == changed.id
+    assert terminal.reset_reason is None
+    assert terminal.outcome == "SUCCESS"
+    assert terminal.epoch_id == reset.epoch_id
+    assert terminal.material_identity == reset.material_identity
+    assert QualificationService(db_session).record_execution(changed, "SCHEDULED").id == terminal.id
+    assert db_session.query(QualificationEvidence).filter_by(execution_id=changed.id).count() == 2
 
 
 def test_lock_grant_beats_stale_metadata(db_session, tmp_settings):
