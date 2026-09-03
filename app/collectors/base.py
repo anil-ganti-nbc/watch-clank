@@ -42,3 +42,11 @@ class CollectorRunResult:
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Track E (2026-09-03): the raw index/catalogue document a run made its
+    # selection FROM (a sitemap XML, a listing page). Previously only
+    # {url, status, success} survived, so "was this reference in the feed on
+    # 2026-09-01, or did it appear later?" was permanently unanswerable --
+    # exactly the gap that left the Casio JP AQ-230ECK-3A timeline
+    # unreconstructable. Collectors still never touch the database: they
+    # hand the payload up, and the pipeline stores it content-addressed.
+    discovery_payloads: list[FetchResult] = field(default_factory=list)

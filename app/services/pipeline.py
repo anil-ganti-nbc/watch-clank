@@ -1593,6 +1593,80 @@ class PipelineService:
             event.extra = {**(event.extra or {}), **context}
         return context
 
+    def _retain_discovery_evidence(self, result, *, run: CollectorRun) -> dict[str, Any] | None:
+        """Persist what a run selected from, and why candidates were skipped.
+
+        Track E (2026-09-03). Before this, a sitemap run kept only
+        {url, status, success} for its index fetch and nothing at all about
+        candidates it declined to process, so questions like "was
+        AQ-230ECK-3A in the JP sitemap on 2026-09-01, or did it appear
+        later?" were permanently unanswerable -- the exact
+        unreconstructable-history problem the archive flagged.
+
+        Two durable facts are written:
+          1. the index/catalogue document itself, stored content-addressed
+             through the existing snapshot service (deduped, so a sitemap
+             that has not changed costs nothing extra);
+          2. a PipelineLedger row naming the selection policy, the counts
+             and the reason candidates were deferred.
+
+        Never raises: evidence retention must not be able to fail a
+        collection run.
+        """
+        payloads = getattr(result, "discovery_payloads", None) or []
+        selection = (result.metadata or {}).get("selection")
+        if not payloads and not selection:
+            return None
+
+        stored_refs: list[str] = []
+        for fetch in payloads:
+            if not getattr(fetch, "payload", None):
+                continue
+            try:
+                stored = self.storage.store(
+                    fetch.payload,
+                    source_url=fetch.url,
+                    content_type=getattr(fetch, "content_type", None),
+                    collector_id=result.collector_id,
+                    collector_version=result.collector_version,
+                    extra_metadata={"role": "discovery_index", "run_id": run.id},
+                )
+                if stored and stored.get("content_hash"):
+                    stored_refs.append(stored["content_hash"])
+            except Exception as exc:  # noqa: BLE001 -- never fail a run over evidence
+                logger.warning(
+                    "discovery_index_snapshot_failed", collector_id=result.collector_id, error=str(exc)
+                )
+
+        metadata = {"selection": selection, "discovery_index_hashes": stored_refs}
+        try:
+            self._ledger(
+                correlation_id=f"run:{run.id}",
+                run_id=run.id,
+                entity_type="COLLECTOR_RUN",
+                entity_id=str(run.id),
+                stage="discovery_selection",
+                action="candidates_selected",
+                collector_version=result.collector_version,
+                metadata=metadata,
+            )
+            self.session.flush()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("discovery_selection_ledger_failed", run_id=run.id, error=str(exc))
+            return None
+
+        if selection:
+            logger.info(
+                "discovery_selection_recorded",
+                collector_id=result.collector_id,
+                run_id=run.id,
+                candidate_count=selection.get("candidate_count"),
+                selected_count=selection.get("selected_count"),
+                deferred_count=selection.get("deferred_count"),
+                truncated_at_max_candidates=selection.get("truncated_at_max_candidates"),
+            )
+        return metadata
+
     def _stamp_launch_groups(self, *, event_ids: list[int], run_id: int | None) -> int:
         """Label same-run/same-brand/same-type events as one launch cluster.
 
@@ -3274,6 +3348,7 @@ class PipelineService:
             result = collector.run(**run_kwargs)
             status = result.metadata.get("component_status") or "FAILED"
             self._update_component_state(cfg["collector_id"], status, len(result.discovered))
+            self._retain_discovery_evidence(result, run=run)
 
             # 2026-08-25 initial-fill gate decision: with the fill window armed
             # (under the run ceiling) AND this slice purely unseen (the pass has
