@@ -40,6 +40,8 @@ from app.normalization.references import (
     safe_overall_confidence,
 )
 from app.parsers.casio_japan import PARSER_VERSION, parse_casio_product_html
+from app.services.alert_priority import classify as classify_alert_priority
+from app.services.alert_priority import launch_group_key
 from app.services.delivery_receipts import PURPOSE_EDITORIAL_ALERT
 from app.services.discord_notify import DeliveryAttempt
 from app.services.editorial import EventEvidence, score_event
@@ -1539,6 +1541,7 @@ class PipelineService:
                 notify=notify,
                 experimental=experimental,
                 prior_regions=None,
+                evidence=evidence,
             )
             from app.models import Event
 
@@ -1589,6 +1592,46 @@ class PipelineService:
         for event in rows:
             event.extra = {**(event.extra or {}), **context}
         return context
+
+    def _stamp_launch_groups(self, *, event_ids: list[int], run_id: int | None) -> int:
+        """Label same-run/same-brand/same-type events as one launch cluster.
+
+        Track G (2026-09-03). Deliberately independent of the burst
+        annotation above: that one only fires on a PROBABLE BACKFILL (>=15
+        events), whereas the case this targets is the opposite extreme --
+        the Seiko Rukia Liberty Fabrics trio, three references from one
+        limited-edition launch arriving as three separate alerts. The
+        existing WatchFamily grouping does not bind them either, since they
+        are three different Seiko model lines.
+
+        This is a LABEL, not a delivery change: alerts for these events have
+        already been sent individually by the time this runs (same
+        disclosed limitation as _annotate_new_reference_burst). It exists so
+        a grouped-delivery decision can later be made against real observed
+        clusters, and so a buried alert is findable after the fact.
+        """
+        if not event_ids:
+            return 0
+
+        from app.models import EventWatch
+
+        rows = (
+            self.session.query(Event, Watch)
+            .join(EventWatch, EventWatch.event_id == Event.id)
+            .join(Watch, Watch.id == EventWatch.watch_id)
+            .filter(Event.id.in_(event_ids))
+            .all()
+        )
+        stamped = 0
+        for event, watch in rows:
+            key = launch_group_key(
+                run_id=run_id, manufacturer=watch.manufacturer, event_type=event.event_type
+            )
+            if key is None:
+                continue
+            event.extra = {**(event.extra or {}), "launch_group": key}
+            stamped += 1
+        return stamped
 
     def _record_product_transition(
         self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False,
@@ -1775,6 +1818,7 @@ class PipelineService:
                 prior_regions=None,
                 novelty_evidence=novelty_evidence,
                 collector_id=collector_id,
+                evidence=evidence,
             )
 
         prior_product_regions = self._prior_product_regions_for_watch(
@@ -1818,6 +1862,7 @@ class PipelineService:
                 experimental=experimental,
                 prior_regions=prior_regions,
                 collector_id=collector_id,
+                evidence=evidence,
             )
 
         prior = (
@@ -1886,6 +1931,7 @@ class PipelineService:
             experimental=experimental,
             prior_regions=None,
             collector_id=collector_id,
+            evidence=evidence,
         )
 
     def _persist_product_event(
@@ -1901,8 +1947,15 @@ class PipelineService:
         experimental: bool,
         prior_regions: frozenset[str] | None,
         novelty_evidence: dict | None = None,
+        evidence=None,
     ) -> dict:
         """Persist a product-state Event after the caller proved its facts.
+
+        evidence (track G, 2026-09-03): the same EventEvidence the editorial
+        scorer consumed. Used only to label alert priority from its existing
+        is_limited_edition/is_collaboration flags -- never to re-derive or
+        re-score anything. Optional, and a missing value simply yields no
+        priority label, so every existing caller is unaffected.
 
         novelty_evidence (2026-08-21 Phase 7): the structured provenance of
         a novelty classification -- source, region, local first-seen time,
@@ -2007,6 +2060,19 @@ class PipelineService:
                 "alerted": False,
                 "editorial_eligible": editorial_eligible,
                 "editorial_eligibility_reasons": eligibility_reasons,
+                **(
+                    {
+                        "priority": classify_alert_priority(
+                            is_limited_edition=getattr(evidence, "is_limited_edition", None),
+                            is_collaboration=getattr(evidence, "is_collaboration", None),
+                            limited_edition_quantity=getattr(
+                                evidence, "limited_edition_quantity", None
+                            ),
+                        ).as_extra()
+                    }
+                    if evidence is not None
+                    else {}
+                ),
                 **_initial_delivery_outcome(
                     notify=notify,
                     editorial_eligible=editorial_eligible,
@@ -2150,6 +2216,11 @@ class PipelineService:
                 "prior_regions": sorted(prior_regions),
                 "experimental": experimental,
                 "alerted": False,
+                "priority": classify_alert_priority(
+                    is_limited_edition=evidence.is_limited_edition,
+                    is_collaboration=evidence.is_collaboration,
+                    limited_edition_quantity=evidence.limited_edition_quantity,
+                ).as_extra(),
                 # This first-party news path has no eligibility/maturity/
                 # first-seen gates -- the only determinable pre-send outcome
                 # is "the caller chose not to notify" (STD-UI-COM-011).
@@ -3279,6 +3350,10 @@ class PipelineService:
                     if pe.get("event_type") in ("NEW_REFERENCE", "FIRST_SEEN_BY_CLANK") and pe.get("event_id")
                 ],
                 discovered_count=len(result.discovered),
+            )
+            self._stamp_launch_groups(
+                event_ids=[pe["event_id"] for pe in events if pe.get("event_id")],
+                run_id=run.id,
             )
 
             completed = datetime.now(UTC)
