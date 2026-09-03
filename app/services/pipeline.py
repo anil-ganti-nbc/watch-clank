@@ -22,6 +22,7 @@ from app.core.logging import get_logger
 from app.core.time import ensure_utc
 from app.models import (
     CollectorRun,
+    Event,
     FamilyMembership,
     PipelineLedger,
     SnapshotBlob,
@@ -39,6 +40,8 @@ from app.normalization.references import (
     safe_overall_confidence,
 )
 from app.parsers.casio_japan import PARSER_VERSION, parse_casio_product_html
+from app.services.delivery_receipts import PURPOSE_EDITORIAL_ALERT
+from app.services.discord_notify import DeliveryAttempt
 from app.services.editorial import EventEvidence, score_event
 from app.services.run_lock import RunLockService
 from app.services.snapshot_storage import SnapshotStorageService
@@ -158,6 +161,47 @@ class PipelineService:
         # source batch, not insertion-order prefix state. Unarmed (None) in
         # every other path -- behavior is unchanged there.
         self._current_publication_batch: dict[str, list[dict]] | None = None
+
+    def _deliver_editorial_alert(self, event: Event, text: str, *, notifier, purpose: str) -> bool:
+        """Send one editorial alert and persist durable delivery evidence.
+
+        Track F (2026-09-03): the old code recorded `alerted=<bool>` and a
+        bare `delivery.state`, which could not distinguish "the operator
+        never got it" from "Discord accepted it into a channel nobody
+        watches" -- the exact ambiguity that left Citizen JY8144-50E
+        (event 442) unexplainable. The alert text and the send call shape
+        are unchanged; what changes is that the outcome is now written down.
+
+        The receipt is also the duplicate guard: Discord webhooks have no
+        server-side idempotency, so re-processing an event that already
+        reached the provider must not post it a second time.
+        """
+        from app.services.delivery_receipts import ENTITY_EVENT, DeliveryReceiptService
+
+        receipts = DeliveryReceiptService(self.session)
+        existing = receipts.find(ENTITY_EVENT, event.id, purpose)
+        if existing is not None and receipts.already_delivered(ENTITY_EVENT, event.id, purpose):
+            logger.info(
+                "editorial_alert_already_delivered", event_id=event.id, purpose=purpose,
+                lifecycle_state=existing.lifecycle_state,
+            )
+            event.extra = {**event.extra, "alerted": True, "delivery": receipts.delivery_extra(existing)}
+            self.session.commit()
+            return True
+
+        sent = bool(notifier.send_editorial_alert(text))
+        attempt = getattr(notifier, "last_editorial_attempt", None)
+        if not isinstance(attempt, DeliveryAttempt):
+            # A notifier that only implements the boolean contract. Record
+            # what is actually known rather than inventing a provider
+            # response -- weaker evidence, honestly labelled.
+            attempt = DeliveryAttempt(accepted=sent, attempt_count=1)
+        receipt = receipts.record(
+            entity_type=ENTITY_EVENT, entity_id=event.id, purpose=purpose, attempt=attempt
+        )
+        event.extra = {**event.extra, "alerted": sent, "delivery": receipts.delivery_extra(receipt)}
+        self.session.commit()
+        return sent
 
     def _record_qualification_execution(self, run: CollectorRun, provenance: str) -> None:
         """Persist one qualification credit at the terminal run boundary."""
@@ -2021,16 +2065,9 @@ class PipelineService:
                     observed_at=datetime.now(UTC).isoformat(),
                     experimental=experimental,
                 )
-                sent = notifier.send_editorial_alert(text)
-                event.extra = {
-                    **event.extra,
-                    "alerted": sent,
-                    "delivery": {
-                        "state": "sent" if sent else "failed",
-                        "attempted_at": datetime.now(UTC).isoformat(),
-                    },
-                }
-                self.session.commit()
+                sent = self._deliver_editorial_alert(
+                    event, text, notifier=notifier, purpose=PURPOSE_EDITORIAL_ALERT
+                )
 
         return {"event_type": scored.event_type, "event_id": event.id, "score": scored.score, "confidence": scored.confidence}
 
@@ -2165,16 +2202,9 @@ class PipelineService:
                     observed_at=datetime.now(UTC).isoformat(),
                     experimental=experimental,
                 )
-                sent = notifier.send_editorial_alert(text)
-                event.extra = {
-                    **event.extra,
-                    "alerted": sent,
-                    "delivery": {
-                        "state": "sent" if sent else "failed",
-                        "attempted_at": datetime.now(UTC).isoformat(),
-                    },
-                }
-                self.session.commit()
+                sent = self._deliver_editorial_alert(
+                    event, text, notifier=notifier, purpose=PURPOSE_EDITORIAL_ALERT
+                )
 
         return {
             "event_type": scored.event_type,

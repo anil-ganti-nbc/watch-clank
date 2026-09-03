@@ -364,7 +364,7 @@ def test_stale_run_recovery_sends_health_alert(db_session: Session):
         lock = RunLockService(db_session, settings)
         lock.recover_stale_runs()
 
-    assert calls == ["https://discord.example/health"]
+    assert calls == ["https://discord.example/health?wait=true"]
 
 
 def test_stale_run_recovery_no_alert_when_nothing_recovered(db_session: Session, tmp_settings: Settings):
@@ -755,7 +755,7 @@ def test_scheduled_casio_new_product_creates_event_and_notifies(db_session: Sess
     assert all(e.event_type == "NEW_REFERENCE" for e in events)
     assert all(e.story_score >= 50.0 for e in events)  # EDIFICE is a recognisable family -> 30+10+20=60
     assert all(e.extra["alerted"] is True for e in events)
-    assert calls == ["https://discord.example/editorial"] * 5
+    assert calls == ["https://discord.example/editorial?wait=true"] * 5
 
 
 def test_scheduled_casio_no_webhook_creates_event_no_crash(db_session: Session, tmp_settings: Settings):
@@ -1759,7 +1759,7 @@ def test_discord_notifier_separates_editorial_and_health_channels():
     with patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()):
         notifier.send_editorial_alert("editorial content")
         notifier.send_health_alert("health content")
-    assert calls == ["https://discord.example/editorial", "https://discord.example/health"]
+    assert calls == ["https://discord.example/editorial?wait=true", "https://discord.example/health?wait=true"]
 
 
 def test_discord_notifier_editorial_authority_flag_suppresses_only_editorial():
@@ -1781,7 +1781,7 @@ def test_discord_notifier_editorial_authority_flag_suppresses_only_editorial():
         assert notifier.health_enabled is True
         assert notifier.send_health_alert("health content") is True
 
-    assert calls == ["https://discord.example/health"]
+    assert calls == ["https://discord.example/health?wait=true"]
 
 
 def test_product_character_extraction_is_conservative():
@@ -3365,7 +3365,7 @@ def test_watchbench_great_gshock_world_would_surface_gcwb5000_intelligence_today
     assert lead.reference_candidates == ["GCW-B5000", "MRG-B5000SA-2"]
     assert lead.is_baseline is False
     assert lead.editorial_freshness == "FRESH"
-    assert calls == ["https://discord.example/editorial"]  # a real alert attempt, not just a DB row
+    assert calls == ["https://discord.example/editorial?wait=true"]  # a real alert attempt, not just a DB row
 
 
 # --- Gear Patrol: TW2Y93300/TW2Y93400 Waterbury Heritage Chronograph
@@ -3551,7 +3551,7 @@ def test_watchbench_gear_patrol_would_surface_waterbury_style_intelligence_today
     assert lead.reference_candidates == ["TW2Y93300"]
     assert lead.is_baseline is False
     assert lead.editorial_freshness == "FRESH"
-    assert calls == ["https://discord.example/editorial"]  # a real alert attempt, not just a DB row
+    assert calls == ["https://discord.example/editorial?wait=true"]  # a real alert attempt, not just a DB row
 
 
 def test_gear_patrol_does_not_affect_existing_sources_and_url_canonicalized(
@@ -3786,7 +3786,7 @@ def test_specialist_cross_source_exact_reference_preserves_leads_but_alerts_once
         assert service.notify_new_lead(db_session.get(SpecialistLead, first["lead_id"]), notifier=DiscordNotifier(settings)) is True
         assert service.notify_new_lead(db_session.get(SpecialistLead, second["lead_id"]), notifier=DiscordNotifier(settings)) is False
     assert len(db_session.query(SpecialistLead).all()) == 2
-    assert calls == ["https://discord.example/editorial"]
+    assert calls == ["https://discord.example/editorial?wait=true"]
 
 
 def test_gcentral_pipeline_failed_fetch_creates_no_leads(db_session: Session, tmp_settings: Settings):
@@ -6726,7 +6726,7 @@ def test_notify_new_lead_sends_and_sets_notified_at(db_session: Session):
         sent = svc.notify_new_lead(lead, notifier=DiscordNotifier(settings))
 
     assert sent is True
-    assert calls == ["https://discord.example/editorial"]
+    assert calls == ["https://discord.example/editorial?wait=true"]
     assert lead.notified_at is not None
 
 
@@ -6760,7 +6760,7 @@ def test_notify_new_lead_does_not_resend_once_notified(db_session: Session):
 
     assert first is True
     assert second is False  # notified_at dedup
-    assert calls == ["https://discord.example/editorial"]  # only sent once
+    assert calls == ["https://discord.example/editorial?wait=true"]  # only sent once
 
 
 def test_notify_new_lead_respects_confidence_floor_and_authority_flag(db_session: Session):

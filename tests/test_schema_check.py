@@ -62,7 +62,7 @@ def test_db_at_older_revision_does_not_match(tmp_path: Path):
     status = check_schema(engine, alembic_ini_path=str(ROOT / "alembic.ini"))
     assert not status.matches
     assert status.actual_version == "002_ops_statuses"
-    assert status.expected_head == "015_qualification_reset_lineage"
+    assert status.expected_head == "016_delivery_receipts"
 
 
 def test_run_pipeline_refuses_on_schema_mismatch(tmp_path, monkeypatch):
@@ -119,4 +119,4 @@ def test_run_pipeline_sends_health_alert_on_schema_mismatch(tmp_path, monkeypatc
         exit_code = run_pipeline_module.run_live_or_scheduled(max_items=1, scheduled=True)
 
     assert exit_code == run_pipeline_module.EXIT_SCHEMA_MISMATCH
-    assert calls == ["https://discord.example/health"]
+    assert calls == ["https://discord.example/health?wait=true"]

@@ -17,7 +17,13 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.time import ensure_utc
 from app.models import CollectorRun, SourceObservation, SpecialistLead, Watch
-from app.services.discord_notify import DiscordNotifier
+from app.services.delivery_receipts import (
+    ENTITY_SPECIALIST_LEAD,
+    PURPOSE_LEAD_CORRELATION,
+    PURPOSE_LEAD_EARLY_WARNING,
+    DeliveryReceiptService,
+)
+from app.services.discord_notify import DeliveryAttempt, DiscordNotifier
 from app.services.editorial import (
     format_correlation_followup_alert,
     format_early_warning_alert,
@@ -29,6 +35,31 @@ from app.services.run_lock import RunLockService
 from app.services.source_registry import get_source_profile
 
 logger = get_logger(__name__)
+
+
+def _deliver_lead_alert(
+    session: Session, lead: SpecialistLead, text: str, *, notifier: DiscordNotifier, purpose: str
+) -> bool:
+    """Send one specialist-lead alert and persist durable delivery evidence.
+
+    Mirrors PipelineService._deliver_editorial_alert. Leads legitimately
+    deliver twice (early warning, then correlation follow-up), so the two
+    purposes carry separate receipts and must never dedup against each
+    other -- see delivery_receipts.PURPOSE_LEAD_*.
+    """
+    receipts = DeliveryReceiptService(session)
+    if receipts.already_delivered(ENTITY_SPECIALIST_LEAD, lead.id, purpose):
+        logger.info("lead_alert_already_delivered", lead_id=lead.id, purpose=purpose)
+        return True
+
+    sent = bool(notifier.send_editorial_alert(text))
+    attempt = getattr(notifier, "last_editorial_attempt", None)
+    if not isinstance(attempt, DeliveryAttempt):
+        attempt = DeliveryAttempt(accepted=sent, attempt_count=1)
+    receipts.record(
+        entity_type=ENTITY_SPECIALIST_LEAD, entity_id=lead.id, purpose=purpose, attempt=attempt
+    )
+    return sent
 
 # 2026-08-19 QC + classifier hardening pass (real production data: 43+
 # casioblog leads and dozens of gear_patrol/fratello/great_gshock_world/
@@ -376,7 +407,9 @@ class SpecialistLeadService:
             discovered_at=lead.discovered_at.isoformat() if lead.discovered_at else "",
             confidence=lead.confidence,
         )
-        sent = notifier.send_editorial_alert(text)
+        sent = _deliver_lead_alert(
+            self.session, lead, text, notifier=notifier, purpose=PURPOSE_LEAD_EARLY_WARNING
+        )
         if sent:
             lead.notified_at = datetime.now(UTC)
             lead.delivery_state = "sent"
@@ -439,7 +472,9 @@ class SpecialistLeadService:
             lead_time_days=lead.lead_time_days,
             source_url=lead.source_url,
         )
-        sent = notifier.send_editorial_alert(text)
+        sent = _deliver_lead_alert(
+            self.session, lead, text, notifier=notifier, purpose=PURPOSE_LEAD_CORRELATION
+        )
         if sent:
             # Correlation follow-up: record the state only. notified_at is
             # notify_new_lead's dedup guard for the EARLY WARNING alert and
