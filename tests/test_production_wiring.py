@@ -87,6 +87,51 @@ def test_render_units_emits_canonical_systemd_units_for_both(tmp_path):
     assert "tissot-sitemap" in joined and "timex-uk-products" in joined
 
 
+def test_seiko_jp_products_timer_carries_scheduled_provenance(tmp_path):
+    """2026-09-03 incident regression (Seiko JP delivery-gating failure):
+    the rendered production unit for seiko_jp_products must explicitly
+    declare --qualification-provenance SCHEDULED, or the qualification
+    service fails closed (eligibility_gate=UNKNOWN) and silently blocks
+    Discord delivery for every eligible event -- exactly what happened to
+    ten confirmed-eligible NEW_REFERENCE events on 2026-09-02. It must also
+    still invoke the same --experimental-product seiko_jp entrypoint; this
+    fix changes the provenance declared to that entrypoint, not the
+    entrypoint or collector identity itself."""
+    from scripts.systemd.docker.render_units import render
+
+    render(tmp_path)
+    service = (tmp_path / "watch-clank-seiko-jp-products.service").read_text()
+
+    assert "--experimental-product seiko_jp" in service
+    assert "--qualification-provenance SCHEDULED" in service
+
+
+def test_every_non_casio_multi_collector_timer_carries_scheduled_provenance(tmp_path):
+    """Narrow fleet-wide audit requested alongside the Seiko JP fix: every
+    OTHER systemd-scheduled collector uses the same --experimental-* entry
+    points, whose argparse default for --qualification-provenance is
+    UNKNOWN (unlike --scheduled, which already defaults it correctly) --
+    see scripts/run_pipeline.py. Confirmed affected set before this fix:
+    every registered collector except casio_multi. This test fails if a
+    future collector is added to the registry without carrying truthful
+    scheduled provenance into its rendered timer invocation."""
+    from app.services.collector_registry import all_controls
+    from scripts.systemd.docker.render_units import render, slug_for
+
+    render(tmp_path)
+
+    for control in all_controls():
+        service_path = tmp_path / f"watch-clank-{slug_for(control.collector_id)}.service"
+        service = service_path.read_text()
+        if control.collector_id == "casio_multi":
+            assert "--scheduled" in service
+            continue
+        assert "--qualification-provenance SCHEDULED" in service, (
+            f"{control.collector_id}'s rendered timer invocation is missing truthful "
+            "scheduled provenance and will fail closed on delivery"
+        )
+
+
 def test_registered_collector_without_production_entrypoint_fails_loudly():
     """THE invariant: any id in KNOWN_COLLECTORS lacking a _CONTROLS entry
     (or vice versa) breaks the production chain. The registry validates this

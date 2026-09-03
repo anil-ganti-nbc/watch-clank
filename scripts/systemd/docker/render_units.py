@@ -44,8 +44,26 @@ SERVICE_TEMPLATE = (TEMPLATE_DIR / "watch-clank-docker.service.template").read_t
 TIMER_TEMPLATE = (TEMPLATE_DIR / "watch-clank-docker.timer.template").read_text()
 
 # casio_multi is the production lane: its own --scheduled entrypoint (lock
-# + exit-code contract), not the web UI's --live convenience wrapper.
+# + exit-code contract), not the web UI's --live convenience wrapper. Its
+# --scheduled path already defaults qualification_provenance to SCHEDULED
+# in scripts/run_pipeline.py, so no explicit flag is needed here.
 _SCHEDULED_OVERRIDE = {"casio_multi": ("--scheduled",)}
+
+# 2026-09-03 incident fix (Seiko JP delivery-gating failure): every OTHER
+# registered collector is fired via --experimental-brand/--experimental-
+# product/--experimental-specialist, whose argparse default for
+# --qualification-provenance is "UNKNOWN" (see scripts/run_pipeline.py) --
+# unlike --scheduled, these entrypoints have no scheduled-aware default.
+# A real systemd-timer firing of any of them IS a genuinely scheduled run;
+# leaving provenance unstated made QualificationService.record_execution()
+# stamp eligibility_gate=UNKNOWN, which fails closed and silently blocked
+# Discord delivery for every eligible event these lanes produced -- ten
+# confirmed-eligible Seiko JP NEW_REFERENCE events on 2026-09-02 never
+# reached Discord as a result. This is not a maturity/promotion decision
+# (that stays governed by app.services.delivery_gate.
+# EXPERIMENTAL_MATURITY_COLLECTORS, untouched here) -- it is making the
+# timer-fired invocation truthfully declare what it already is.
+_QUALIFICATION_PROVENANCE_ARGS = ("--qualification-provenance", "SCHEDULED")
 
 
 def slug_for(collector_id: str) -> str:
@@ -65,7 +83,9 @@ def render(out_dir: Path) -> list[str]:
     for control in all_controls():
         cid = control.collector_id
         slug = slug_for(cid)
-        args = _SCHEDULED_OVERRIDE.get(cid, ("--live", *control.cli_args))
+        args = _SCHEDULED_OVERRIDE.get(
+            cid, ("--live", *control.cli_args, *_QUALIFICATION_PROVENANCE_ARGS)
+        )
         cadence_min = EXPECTED_CADENCE_MINUTES.get(cid, 360)
 
         service = SERVICE_TEMPLATE.format(
