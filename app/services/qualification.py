@@ -77,6 +77,7 @@ class QualificationService:
             prior_material_identity=prior.material_identity, prior_epoch_id=prior.epoch_id,
             reset_reason="CODE_OR_COLLECTOR_CHANGE", intervention_treatment="RESET",
             eligibility_gate="UNKNOWN", qualification_gate="RESET", outcome="RUNNING",
+            observed_at=datetime.now(UTC),
         )
         self.session.add(reset)
         return reset
@@ -102,7 +103,7 @@ class QualificationService:
                     provenance="CONFIG", change_identity=get_identity()["source_revision"],
                     reset_reason="delivery_maturity_gate_changed",
                     intervention_treatment="RESET", eligibility_gate=configured,
-                    qualification_gate="RESET",
+                    qualification_gate="RESET", observed_at=datetime.now(UTC),
                 ))
                 return False
             # Delivery is not an execution authority.  Absence of durable,

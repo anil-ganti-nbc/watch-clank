@@ -172,3 +172,95 @@ def test_lock_grant_beats_stale_metadata(db_session, tmp_settings):
     first.release()
     assert second.acquire().acquired
     second.release()
+
+
+def _real_migrated_session(tmp_path):
+    """2026-09-03 incident regression support: the standard db_session
+    fixture builds its schema via Base.metadata.create_all(), which applies
+    the CURRENT model's server_default=func.now() for
+    QualificationEvidence.observed_at. The real production database was
+    built by actually running alembic/versions/013_qualification_evidence.py,
+    whose op.create_table call for observed_at has NO server_default at all
+    -- a genuine model/migration drift that only a real migrated schema can
+    expose. Mirrors test_alembic_upgrade_fresh_db's pattern."""
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    repo_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "mig.db"
+    cfg = Config(str(repo_root / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+    command.upgrade(cfg, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    return sessionmaker(bind=engine)()
+
+
+def test_prepare_epoch_reset_row_survives_the_real_migrated_schema(tmp_path):
+    """2026-09-03 incident regression: deploying the Seiko JP provenance fix
+    triggered this crash live on Hetzner the first time any collector's
+    material_identity changed across a real deploy (source_revision changes
+    with every commit) -- QualificationService.prepare_epoch_for_run's reset
+    row never set observed_at, and the real migrated table has no DB-level
+    default for it (see _real_migrated_session), so the INSERT failed
+    NOT NULL and crashed every collector's first run after any code deploy.
+    Must be exercised against the real migrated schema; the standard
+    db_session fixture's create_all()-built schema does not reproduce it."""
+    from app.models import CollectorRun, QualificationEvidence
+    from app.services.qualification import QualificationService
+
+    session = _real_migrated_session(tmp_path)
+    old_run = CollectorRun(collector_id="seiko_jp_products", collector_version="A", status="SUCCESS")
+    session.add(old_run)
+    session.flush()
+    QualificationService(session).record_execution(old_run, "SCHEDULED")
+    session.commit()
+
+    changed_run = CollectorRun(collector_id="seiko_jp_products", collector_version="B", status="RUNNING")
+    session.add(changed_run)
+    session.commit()
+
+    reset = QualificationService(session).prepare_epoch_for_run(changed_run, "SCHEDULED")
+    session.commit()  # this is exactly where the real deploy crashed
+
+    assert reset is not None
+    assert reset.observed_at is not None
+    persisted = session.query(QualificationEvidence).filter_by(id=reset.id).one()
+    assert persisted.observed_at is not None
+
+
+def test_maturity_gate_reset_row_survives_the_real_migrated_schema(tmp_path):
+    """Same defect, second call site: QualificationService.delivery_allowed's
+    'delivery_maturity_gate_changed' reset row also never set observed_at --
+    would crash the same way the first time EXPERIMENTAL_MATURITY_COLLECTORS
+    changes while stale evidence exists for a collector. Fixed alongside the
+    incident fix since it is the identical defect in the same file."""
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from app.models import QualificationEvidence
+    from app.services.qualification import QualificationService, _epoch_id
+
+    session = _real_migrated_session(tmp_path)
+    # A realistic prior row: any row actually written by record_execution()
+    # always has observed_at set explicitly (that call site was already
+    # correct) -- this reproduces the real pre-existing-evidence shape.
+    session.add(QualificationEvidence(
+        collector_id="tissot_sitemap", epoch_id="stale-epoch", provenance="SCHEDULED",
+        eligibility_gate="ELIGIBLE", qualification_gate="ELIGIBLE", observed_at=datetime.now(UTC),
+    ))
+    session.commit()
+
+    with patch("app.services.qualification.EXPERIMENTAL_MATURITY_COLLECTORS", frozenset({"tissot_sitemap"})):
+        assert _epoch_id() != "stale-epoch"
+        result = QualificationService(session).delivery_allowed("tissot_sitemap")
+    session.commit()  # this is exactly where the real deploy would have crashed
+
+    assert result is False
+    reset = (
+        session.query(QualificationEvidence)
+        .filter_by(collector_id="tissot_sitemap", reset_reason="delivery_maturity_gate_changed")
+        .one()
+    )
+    assert reset.observed_at is not None
