@@ -597,3 +597,63 @@ def test_run_detail_orders_stages_by_pipeline_sequence(db, web_client):
     page = web_client.get(f"/runs/{run.id}")
     assert page.status_code == 200
     assert page.text.index("discovery") < page.text.index("parsing") < page.text.index("normalization")
+
+
+# ---------------------------------------------------------------------------
+# STD-UI-COM-007: maturity visible at the point of the individual run control.
+# ---------------------------------------------------------------------------
+
+
+def test_operations_shows_maturity_at_each_run_control(web_client):  # noqa: F811
+    """The Operations page must let an operator tell a production collector
+    from an experimental one AT the RUN NOW control -- not only via a legend
+    or a different column. Layer (OFFICIAL/SPECIALIST) is what kind of source
+    it is and is NOT a maturity tier."""
+    from app.services.collector_registry import all_controls
+    from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
+
+    html = web_client.get("/operations").text
+    assert EXPERIMENTAL_MATURITY_COLLECTORS, "fixture assumes at least one experimental collector"
+
+    # Every registered collector has a run control, and every one of them
+    # carries a maturity marker.
+    assert html.count("EXPERIMENTAL") >= len(EXPERIMENTAL_MATURITY_COLLECTORS)
+    production_ids = [
+        c.collector_id for c in all_controls()
+        if c.collector_id not in EXPERIMENTAL_MATURITY_COLLECTORS
+    ]
+    assert html.count("PRODUCTION") >= len(production_ids)
+
+
+def test_experimental_run_control_is_distinguishable_from_production(web_client):  # noqa: F811
+    """The forbidden case: an experimental collector's individual-run control
+    rendering indistinguishably from a production one."""
+    from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
+
+    html = web_client.get("/operations").text
+    experimental_id = sorted(EXPERIMENTAL_MATURITY_COLLECTORS)[0]
+
+    # Isolate the table row for one known experimental collector.
+    row_start = html.index(f"/operations/run/{experimental_id}")
+    row = html[max(0, row_start - 2000):row_start + 200]
+    assert "EXPERIMENTAL" in row, f"{experimental_id} run control lacks a maturity marker"
+    assert "PRODUCTION" not in row.split("EXPERIMENTAL")[-1][:200]
+
+
+def test_maturity_marker_is_not_derived_from_run_all_eligibility(web_client, monkeypatch):  # noqa: F811
+    """SAFE_COLLECTOR_IDS widens to include experimental collectors when
+    WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL=1. Maturity must NOT be derived
+    from it, or an experimental collector would render as production exactly
+    when the operator most needs to see that it isn't."""
+    from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
+
+    monkeypatch.setenv("WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL", "1")
+    html = web_client.get("/operations").text
+    experimental_id = sorted(EXPERIMENTAL_MATURITY_COLLECTORS)[0]
+
+    row_start = html.index(f"/operations/run/{experimental_id}")
+    row = html[max(0, row_start - 2000):row_start + 200]
+    assert "EXPERIMENTAL" in row, (
+        "maturity marker vanished when run-all eligibility widened -- it is "
+        "being derived from SAFE_COLLECTOR_IDS instead of the maturity set"
+    )

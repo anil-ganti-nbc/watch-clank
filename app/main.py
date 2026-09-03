@@ -907,6 +907,7 @@ def operations(
 ):
     from app.db.session import get_engine
     from app.services.collector_registry import SAFE_COLLECTOR_IDS, all_controls
+    from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
     from app.services.health import get_health_snapshot
     from app.services.run_lock import RunLockService
 
@@ -928,6 +929,15 @@ def operations(
             "active_nav": "operations",
             "rows": rows,
             "safe_collector_ids": SAFE_COLLECTOR_IDS,
+            # STD-UI-COM-007: maturity must be visible at the point of the
+            # individual run control. Deliberately NOT derived from
+            # SAFE_COLLECTOR_IDS: that set is run-all *eligibility*, an
+            # independent gate (see collector_registry's own note), and it
+            # widens to include experimental collectors when
+            # WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL=1 -- which would make
+            # an experimental collector render as production exactly when the
+            # operator most needs to see that it isn't.
+            "experimental_collector_ids": EXPERIMENTAL_MATURITY_COLLECTORS,
             "is_locked": is_locked,
             "is_loopback": (request.client.host if request.client else None) in ("127.0.0.1", "::1", "localhost"),
             "ran": ran,
