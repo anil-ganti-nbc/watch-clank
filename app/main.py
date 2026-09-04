@@ -61,6 +61,15 @@ _jinja_env = Environment(
 )
 templates = Jinja2Templates(env=_jinja_env)
 
+# Collector UI design system v1: the stylesheet is byte-identical across the
+# six collector Clanks; only the accent below is Watch's own.
+from app.collector_ui import CSS as _UI_CSS  # noqa: E402
+
+WATCH_ACCENT, WATCH_ACCENT_SOFT = "#e879a6", "#3a1526"
+_jinja_env.globals["ui_css"] = _UI_CSS
+_jinja_env.globals["ui_accent"] = WATCH_ACCENT
+_jinja_env.globals["ui_accent_soft"] = WATCH_ACCENT_SOFT
+
 
 def _loopback(value: str | None) -> bool:
     if not value:

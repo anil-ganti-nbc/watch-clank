@@ -4,101 +4,45 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Watch Clank{% endblock %}</title>
-  <style>
-    :root { --bg: #0f1419; --card: #1a2332; --text: #e7ecf3; --muted: #8b9bb4; --accent: #3b82f6; --ok: #22c55e; --warn: #f59e0b; --err: #ef4444; --border: #2a3548; }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    header { background: var(--card); border-bottom: 1px solid var(--border); }
-    .header-top { padding: 0.6rem 1.5rem; display: flex; gap: 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
-    .header-top .logo { font-weight: 700; font-size: 1.1rem; }
-    .instance-banner { display: flex; gap: 0.75rem; align-items: center; font-size: 0.8rem; }
-    .instance-pill { padding: 0.15rem 0.6rem; border-radius: 999px; font-weight: 700; letter-spacing: 0.02em; font-size: 0.75rem; }
-    .instance-pill.labeled { background: #1e3a5f; color: #93c5fd; }
-    .instance-pill.unlabeled { background: #78350f; color: #fcd34d; }
-    .authority-pill { padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.75rem; color: var(--muted); border: 1px solid var(--border); }
-    nav { padding: 0 1.5rem; display: flex; gap: 0.25rem; }
-    nav a { padding: 0.6rem 0.85rem; color: var(--muted); font-size: 0.9rem; border-bottom: 2px solid transparent; }
-    nav a:hover { color: var(--text); text-decoration: none; }
-    nav a.active { color: var(--text); border-bottom-color: var(--accent); }
-    main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.85rem; margin-bottom: 1.5rem; }
-    .card { background: var(--card); border-radius: 8px; padding: 0.85rem 1.1rem; border: 1px solid var(--border); }
-    .card h3 { margin: 0 0 0.25rem; font-size: 0.8rem; color: var(--muted); font-weight: 500; }
-    .card .value { font-size: 1.6rem; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
-    th, td { text-align: left; padding: 0.5rem 0.65rem; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 500; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
-    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
-    .badge-ok { background: #14532d; color: #86efac; }
-    .badge-warn { background: #78350f; color: #fcd34d; }
-    .badge-err { background: #7f1d1d; color: #fca5a5; }
-    .badge-run { background: #1e3a5f; color: #93c5fd; }
-    .badge-neutral { background: #1f2937; color: var(--muted); }
-    .badge-official { background: #1e3a5f; color: #93c5fd; }
-    .badge-specialist { background: #4c1d95; color: #d8b4fe; }
-    .empty { color: var(--muted); padding: 1.5rem; text-align: center; border: 1px dashed var(--border); border-radius: 8px; }
-    h1, h2 { margin-top: 0; }
-    h2 { font-size: 1.05rem; margin-bottom: 0.6rem; color: var(--text); }
-    .muted { color: var(--muted); }
-    .small { font-size: 0.78rem; }
-    .section { margin-bottom: 1.75rem; }
-    .btn { display: inline-block; padding: 0.35rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: #1f2937; color: var(--text); font-size: 0.82rem; cursor: pointer; }
-    .btn:hover { background: #26313f; text-decoration: none; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-primary { background: var(--accent); border-color: var(--accent); color: white; }
-    .filter-bar { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.85rem; }
-    .filter-bar a { padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid var(--border); color: var(--muted); }
-    .filter-bar a.active { background: var(--accent); border-color: var(--accent); color: white; }
-    .qc-toolbar { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.85rem; }
-    .qc-filter-form { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; margin-left: auto; }
-    .qc-filter-form select, .qc-filter-form input { background: #1f2937; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.5rem; font-size: 0.8rem; }
-    .qc-controls { white-space: nowrap; }
-    .qc-btn { padding: 0.2rem 0.45rem; margin-right: 0.2rem; border-radius: 4px; border: 1px solid var(--border); background: #1f2937; color: var(--text); font-size: 0.72rem; font-weight: 600; cursor: pointer; }
-    .qc-btn:hover { border-color: var(--accent); }
-    .qc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .qc-btn[data-disposition="USEFUL"]:hover { background: #14532d; }
-    .qc-btn[data-disposition="NOT_USEFUL"]:hover { background: #1f2937; }
-    .qc-btn[data-disposition="FALSE_POSITIVE"]:hover { background: #7f1d1d; }
-    .qc-btn[data-disposition="OUT_OF_STOCK"]:hover { background: #78350f; }
-    @media (max-width: 640px) {
-      nav { overflow-x: auto; white-space: nowrap; }
-      .grid { grid-template-columns: 1fr 1fr; }
-    }
-  </style>
+  <style>{{ ui_css }}
+:root { --accent: {{ ui_accent }}; --accent-soft: {{ ui_accent_soft }}; }</style>
 </head>
 <body>
   {% set inst = instance() %}
-  <header>
-    <div class="header-top">
-      <div class="logo">⌚ Watch Clank</div>
-      <div class="instance-banner">
-        {% if inst.field_test %}<span class="instance-pill labeled">FIELD TEST · LOCAL COLLECTION · DELIVERY DISABLED</span>{% endif %}
-        <span class="instance-pill {{ 'labeled' if inst.instance_configured else 'unlabeled' }}">
-          Instance: {{ inst.instance_label }}
-        </span>
-        <span class="authority-pill" title="Which instance would actually send an editorial Discord alert right now">
-          Editorial authority: {{ inst.notification_authority }}
-        </span>
-        <span class="authority-pill" title="Packaged build provenance">
-          v{{ inst.version }} · {{ inst.channel }} · {{ inst.revision }} · {{ inst.state_root }}
-        </span>
-      </div>
+  <div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">WC</span>
+      <span class="brand-name">Watch Clank</span>
+      <span class="brand-suite">Clank Fleet</span>
     </div>
-    <nav>
-      <a href="/"{% if active_nav == 'overview' %} class="active"{% endif %}>Overview</a>
-      <a href="/intelligence"{% if active_nav == 'intelligence' %} class="active"{% endif %}>Recent Intelligence</a>
-      <a href="/qc/history"{% if active_nav == 'qc_history' %} class="active"{% endif %}>QC History</a>
-      <a href="/operations"{% if active_nav == 'operations' %} class="active"{% endif %}>Operations</a>
-      <a href="/runs"{% if active_nav == 'runs' %} class="active"{% endif %}>Run History</a>
-      <a href="/evidence"{% if active_nav == 'evidence' %} class="active"{% endif %}>Evidence</a>
-      <a href="/scheduler"{% if active_nav == 'scheduler' %} class="active"{% endif %}>Scheduler</a>
-      <a href="/diagnostics"{% if active_nav == 'diagnostics' %} class="active"{% endif %}>Health / Diagnostics</a>
-    </nav>
+    <div class="topbar-meta">
+      {% if inst.field_test %}<span class="badge warn plain sq">FIELD TEST · DELIVERY DISABLED</span>{% endif %}
+      <span class="mono">Instance: {{ inst.instance_label }}</span>
+      <span class="mono" title="Which instance would actually send an editorial Discord alert right now">authority {{ inst.notification_authority }}</span>
+      <span class="mono" title="Packaged build provenance">v{{ inst.version }} · {{ inst.revision }}</span>
+    </div>
   </header>
-  <main>
+  <div class="body">
+    <nav class="rail">
+      <div class="rail-group first">Monitor</div>
+      <a class="nav {{ 'active' if active_nav == 'overview' }}" href="/">Overview</a>
+      <a class="nav {{ 'active' if active_nav == 'intelligence' }}" href="/intelligence">Recent Intelligence</a>
+      <div class="rail-group">Review</div>
+      <a class="nav {{ 'active' if active_nav == 'qc_history' }}" href="/qc/history">QC History</a>
+      <a class="nav {{ 'active' if active_nav == 'evidence' }}" href="/evidence">Evidence</a>
+      <div class="rail-group">Operations</div>
+      <a class="nav {{ 'active' if active_nav == 'operations' }}" href="/operations">Operations</a>
+      <a class="nav {{ 'active' if active_nav == 'runs' }}" href="/runs">Run History</a>
+      <a class="nav {{ 'active' if active_nav == 'scheduler' }}" href="/scheduler">Scheduler</a>
+      <div class="rail-group">System</div>
+      <a class="nav {{ 'active' if active_nav == 'diagnostics' }}" href="/diagnostics">Health / Diagnostics</a>
+    </nav>
+    <main class="main"><div class="wrap">
     {% block content %}{% endblock %}
-  </main>
+    </div></main>
+  </div>
+  <footer class="foot"><span>All times UTC</span><span>Watch Clank · Clank Fleet</span></footer>
+  </div>
 </body>
 </html>
