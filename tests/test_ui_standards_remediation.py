@@ -612,17 +612,24 @@ def test_operations_shows_maturity_at_each_run_control(web_client):  # noqa: F81
     from app.services.collector_registry import all_controls
     from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
 
-    html = web_client.get("/operations").text
-    assert EXPERIMENTAL_MATURITY_COLLECTORS, "fixture assumes at least one experimental collector"
+    # The real maturity set is empty since the 2026-09-05 operator promotion,
+    # so the standard is proven by patching one registered collector back to
+    # experimental: STD-UI-COM-007 is about the rendering contract, and it
+    # must keep being enforced whenever a collector IS experimental.
+    from unittest.mock import patch
 
-    # Every registered collector has a run control, and every one of them
-    # carries a maturity marker.
-    assert html.count("EXPERIMENTAL") >= len(EXPERIMENTAL_MATURITY_COLLECTORS)
-    production_ids = [
-        c.collector_id for c in all_controls()
-        if c.collector_id not in EXPERIMENTAL_MATURITY_COLLECTORS
-    ]
-    assert html.count("PRODUCTION") >= len(production_ids)
+    marked = sorted(c.collector_id for c in all_controls())[0]
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
+               frozenset({marked})):
+        html = web_client.get("/operations").text
+        assert html.count("EXPERIMENTAL") >= 1
+        production_ids = [c.collector_id for c in all_controls() if c.collector_id != marked]
+        assert html.count("PRODUCTION") >= len(production_ids)
+
+    # And with the real (empty) set, every run control reads PRODUCTION.
+    html = web_client.get("/operations").text
+    assert EXPERIMENTAL_MATURITY_COLLECTORS == frozenset()
+    assert html.count("PRODUCTION") >= len(list(all_controls()))
 
 
 def test_experimental_run_control_is_distinguishable_from_production(web_client):  # noqa: F811
@@ -630,10 +637,18 @@ def test_experimental_run_control_is_distinguishable_from_production(web_client)
     rendering indistinguishably from a production one."""
     from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
 
-    html = web_client.get("/operations").text
-    experimental_id = sorted(EXPERIMENTAL_MATURITY_COLLECTORS)[0]
+    from unittest.mock import patch
 
-    # Isolate the table row for one known experimental collector.
+    from app.services.collector_registry import all_controls
+
+    # Proven against a patched experimental collector: the real set is empty
+    # since the 2026-09-05 promotion, but the forbidden rendering must stay
+    # impossible for any future experimental collector.
+    experimental_id = sorted(c.collector_id for c in all_controls())[0]
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
+               frozenset({experimental_id})):
+        html = web_client.get("/operations").text
+
     row_start = html.index(f"/operations/run/{experimental_id}")
     row = html[max(0, row_start - 2000):row_start + 200]
     assert "EXPERIMENTAL" in row, f"{experimental_id} run control lacks a maturity marker"
@@ -647,9 +662,15 @@ def test_maturity_marker_is_not_derived_from_run_all_eligibility(web_client, mon
     when the operator most needs to see that it isn't."""
     from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
 
+    from unittest.mock import patch
+
+    from app.services.collector_registry import all_controls
+
     monkeypatch.setenv("WATCH_CLANK_RUN_ALL_INCLUDE_EXPERIMENTAL", "1")
-    html = web_client.get("/operations").text
-    experimental_id = sorted(EXPERIMENTAL_MATURITY_COLLECTORS)[0]
+    experimental_id = sorted(c.collector_id for c in all_controls())[0]
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
+               frozenset({experimental_id})):
+        html = web_client.get("/operations").text
 
     row_start = html.index(f"/operations/run/{experimental_id}")
     row = html[max(0, row_start - 2000):row_start + 200]

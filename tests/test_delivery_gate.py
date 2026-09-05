@@ -17,9 +17,25 @@ from tests.test_core import (
 )
 
 
-def test_experimental_collectors_are_delivery_blocked():
-    assert experimental_delivery_blocked("tissot_sitemap")
-    assert experimental_delivery_blocked("timex_uk_products")
+def test_experimental_maturity_set_is_empty_after_the_operator_promotion():
+    """tissot_sitemap and timex_uk_products were promoted to PRODUCTION on
+    2026-09-05 by explicit operator decision, so nothing is delivery-blocked
+    on maturity grounds today. The gate mechanism is unchanged and is still
+    proven by the hypothetical-member test below."""
+    assert EXPERIMENTAL_MATURITY_COLLECTORS == frozenset()
+    assert not experimental_delivery_blocked("tissot_sitemap")
+    assert not experimental_delivery_blocked("timex_uk_products")
+
+
+def test_gate_still_blocks_any_future_experimental_collector():
+    """The retained mechanism: adding an id to the maturity set blocks its
+    external delivery again, with no other code change."""
+    from unittest.mock import patch
+
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
+               frozenset({"future_soaking_collector"})):
+        assert experimental_delivery_blocked("future_soaking_collector")
+        assert not experimental_delivery_blocked("casio_multi")
 
 
 def test_established_collectors_are_not_blocked_by_the_maturity_gate():
@@ -31,14 +47,15 @@ def test_established_collectors_are_not_blocked_by_the_maturity_gate():
 
 
 def test_promotion_removes_block():
-    """Promotion review = removing the id from the maturity set. Simulate a
-    promoted tissot by patching the frozenset."""
+    """Promotion review = removing the id from the maturity set. Simulated
+    against a populated set, since the real set is now empty."""
     from unittest.mock import patch
 
-    promoted = EXPERIMENTAL_MATURITY_COLLECTORS - {"tissot_sitemap"}
-    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS", promoted):
-        assert not experimental_delivery_blocked("tissot_sitemap")
-        assert experimental_delivery_blocked("timex_uk_products")  # others unaffected
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
+               frozenset({"still_soaking"})):
+        assert experimental_delivery_blocked("still_soaking")
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS", frozenset()):
+        assert not experimental_delivery_blocked("still_soaking")
 
 
 def test_notify_path_respects_gate_for_non_first_seen_events(db_session, tmp_settings):
@@ -221,3 +238,26 @@ def test_seiko_jp_unknown_provenance_stays_gated(db_session, tmp_settings):
     assert event.extra.get("delivery", {}).get("reason") == "experimental_maturity"
     ctor.assert_not_called()
     notifier_mock.send_editorial_alert.assert_not_called()
+
+
+# ------------------------------------------------------------ promotion guard
+
+
+def test_no_registered_collector_is_experimental():
+    """Fleet guard (operator decision 2026-09-05): zero registered collectors
+    may hold EXPERIMENTAL maturity."""
+    from app.services.collector_registry import all_controls
+
+    registered = {c.collector_id for c in all_controls()}
+    still_experimental = sorted(registered & EXPERIMENTAL_MATURITY_COLLECTORS)
+    assert still_experimental == [], f"still experimental: {still_experimental}"
+
+
+def test_promoted_collectors_are_run_all_eligible():
+    """No split-brain: promotion means Run All selects them exactly as it
+    selects any other production collector."""
+    from app.services.collector_registry import SAFE_COLLECTOR_IDS, all_controls
+
+    for collector_id in ("tissot_sitemap", "timex_uk_products"):
+        assert collector_id in SAFE_COLLECTOR_IDS, f"{collector_id} not Run-All eligible"
+    assert set(SAFE_COLLECTOR_IDS) == {c.collector_id for c in all_controls()}
