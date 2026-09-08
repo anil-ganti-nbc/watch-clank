@@ -10,7 +10,6 @@ known" so even two racing processes cannot duplicate an identity.
 from __future__ import annotations
 
 import contextlib
-
 from datetime import UTC, datetime, timedelta
 from typing import Any
 

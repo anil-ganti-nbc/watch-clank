@@ -28,6 +28,7 @@ from app.models.sentinel import (
     ADMITTED_VIA_BASELINE,
     SentinelIdentity,
     SentinelSighting,
+    SentinelSourceState,
 )
 from app.sentinel.alerting import (
     ENTITY_SENTINEL_SIGHTING,
@@ -583,6 +584,39 @@ def test_cadence_due_logic(db_session):  # noqa: F811 -- pytest fixture
     assert "a" in store.sources_due(states, {"a": 15, "b": 60}, now + timedelta(minutes=16))
     # arming happened on first success
     assert states["a"].armed_at is not None
+
+
+def test_zero_items_first_poll_does_not_arm(make_runner, db_session):  # noqa: F811 -- pytest fixture
+    """Deployment finding 2026-09-09 (seiko_us live): a source whose first
+    successful poll yields ZERO_ITEMS must NOT arm. Otherwise its real
+    catalogue arrives later as 'unseen' and replays as a capped false-alert
+    flood. The disarmed source silently baselines when candidates appear."""
+    notifier = RecordingNotifier()
+    # First poll: feed parses but the type filter matches nothing -> ZERO_ITEMS.
+    empty_feed = _fetch_map({_TIMEX_US: _shopify_payload([])})
+    run1 = run_sweep(make_runner, notifier, only_source="timex_us", fetch=empty_feed)
+    assert run1.summary_metadata["per_source"]["timex_us"]["status"] == "ZERO_ITEMS"
+    state = db_session.query(SentinelSourceState).filter_by(source="timex_us").one()
+    assert state.armed_at is None  # NOT armed
+
+    # Second poll: candidates appear. Still silent -- this is the source's
+    # (late) baseline.
+    feed = _fetch_map({_TIMEX_US: _shopify_payload([("TW5M74100", "TIMEX IRONMAN")])})
+    run2 = run_sweep(make_runner, notifier, only_source="timex_us", fetch=feed)
+    assert run2.summary_metadata["per_source"]["timex_us"]["baseline_mode"] is True
+    assert run2.summary_metadata["totals"]["alerts_sent"] == 0
+
+    # Third poll: armed now; a NEW identity alerts, the baselined one is
+    # suppressed. No flood, ever.
+    run3 = run_sweep(
+        make_runner,
+        notifier,
+        only_source="timex_us",
+        fetch=_fetch_map({_TIMEX_US: _shopify_payload([("TW5M74100", "TIMEX IRONMAN"), ("TW5M74200", "TIMEX Weekender")])}),
+    )
+    assert run3.summary_metadata["totals"]["unseen_admitted"] == 1
+    assert run3.summary_metadata["totals"]["known_suppressed"] == 1
+    assert run3.summary_metadata["totals"]["alerts_sent"] == 1
 
 
 # ---------------------------------------------------------------------------

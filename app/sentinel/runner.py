@@ -243,10 +243,19 @@ class SentinelRunner:
             unseen_total += unseen
             suppressed_total += suppressed
 
-            # A successful poll arms the source (first success = its
-            # baseline just completed silently).
+            # Arming requires a poll that actually SAW candidates. A
+            # ZERO_ITEMS first poll (feed parsed but yielded nothing -- filter
+            # mismatch, temporarily empty store) must NOT latch arming:
+            # otherwise the source's real catalogue would later arrive as
+            # "unseen" and replay as a capped false-alert flood. The source
+            # stays disarmed; its first candidate-bearing poll silently
+            # baselines it. Run-level health still counts ZERO_ITEMS as a
+            # successful poll -- only the arming latch is stricter.
             self.store.mark_poll(
-                states[source.name], ok=True, status=outcome.status, now=now
+                states[source.name],
+                ok=outcome.status == "SUCCESS",
+                status=outcome.status,
+                now=now,
             )
             ok_count += 1
             per_source[source.name] = stats

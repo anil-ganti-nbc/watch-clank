@@ -119,7 +119,10 @@ SENTINEL_SOURCES: dict[str, SentinelSourceConfig] = {
         # (live-verified 2026-09-08: served manual/best-selling order).
         listing_url_template="https://seikousa.com/products.json?limit=250&page={page}",
         product_url_template="https://seikousa.com/products/{handle}",
-        product_type_filter="Watch",
+        # Live evidence 2026-09-09 (Hetzner): seikousa product_type is
+        # "Wrist Watches" (208 of 250 on page 1; Clocks/Straps excluded) —
+        # NOT "Watch" like the Timex stores.
+        product_type_filter="Wrist Watches",
         notes="Page 1 only, like every Shopify lane here (page-2+ is a "
         "documented limitation; ordering evidence lives in the docstring).",
     ),
