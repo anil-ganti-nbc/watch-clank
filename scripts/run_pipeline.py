@@ -285,7 +285,65 @@ def ingest_manual_lead(args: argparse.Namespace) -> int:
         return EXIT_OK
 
 
+def run_sentinel(
+    *,
+    force_baseline: bool = False,
+    only_source: str | None = None,
+) -> int:
+    """Horology Sentinel sweep (2026-09-08): the fast first-party tripwire.
+    One sweep = one cheap poll of every due Sentinel source (sitemap /
+    products.json feeds only -- never the full pipeline), immediate Discord
+    WATCH SIGHTING for genuinely unseen identities, durable dedup store.
+    See ai/handoff/SENTINEL_RUNBOOK.md."""
+    from app.sentinel.runner import SentinelRunner
+
+    settings = get_settings()
+    print(f"database_url={settings.resolved_database_url} sentinel baseline={force_baseline}")
+    schema = check_schema(get_engine())
+    if not schema.matches:
+        msg = (
+            f"SCHEMA MISMATCH: database is at "
+            f"{schema.actual_version or '(uninitialized)'}, code expects "
+            f"{schema.expected_head}. Run `python -m scripts.migrate` "
+            "explicitly, then retry."
+        )
+        logger.error("schema_mismatch", expected=schema.expected_head, actual=schema.actual_version)
+        print(msg)
+        from app.services.discord_notify import DiscordNotifier
+
+        DiscordNotifier(settings).send_health_alert(f"WATCH CLANK — OPS\n{msg}")
+        return EXIT_SCHEMA_MISMATCH
+
+    if not settings.sentinel_enabled:
+        print("Horology Sentinel is disabled (SENTINEL_ENABLED=false); nothing to do.")
+        return EXIT_OK
+
+    with session_scope() as session:
+        try:
+            runner = SentinelRunner(session, settings)
+            run = runner.run_sweep(force_baseline=force_baseline, only_source=only_source)
+        except Exception as exc:
+            logger.exception("sentinel_sweep_fatal", error=str(exc))
+            print(f"FATAL: {exc}")
+            return EXIT_FATAL
+
+    summary = (run.summary_metadata or {}).get("totals", {})
+    print(
+        f"Sentinel run id={run.id} status={run.status} "
+        f"candidates={summary.get('candidates_observed', 0)} "
+        f"unseen={summary.get('unseen_admitted', 0)} "
+        f"suppressed={summary.get('known_suppressed', 0)} "
+        f"alerts_sent={summary.get('alerts_sent', 0)} "
+        f"alerts_failed={summary.get('alerts_failed', 0)}"
+    )
+    if run.status in ("SUCCESS", "PARTIAL", "ZERO_ITEMS", "BLOCKED", "SKIPPED_OVERLAP"):
+        return EXIT_OK
+    return EXIT_FAILED
+
+
 def main() -> None:
+    from app.sentinel.config import SENTINEL_SOURCES
+
     parser = argparse.ArgumentParser(description="Watch Clank Casio pipeline")
     parser.add_argument("--fixture-mode", action="store_true")
     parser.add_argument("--live", action="store_true")
@@ -324,6 +382,27 @@ def main() -> None:
         action="store_true",
         help="Manually ingest one early-warning lead (e.g. a @geesgshock post) — see --lead-* flags",
     )
+    parser.add_argument(
+        "--sentinel",
+        action="store_true",
+        help="Run one Horology Sentinel sweep: fast first-party tripwire poll "
+        "(products.json/sitemaps only), Discord WATCH SIGHTING for unseen "
+        "identities. See ai/handoff/SENTINEL_RUNBOOK.md.",
+    )
+    parser.add_argument(
+        "--sentinel-baseline",
+        action="store_true",
+        help="Force a silent Sentinel re-baseline sweep: every observed identity "
+        "is imported without alerts. Use after a deliberate reset or when "
+        "adding a new source you want pre-armed quietly.",
+    )
+    parser.add_argument(
+        "--sentinel-source",
+        choices=sorted(SENTINEL_SOURCES),
+        default=None,
+        help="Poll a single Sentinel source (debug/single-lane runs); polls it "
+        "regardless of cadence",
+    )
     parser.add_argument("--lead-source-id", default="geesgshock_manual")
     parser.add_argument(
         "--lead-type",
@@ -357,6 +436,10 @@ def main() -> None:
 
     if args.ingest_manual_lead:
         sys.exit(ingest_manual_lead(args))
+    if args.sentinel or args.sentinel_baseline:
+        sys.exit(
+            run_sentinel(force_baseline=args.sentinel_baseline, only_source=args.sentinel_source)
+        )
     if args.experimental_specialist:
         sys.exit(run_experimental_specialist(args.experimental_specialist, args.max_items or 20, force_baseline=args.force_baseline))
     if args.experimental_brand:

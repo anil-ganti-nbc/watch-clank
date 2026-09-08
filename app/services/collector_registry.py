@@ -19,15 +19,15 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-# Matches app.services.health.KNOWN_COLLECTORS exactly -- deliberately
-# imported from there rather than redefined, so the two can never drift.
-from app.services.health import KNOWN_COLLECTORS
-
 # Single source of truth for which collectors are still in soak/EXPERIMENTAL
 # maturity (see WATCH_SOAK_CONTRACT.md) -- imported rather than redefined so
 # the eligibility gate below can never drift from the delivery-silence gate
 # in app.services.delivery_gate.
 from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
+
+# Matches app.services.health.KNOWN_COLLECTORS exactly -- deliberately
+# imported from there rather than redefined, so the two can never drift.
+from app.services.health import KNOWN_COLLECTORS
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,15 @@ _CONTROLS: dict[str, CollectorControl] = {
     ),
     "gear_patrol_rss": CollectorControl(
         "gear_patrol_rss", "Gear Patrol", "SPECIALIST", ("--experimental-specialist", "gear_patrol")
+    ),
+    # 2026-09-08 Horology Sentinel: fast first-party tripwire with its own
+    # --sentinel entrypoint (not a pipeline lane) -- see
+    # ai/handoff/SENTINEL_RUNBOOK.md. It creates no Events, so the
+    # soak-contract delivery gate does not govern its sighting alerts;
+    # sightings use the ordinary editorial webhook authority boundary.
+    "horology_sentinel": CollectorControl(
+        "horology_sentinel", "Horology Sentinel (fast tripwire, sightings only)", "OFFICIAL",
+        ("--sentinel",),
     ),
 }
 
