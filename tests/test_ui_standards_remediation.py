@@ -290,9 +290,8 @@ def test_lead_sent_state_is_never_downgraded(db):
 
 
 def test_lead_delivery_state_defaults_to_never_attempted(db):
-    """Raw ORM insert without notify remains NULL — that is the historical
-    hole the terminal-state contract closes on the ingest/notify path, and
-    the migration remediates for already-persisted rows."""
+    """Raw ORM insert without the ingest API can still be NULL. ingest_candidate
+    itself now writes unresolved/INGEST_UNFINALIZED on the same INSERT."""
     lead = _make_lead(db)
     assert lead.delivery_state is None
     assert lead.notified_at is None

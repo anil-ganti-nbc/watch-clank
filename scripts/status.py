@@ -35,7 +35,8 @@ def _print_text(snap) -> None:
     print(f"Latest specialist lead: {snap.latest_specialist_lead_at or 'none'}")
     print(
         f"Lead delivery: unresolved_historical={snap.specialist_leads_unresolved_historical} "
-        f"missing_outcome={snap.specialist_leads_missing_delivery_outcome}"
+        f"missing_outcome={snap.specialist_leads_missing_delivery_outcome} "
+        f"ingest_unfinalized={snap.specialist_leads_ingest_unfinalized}"
     )
     print(f"Stale RUNNING rows: {snap.stale_running_count}")
     print(f"Active locks: {', '.join(snap.active_locks) or 'none'}")
@@ -70,6 +71,7 @@ def main() -> int:
                 "latest_specialist_lead_at": snap.latest_specialist_lead_at,
                 "specialist_leads_unresolved_historical": snap.specialist_leads_unresolved_historical,
                 "specialist_leads_missing_delivery_outcome": snap.specialist_leads_missing_delivery_outcome,
+                "specialist_leads_ingest_unfinalized": snap.specialist_leads_ingest_unfinalized,
                 "stale_running_count": snap.stale_running_count,
                 "active_locks": snap.active_locks,
                 "sources": [

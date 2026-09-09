@@ -112,10 +112,12 @@ LEAD_DELIVERY_STATES = frozenset(
         "sent",
         "provider_accepted",
         "provider_identified",
+        "unresolved",
         "unresolved_historical",
     }
 )
 LEAD_DELIVERY_PROVIDER_STATES = frozenset({"provider_accepted", "provider_identified", "sent"})
+LEAD_DELIVERY_PROVISIONAL_STATES = frozenset({"unresolved"})
 LEAD_DELIVERY_REASON_EDITORIAL_DISABLED = "EDITORIAL_NOTIFICATIONS_DISABLED"
 LEAD_DELIVERY_REASON_BASELINE = "BASELINE"
 LEAD_DELIVERY_REASON_STALE_FRESHNESS = "STALE_OR_UNKNOWN_FRESHNESS"
@@ -126,8 +128,15 @@ LEAD_DELIVERY_REASON_PROVIDER_ERROR = "PROVIDER_ERROR"
 LEAD_DELIVERY_REASON_PROVIDER_ACCEPTED = "PROVIDER_ACCEPTED_WITHOUT_MESSAGE_ID"
 LEAD_DELIVERY_REASON_PROVIDER_IDENTIFIED = "PROVIDER_MESSAGE_IDENTIFIED"
 LEAD_DELIVERY_REASON_UNRESOLVED_HISTORICAL = "PRE_TERMINAL_STATE_CONTRACT"
+LEAD_DELIVERY_REASON_INGEST_UNFINALIZED = "INGEST_UNFINALIZED"
 LEAD_DELIVERY_REASON_RUN_MISSING_OUTCOME = "RUN_COMPLETION_MISSING_OUTCOME"
 LEAD_DELIVERY_REASON_ALREADY_NOTIFIED = "ALREADY_NOTIFIED"
+LEAD_DELIVERY_PROVISIONAL_REASONS = frozenset(
+    {
+        LEAD_DELIVERY_REASON_INGEST_UNFINALIZED,
+        LEAD_DELIVERY_REASON_RUN_MISSING_OUTCOME,
+    }
+)
 LEAD_DELIVERY_REASON_CORRELATION_WATCH_MISSING = "CORRELATION_WATCH_MISSING"
 LEAD_DELIVERY_REASON_CORRELATION_NOT_LINKED = "CORRELATION_NOT_LINKED"
 
@@ -167,7 +176,8 @@ class SpecialistLead(Base):
         CheckConstraint(
             "delivery_state IS NULL OR delivery_state IN ("
             "'sent','failed','gated',"
-            "'provider_accepted','provider_identified','unresolved_historical')",
+            "'provider_accepted','provider_identified',"
+            "'unresolved','unresolved_historical')",
             name="ck_specialist_lead_delivery_state",
         ),
     )
@@ -231,10 +241,10 @@ class SpecialistLead(Base):
 
     # STD-UI-COM-011 + 2026-09-09 terminal-state contract: coarse delivery
     # outcome so diagnosis can distinguish gated / failed / provider-accepted
-    # / provider-identified / unresolved-historical. NULL is only legal for
-    # in-flight ORM objects before finalize; persisted new leads must not
-    # remain NULL. Legacy 'sent' means transport-accepted, never operator-
-    # visible. notified_at remains the early-warning dedup guard.
+    # / provider-identified / unresolved / unresolved-historical. ingest_candidate
+    # writes unresolved/INGEST_UNFINALIZED on the same INSERT as the lead, so a
+    # crash after persist cannot leave NULL. Notify overwrites that placeholder.
+    # Legacy 'sent' means transport-accepted, never operator-visible.
     delivery_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     delivery_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     delivery_receipt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

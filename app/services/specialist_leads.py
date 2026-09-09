@@ -16,9 +16,11 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.time import ensure_utc
-from app.models import CollectorRun, SourceObservation, SpecialistLead, Watch
+from app.models import CollectorRun, DeliveryReceipt, SourceObservation, SpecialistLead, Watch
 from app.models.specialist_lead import (
     LEAD_DELIVERY_PROVIDER_STATES,
+    LEAD_DELIVERY_PROVISIONAL_REASONS,
+    LEAD_DELIVERY_PROVISIONAL_STATES,
     LEAD_DELIVERY_REASON_ALREADY_NOTIFIED,
     LEAD_DELIVERY_REASON_BASELINE,
     LEAD_DELIVERY_REASON_BELOW_CONFIDENCE,
@@ -26,6 +28,7 @@ from app.models.specialist_lead import (
     LEAD_DELIVERY_REASON_CORRELATION_WATCH_MISSING,
     LEAD_DELIVERY_REASON_DUPLICATE_REF,
     LEAD_DELIVERY_REASON_EDITORIAL_DISABLED,
+    LEAD_DELIVERY_REASON_INGEST_UNFINALIZED,
     LEAD_DELIVERY_REASON_NOTIFIER_UNAVAILABLE,
     LEAD_DELIVERY_REASON_PROVIDER_ACCEPTED,
     LEAD_DELIVERY_REASON_PROVIDER_ERROR,
@@ -247,6 +250,9 @@ class SpecialistLeadService:
             freshness_evaluated_at=now,
             collector_run_id=collector_run_id,
         )
+        self.record_lead_delivery_outcome(
+            lead, "unresolved", LEAD_DELIVERY_REASON_INGEST_UNFINALIZED
+        )
         self.session.add(lead)
         self.session.flush()
         logger.info(
@@ -270,17 +276,29 @@ class SpecialistLeadService:
         """Single writer for specialist-lead delivery outcomes.
 
         First terminal determination wins. Provider-accepted/identified (and
-        legacy `sent`) are never downgraded to gated/failed. Runners must
-        not assign delivery_state ad hoc.
+        legacy `sent`) are never downgraded to gated/failed. Ingest-time
+        `unresolved` / INGEST_UNFINALIZED is provisional and is overwritten
+        by the real notify outcome. Runners must not assign delivery_state
+        ad hoc.
         """
         if state not in LEAD_DELIVERY_STATES:
             raise ValueError(f"unsupported lead delivery state: {state}")
         if not reason:
             raise ValueError("lead delivery outcome requires a machine-readable reason")
         existing = lead.delivery_state
+        provisional = existing in LEAD_DELIVERY_PROVISIONAL_STATES or (
+            lead.delivery_reason in LEAD_DELIVERY_PROVISIONAL_REASONS
+        )
         if existing in LEAD_DELIVERY_PROVIDER_STATES and state not in LEAD_DELIVERY_PROVIDER_STATES:
             return
-        if existing is not None and not overwrite and existing != state:
+        identifying_upgrade = existing == "provider_accepted" and state == "provider_identified"
+        if (
+            existing is not None
+            and not overwrite
+            and not provisional
+            and not identifying_upgrade
+            and existing != state
+        ):
             if lead.delivery_reason is None:
                 lead.delivery_reason = reason
             if receipt is not None and lead.delivery_receipt_id is None:
@@ -303,9 +321,25 @@ class SpecialistLeadService:
             return "provider_identified", LEAD_DELIVERY_REASON_PROVIDER_IDENTIFIED
         return "provider_accepted", LEAD_DELIVERY_REASON_PROVIDER_ACCEPTED
 
+    def _already_notified_outcome(self, lead: SpecialistLead) -> tuple[str, str]:
+        """Dedupe outcome for a lead whose notified_at is already set.
+
+        `provider_identified` is only used when a stored receipt actually
+        has a provider message ID. HTTP-accepted-without-id is
+        `provider_accepted`. Existing provider/sent states are left to
+        first-wins in record_lead_delivery_outcome.
+        """
+        receipt = None
+        if lead.delivery_receipt_id is not None:
+            receipt = self.session.get(DeliveryReceipt, lead.delivery_receipt_id)
+        if receipt is not None and receipt.provider_message_id:
+            return "provider_identified", LEAD_DELIVERY_REASON_ALREADY_NOTIFIED
+        return "provider_accepted", LEAD_DELIVERY_REASON_ALREADY_NOTIFIED
+
     def ensure_run_leads_have_outcomes(self, collector_run_id: int) -> dict:
         """Safety net: any lead created in this run that still has no
-        terminal state is recorded FAILED. Does not fail the collector run.
+        finalized outcome (NULL or ingest-time unresolved) is recorded
+        FAILED. Does not fail the collector run.
         """
         leads = (
             self.session.query(SpecialistLead)
@@ -314,7 +348,11 @@ class SpecialistLeadService:
         )
         repaired: list[int] = []
         for lead in leads:
-            if lead.delivery_state is None:
+            still_open = lead.delivery_state is None or (
+                lead.delivery_state == "unresolved"
+                and lead.delivery_reason == LEAD_DELIVERY_REASON_INGEST_UNFINALIZED
+            )
+            if still_open:
                 self.record_lead_delivery_outcome(
                     lead, "failed", LEAD_DELIVERY_REASON_RUN_MISSING_OUTCOME, overwrite=True
                 )
@@ -463,9 +501,7 @@ class SpecialistLeadService:
             self.record_lead_delivery_outcome(lead, "gated", LEAD_DELIVERY_REASON_STALE_FRESHNESS)
             return False
         if lead.notified_at is not None:
-            self.record_lead_delivery_outcome(
-                lead, "provider_identified", LEAD_DELIVERY_REASON_ALREADY_NOTIFIED
-            )
+            self.record_lead_delivery_outcome(lead, *self._already_notified_outcome(lead))
             return False
         if lead.confidence < settings.discord_specialist_min_confidence:
             self.record_lead_delivery_outcome(lead, "gated", LEAD_DELIVERY_REASON_BELOW_CONFIDENCE)
@@ -600,7 +636,10 @@ class SpecialistLeadService:
         state, reason = self._outcome_from_attempt(attempt)
         # Correlation must not clobber an already-recorded early-warning
         # outcome. Receipts still capture the follow-up attempt.
-        if lead.delivery_state is None:
+        if lead.delivery_state is None or (
+            lead.delivery_state == "unresolved"
+            and lead.delivery_reason == LEAD_DELIVERY_REASON_INGEST_UNFINALIZED
+        ):
             self.record_lead_delivery_outcome(lead, state, reason, receipt=receipt)
         elif receipt is not None and lead.delivery_receipt_id is None:
             lead.delivery_receipt_id = receipt.id

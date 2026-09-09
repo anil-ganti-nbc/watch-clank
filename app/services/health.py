@@ -143,6 +143,7 @@ class HealthSnapshot:
     latest_specialist_lead_at: str | None
     specialist_leads_unresolved_historical: int = 0
     specialist_leads_missing_delivery_outcome: int = 0
+    specialist_leads_ingest_unfinalized: int = 0
     # 2026-08-24 repair: explicit EMPTY/BASELINING/ESTABLISHED state so a
     # fresh database can never silently present itself as established
     # operation (see app.services.history).
@@ -399,6 +400,15 @@ def get_health_snapshot(session: Session, settings: Settings, *, engine: Engine 
         .scalar()
         or 0
     )
+    ingest_unfinalized_leads = (
+        session.query(func.count(SpecialistLead.id))
+        .filter(
+            SpecialistLead.delivery_state == "unresolved",
+            SpecialistLead.delivery_reason == "INGEST_UNFINALIZED",
+        )
+        .scalar()
+        or 0
+    )
 
     sources = [_source_health(session, cid) for cid in KNOWN_COLLECTORS]
 
@@ -435,6 +445,7 @@ def get_health_snapshot(session: Session, settings: Settings, *, engine: Engine 
         ),
         specialist_leads_unresolved_historical=unresolved_historical_leads,
         specialist_leads_missing_delivery_outcome=missing_delivery_leads,
+        specialist_leads_ingest_unfinalized=ingest_unfinalized_leads,
         history_state=h_state,
         sources=sources,
         active_locks=active_locks,
