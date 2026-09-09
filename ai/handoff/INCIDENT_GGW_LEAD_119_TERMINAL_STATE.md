@@ -38,24 +38,27 @@ Observed at 2026-09-09 evening recon (still account again at 48h/72h review):
 
 **Interstitial buckets** (T0–T_armed and T_armed–T_first_018) must be re-counted at review. If either is ever non-zero, those rows are **not** 018-process evidence: schema may already be 018, but no 018 collector had started. Report them separately; do not fold into the soak pass/fail numerator.
 
-48h / 72h review walls stay **11 Sep / 12 Sep 13:28 UTC** (measured from T0, as previously accepted).
-
-Lead 119 and the other 110 `unresolved_historical` / `PRE_TERMINAL_STATE_CONTRACT` rows stay unresolved until individually evidenced. Do not backfill them as sent or gated.
+Lead 119 remains **historical evidence** of the null-path class and of the any-overlap grouped-ref mechanism. Its **actual disposition is unresolved** (`unresolved_historical` / `PRE_TERMINAL_STATE_CONTRACT`, `notified_at` NULL). Do not backfill it, or the other 110 historical rows, as sent or gated.
 
 ## Review windows
 
-| Window | Earliest review |
-|---|---|
-| 48-hour | **2026-09-11 13:28 UTC** |
-| 72-hour | **2026-09-12 13:28 UTC** |
+Reviews at **13:28 UTC** are **preliminary**. They are measured from T0 backup and **precede** 48 / 72 hours of actual 018 execution.
 
-Do not poll sources solely to force Discord. Natural specialist timer traffic only.
+| Kind | 48-hour end | 72-hour end | Label |
+|---|---|---|---|
+| T0 backup (13:28:23Z) | **2026-09-11 13:28 UTC** | **2026-09-12 13:28 UTC** | **Preliminary** — not a full process-based window |
+| Process-based (T_first_018 `pipeline_start`) | **2026-09-11 13:32:50.213765 UTC** | **2026-09-12 13:32:50.213765 UTC** | Full 018 execution window |
+| GGW-specific (first GGW 018 run 7811) | **2026-09-11 14:00:04 UTC** | **2026-09-12 14:00:04 UTC** | Full GGW 018 execution window |
+
+Do not poll sources solely to force Discord. Natural specialist timer traffic only. A preliminary review may record observed outcomes so far; it cannot certify a full 48h / 72h of 018 process time.
 
 ## What a passing 018 soak proves
 
-Observed post-018 behaviour on newly created leads: non-null terminal state after a completed source run, machine-readable gate reasons, receipts for attempted sends (including failures and correlation follow-ups), no duplicate *same-purpose* resend, no unexpected collector failures.
+Observed 018 outcomes on post-T_first_018 leads after a completed source run: non-null terminal state, machine-readable gate reasons, receipts for *recorded* sends that reached `_deliver_lead_alert` (including failures and correlation follow-ups), no duplicate *same-purpose* resend, no unexpected collector failures.
 
-It does **not** prove crash-after-insert cannot leave NULL (that is 019). It does **not** close this incident.
+A soak pass **explicitly retains** the receipt blind spot and the known any-overlap grouped-ref defect. **Neither** zero overlap instances **nor** zero new null states establishes overall delivery correctness. Zero new nulls is a necessary cohort check only. Zero `DUPLICATE_REFERENCE_ALREADY_ALERTED` rows does not clear the overlap defect.
+
+It does **not** prove crash-after-insert cannot leave NULL (that is 019). It does **not** close this incident. It does **not** resolve lead 119’s actual disposition.
 
 ## What 019 still owes after 018 soak
 
@@ -92,7 +95,7 @@ WHERE created_at >= '2026-09-09 13:32:50'
 
 Must be 0. Also count the two interstitial windows; if they contain NULLs, report them as non-018-process anomalies, not as soak-cohort failures.
 
-Pre-T0 NULLs were backfilled to `unresolved_historical` and are out of this check.
+Zero new nulls does **not** establish overall delivery correctness. Pre-T0 NULLs were backfilled to `unresolved_historical` and are out of this check.
 
 ### 3. Reasons on new gated/failed/unresolved rows
 
@@ -147,13 +150,19 @@ Do not use the pre-T0 fleet receipt total (175) as the soak numerator. Do not tr
 
 **Status: known defect in live 018 (`1b80b8d`).** Unchanged: `notify_new_lead` gates the entire lead when `reference_candidates` intersects **any** other lead with `notified_at` set (`any(... intersection ...)`, then `DUPLICATE_REFERENCE_ALREADY_ALERTED`). It does not notify the remainder set. Undeployed 019 does not fix this.
 
-This is a sign-off defect **even if the natural soak never exercises it.** Do not treat “no DUPLICATE_REFERENCE_ALREADY_ALERTED rows” as proof the grouped-ref path is healthy.
+This is a sign-off defect **even if the natural soak never exercises it.** Do not treat “no DUPLICATE_REFERENCE_ALREADY_ALERTED rows” as proof the grouped-ref path is healthy. Zero overlap instances do **not** establish overall delivery correctness.
 
-**Lead 119 / Mudmaster:** lead `113` (`2026-08-29`, `delivery_state=sent`, `notified_at` set) already carried `GWF-D1000BC-1JF`. Lead `119` (`2026-08-31`) is the grouped GGW story `GWF-D1000BC-1JF` + **`GWG-B1000-1A3JF`**. 119’s recorded outcome is `unresolved_historical` (notify never left a terminal state — the original null-path bug), so we **cannot** prove 018 duplicate-gated it. We **can** prove that if notify had run under 018’s overlap rule, Frogman overlap with 113 would have suppressed the **whole** lead, including the new Mudmaster SKU. That is the lost-Mudmaster mechanism: set-overlap, not missing parser extraction.
+**Lead 119 / Mudmaster:** lead `113` (`2026-08-29`, `delivery_state=sent`, `notified_at` set) already carried `GWF-D1000BC-1JF`. Lead `119` (`2026-08-31`) is the grouped GGW story `GWF-D1000BC-1JF` + **`GWG-B1000-1A3JF`**. 119 is **historical evidence** of this mechanism; its **actual disposition remains unresolved** (`unresolved_historical`; notify never left a terminal state — the original null-path bug). We **cannot** prove 018 duplicate-gated that row. We **can** prove that if notify had run under 018’s overlap rule, Frogman overlap with 113 would have suppressed the **whole** lead, including the new Mudmaster SKU. That is the lost-Mudmaster mechanism: set-overlap, not missing parser extraction.
 
 Dedup remains per **notification purpose** (early-warning vs correlation must not suppress each other).
 
 At review, still run the remainder-set check on any soak-cohort `DUPLICATE_REFERENCE_ALREADY_ALERTED` rows. A non-empty remainder is an **instance** of this known defect, not a surprise. Same-purpose resend of an already `notified_at` lead must still be zero extra sends.
+
+## Next independent repair (not this soak; not 019)
+
+**Partial-reference deduplication.** An already-alerted Frogman must not suppress a newly introduced Mudmaster in the same lead. Preserve the **full source record**. Evaluate notification eligibility **per reference and per purpose**. Do not drop the remainder set, and do not rewrite historical lead 119 into a fabricated sent/gated outcome.
+
+This repair is independent of 019 (insert-time non-null). Do not start it during 018 soak. Do not fold it into an 019 deploy. Production stays on 018 until this soak’s process-based windows are reviewed.
 
 ### 6. Collector health (unchanged scope)
 
@@ -167,10 +176,11 @@ WHERE delivery_state = 'unresolved_historical'
   AND delivery_reason = 'PRE_TERMINAL_STATE_CONTRACT';
 ```
 
-Must remain 111 (or the pre-soak count if a human later evidenced individual rows — none should be auto-converted). Lead 119: still no `notified_at`, no fabricated receipt.
+Must remain 111 (or the pre-soak count if a human later evidenced individual rows — none should be auto-converted). Lead 119: still no `notified_at`, no fabricated receipt; historical evidence only; actual disposition unresolved.
 
 ## Sign-off language
 
-- **018 soak pass:** “Observed 018 behaviour on post-T_first_018 leads is acceptable, **except** the recorded any-overlap grouped-ref defect, which remains open regardless of soak traffic.” Incident stays **OPEN**. Interstitial buckets must be zero or explained.
+- **Preliminary review (11/12 Sep 13:28 UTC):** snapshot of observed 018 outcomes so far. Not a full 48h / 72h of 018 process time. Cannot certify the process-based or GGW-specific windows.
+- **018 soak pass (after process-based ends 11/12 Sep 13:32:50.213765 UTC; GGW-specific 11/12 Sep 14:00:04 UTC):** “Observed 018 outcomes on post-T_first_018 leads are acceptable **while retaining** the receipt blind spot and the known any-overlap grouped-ref defect.” Neither zero overlap instances nor zero new nulls establishes overall delivery correctness. Incident stays **OPEN**. Lead 119 stays historical with unresolved disposition. Interstitial buckets must be zero or explained.
 - **018 soak fail / inconclusive:** do not deploy 019; do not close the incident.
-- **Incident close:** only after 019 is deployed from the resolved SHA, verified, its own observation window is recorded separately, **and** the grouped-ref remainder defect is either fixed or explicitly accepted as remaining design debt.
+- **Incident close:** only after 019 is deployed from the resolved SHA, verified, its own observation window is recorded separately, **and** the partial-reference dedup repair is either shipped or explicitly accepted as remaining design debt. Lead 119 is not closed by soak silence.
