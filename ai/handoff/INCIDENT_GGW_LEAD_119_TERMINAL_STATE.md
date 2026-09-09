@@ -13,13 +13,32 @@ Great G-Shock World lead 119 (`GWG-B1000-1A3JF` + `GWF-D1000BC-1JF`) persisted w
 
 An earlier report invented a full hash for `6fd1042`. Discard it. The only accepted 019 SHA is the `git rev-parse 6fd1042` value above.
 
-## Verified deployment cutoff
+## Deployment clocks (do not collapse)
 
-SQLite-safe backup immediately before 018 migrate:
+The original soak “cutoff” was a **backup timestamp**, not migrate-complete and not first 018 process start. Those three instants are different. Sign-off must count leads in each interval separately.
 
-`/home/anilganti/watch-clank-backups/watch_clank.db.pre-018-1b80b8d-20260909T132823Z`
+| Instant | UTC | Evidence |
+|---|---|---|
+| **T0 backup** | `2026-09-09T13:28:23Z` (filename); file closed `13:28:27Z` | `~/watch-clank-backups/watch_clank.db.pre-018-1b80b8d-20260909T132823Z` |
+| **T_schema** | after T0, **no later than** `13:29:34Z` | Alembic `018` applied in a one-shot container. No migrate log line with a clock was retained; the next durable host write is docker.env. |
+| **T_armed** | `2026-09-09T13:29:34Z` | `~/.config/watch-clank/docker.env` mtime; user systemd **Started** every enabled Watch Clank timer. Image OCI revision `1b80b8d532cd6f689df14d940240d4ac3bbfb6db`. |
+| **T_first_018** | `2026-09-09T13:32:47Z` unit start; `13:32:50.213765Z` `pipeline_start` | `watch-clank-casio-multi.service` → `collector_runs.id=7796`. First specialist 018 run among the same burst: `gear_patrol_rss` `7799` at `13:32:50.619500Z`. First Great G-Shock World 018 run: `7811` at `14:00:04.886873Z`. |
 
-**Cutoff:** `2026-09-09T13:28:23Z`. Soak cohort = specialist leads with `created_at >=` that instant. Legacy gated/`sent` rows before the cutoff may lack `delivery_reason` / `delivery_receipt_id`; those rows are not 018 sign-off evidence.
+Last pre-018 writer: Horology Sentinel run `7795` completed `13:23:53Z`. Collectors were stopped during backup/migrate.
+
+Observed at 2026-09-09 evening recon (still account again at 48h/72h review):
+
+| Interval | Lead `created_at` | Count then |
+|---|---|---|
+| T0 ≤ t < T_armed | backup-to-armed | **0** |
+| T_armed ≤ t < T_first_018 | armed, no 018 process yet | **0** |
+| t ≥ T_first_018 | 018 soak cohort | **4** (will grow) |
+
+**018 soak cohort for sign-off** = `created_at >= 2026-09-09 13:32:50`.
+
+**Interstitial buckets** (T0–T_armed and T_armed–T_first_018) must be re-counted at review. If either is ever non-zero, those rows are **not** 018-process evidence: schema may already be 018, but no 018 collector had started. Report them separately; do not fold into the soak pass/fail numerator.
+
+48h / 72h review walls stay **11 Sep / 12 Sep 13:28 UTC** (measured from T0, as previously accepted).
 
 Lead 119 and the other 110 `unresolved_historical` / `PRE_TERMINAL_STATE_CONTRACT` rows stay unresolved until individually evidenced. Do not backfill them as sent or gated.
 
@@ -47,7 +66,7 @@ It does **not** prove crash-after-insert cannot leave NULL (that is 019). It doe
 
 ## 018 soak sign-off criteria (cohort-scoped)
 
-All counts below are **created after the cutoff**, unless labelled historical.
+All counts below are **created after T_first_018 (`2026-09-09 13:32:50`)**, unless labelled historical or interstitial.
 
 ### 1. Sample is real delivery-path traffic
 
@@ -67,52 +86,74 @@ A pass may still be recorded for *observed* paths if others are honestly marked 
 
 ```sql
 SELECT COUNT(*) FROM specialist_leads
-WHERE created_at >= '2026-09-09 13:28:23'
+WHERE created_at >= '2026-09-09 13:32:50'
   AND delivery_state IS NULL;
 ```
 
-Must be 0. Pre-cutoff NULLs were backfilled to `unresolved_historical` and are out of this check.
+Must be 0. Also count the two interstitial windows; if they contain NULLs, report them as non-018-process anomalies, not as soak-cohort failures.
+
+Pre-T0 NULLs were backfilled to `unresolved_historical` and are out of this check.
 
 ### 3. Reasons on new gated/failed/unresolved rows
 
 ```sql
 SELECT COUNT(*) FROM specialist_leads
-WHERE created_at >= '2026-09-09 13:28:23'
+WHERE created_at >= '2026-09-09 13:32:50'
   AND delivery_state IN ('gated','failed','unresolved','unresolved_historical')
   AND (delivery_reason IS NULL OR delivery_reason = '');
 ```
 
 Must be 0. Do **not** run this against pre-cutoff `gated` rows.
 
-### 4. Notification attempts and receipts (not only `provider_*`)
+### 4. Notification attempts vs receipts (receipts are incomplete)
 
-An attempt is a `delivery_receipts` row for `entity_type='SPECIALIST_LEAD'` with `first_attempt_at` or `created_at` ≥ cutoff. Purposes are separate: `lead_early_warning` and `lead_correlation`. Count **FAILED / ATTEMPTED / PROVIDER_ACCEPTED / PROVIDER_IDENTIFIED**. Checking only lead `delivery_state IN ('provider_accepted','provider_identified')` misses failed sends and correlation follow-ups.
+Receipts **record** attempts that reached `DeliveryReceiptService.record`. They **cannot prove** every intended send produced a receipt.
+
+**018 dispatch path (code, `1b80b8d`):** `_deliver_lead_alert` calls `send_editorial_alert` then always `receipts.record` if that function returns. Real `DiscordNotifier._post_detailed` swallows HTTP exceptions and returns a `DeliveryAttempt` (never raises). Tests: successful send and `send=False` / 500 both persist a receipt (`tests/test_specialist_lead_terminal_state.py`).
+
+**Known receipt-less branches (expected, not soak failures):**
+
+- Policy gates (baseline, stale, editorial disabled, confidence floor, duplicate-ref) never call `_deliver_lead_alert`.
+- `NOTIFIER_UNAVAILABLE` because `editorial_enabled` is false (no webhook) returns before HTTP.
+
+**Blind spot (label explicitly at sign-off):**
+
+- `notify_new_lead` / `notify_correlation` wrap the inner path in `except Exception` and write `failed` / `NOTIFIER_UNAVAILABLE` **without** a receipt if anything raises *before* `receipts.record` (e.g. `get_source_profile`, `format_*_alert`, or a mock/`MagicMock` notifier that raises). There is **no independent attempt table**. Host structlog (`lead_early_warning_failed`, `discord_post_failed`, `discord_post_exception`) is the only other dispatch evidence and is not a durable ledger.
+- Therefore: receipts ⊆ recorded attempts. Intended-but-unrecorded attempts are **unobservable from SQLite alone**. Soak pass language is “every *recorded* send/fail that reached `_deliver_lead_alert` has a receipt,” not “every attempt has a receipt.”
+
+Reconcile at review:
 
 ```sql
+-- recorded attempts (both purposes, all lifecycle states)
 SELECT purpose, lifecycle_state, COUNT(*)
 FROM delivery_receipts
 WHERE entity_type = 'SPECIALIST_LEAD'
-  AND created_at >= '2026-09-09 13:28:23'
+  AND created_at >= '2026-09-09 13:32:50'
 GROUP BY 1, 2;
+
+-- failed cohort leads with no receipt (blind-spot candidates)
+SELECT l.id, l.delivery_reason
+FROM specialist_leads l
+WHERE l.created_at >= '2026-09-09 13:32:50'
+  AND l.delivery_state = 'failed'
+  AND l.delivery_receipt_id IS NULL;
 ```
 
-Join check: every soak-cohort lead with `delivery_state='failed'` and reason `PROVIDER_ERROR` or `NOTIFIER_UNAVAILABLE` after a send was attempted must have a matching receipt for that purpose (or an explicit `NOTIFIER_UNAVAILABLE` with no webhook — no receipt is then expected). Every `provider_accepted` / `provider_identified` cohort lead must have `delivery_receipt_id` and a receipt row. Receipt **count** after cutoff must equal new attempt rows, not the pre-cutoff fleet total of 175.
+Every cohort `provider_accepted` / `provider_identified` lead must have `delivery_receipt_id`. `PROVIDER_ERROR` after `_deliver_lead_alert` must have a FAILED receipt. `NOTIFIER_UNAVAILABLE` with no receipt is either the expected no-webhook gate or the exception blind spot — distinguish via reason + logs, do not treat as a silent pass.
 
-Do not treat HTTP accepted as operator-visible.
+Do not use the pre-T0 fleet receipt total (175) as the soak numerator. Do not treat HTTP accepted as operator-visible.
 
-### 5. Duplicates: purpose + newly introduced references
+### 5. Duplicates: known 018 defect (any-overlap suppresses the whole lead)
 
-Dedup is per **notification purpose**. Early-warning and correlation must not suppress each other.
+**Status: known defect in live 018 (`1b80b8d`).** Unchanged: `notify_new_lead` gates the entire lead when `reference_candidates` intersects **any** other lead with `notified_at` set (`any(... intersection ...)`, then `DUPLICATE_REFERENCE_ALREADY_ALERTED`). It does not notify the remainder set. Undeployed 019 does not fix this.
 
-Set-overlap gating (`DUPLICATE_REFERENCE_ALREADY_ALERTED`) is **not** an automatic pass. For each soak-cohort lead with that reason:
+This is a sign-off defect **even if the natural soak never exercises it.** Do not treat “no DUPLICATE_REFERENCE_ALREADY_ALERTED rows” as proof the grouped-ref path is healthy.
 
-1. Take its `reference_candidates`.
-2. Subtract the union of candidates on *earlier* FRESH leads that have `notified_at` set (same early-warning purpose).
-3. If the remainder is **non-empty**, a grouped story introduced a new reference that 018 suppressed. Record as a **fail** of the “no lost new reference” criterion, even if no second Discord send occurred.
+**Lead 119 / Mudmaster:** lead `113` (`2026-08-29`, `delivery_state=sent`, `notified_at` set) already carried `GWF-D1000BC-1JF`. Lead `119` (`2026-08-31`) is the grouped GGW story `GWF-D1000BC-1JF` + **`GWG-B1000-1A3JF`**. 119’s recorded outcome is `unresolved_historical` (notify never left a terminal state — the original null-path bug), so we **cannot** prove 018 duplicate-gated it. We **can** prove that if notify had run under 018’s overlap rule, Frogman overlap with 113 would have suppressed the **whole** lead, including the new Mudmaster SKU. That is the lost-Mudmaster mechanism: set-overlap, not missing parser extraction.
 
-A grouped GGW-class item that repeats one old SKU and adds a new SKU must not be signed off as healthy dedup.
+Dedup remains per **notification purpose** (early-warning vs correlation must not suppress each other).
 
-Same-purpose resend of an already `notified_at` lead must still be zero extra sends.
+At review, still run the remainder-set check on any soak-cohort `DUPLICATE_REFERENCE_ALREADY_ALERTED` rows. A non-empty remainder is an **instance** of this known defect, not a surprise. Same-purpose resend of an already `notified_at` lead must still be zero extra sends.
 
 ### 6. Collector health (unchanged scope)
 
@@ -130,6 +171,6 @@ Must remain 111 (or the pre-soak count if a human later evidenced individual row
 
 ## Sign-off language
 
-- **018 soak pass:** “Observed 018 behaviour on post-cutoff leads is acceptable.” Incident stays **OPEN**.
+- **018 soak pass:** “Observed 018 behaviour on post-T_first_018 leads is acceptable, **except** the recorded any-overlap grouped-ref defect, which remains open regardless of soak traffic.” Incident stays **OPEN**. Interstitial buckets must be zero or explained.
 - **018 soak fail / inconclusive:** do not deploy 019; do not close the incident.
-- **Incident close:** only after 019 is deployed from the resolved SHA, verified, and its own observation window is recorded separately from this 018 soak.
+- **Incident close:** only after 019 is deployed from the resolved SHA, verified, its own observation window is recorded separately, **and** the grouped-ref remainder defect is either fixed or explicitly accepted as remaining design debt.
