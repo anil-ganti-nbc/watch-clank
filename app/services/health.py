@@ -141,6 +141,8 @@ class HealthSnapshot:
     latest_observation_at: str | None
     latest_event_at: str | None
     latest_specialist_lead_at: str | None
+    specialist_leads_unresolved_historical: int = 0
+    specialist_leads_missing_delivery_outcome: int = 0
     # 2026-08-24 repair: explicit EMPTY/BASELINING/ESTABLISHED state so a
     # fresh database can never silently present itself as established
     # operation (see app.services.history).
@@ -385,6 +387,18 @@ def get_health_snapshot(session: Session, settings: Settings, *, engine: Engine 
     latest_obs = session.query(SourceObservation).order_by(SourceObservation.observed_at.desc()).first()
     latest_event = session.query(Event).order_by(Event.created_at.desc()).first()
     latest_lead = session.query(SpecialistLead).order_by(SpecialistLead.discovered_at.desc()).first()
+    unresolved_historical_leads = (
+        session.query(func.count(SpecialistLead.id))
+        .filter(SpecialistLead.delivery_state == "unresolved_historical")
+        .scalar()
+        or 0
+    )
+    missing_delivery_leads = (
+        session.query(func.count(SpecialistLead.id))
+        .filter(SpecialistLead.delivery_state.is_(None))
+        .scalar()
+        or 0
+    )
 
     sources = [_source_health(session, cid) for cid in KNOWN_COLLECTORS]
 
@@ -419,6 +433,8 @@ def get_health_snapshot(session: Session, settings: Settings, *, engine: Engine 
         latest_specialist_lead_at=(
             ensure_utc(latest_lead.discovered_at).isoformat() if latest_lead else None
         ),
+        specialist_leads_unresolved_historical=unresolved_historical_leads,
+        specialist_leads_missing_delivery_outcome=missing_delivery_leads,
         history_state=h_state,
         sources=sources,
         active_locks=active_locks,

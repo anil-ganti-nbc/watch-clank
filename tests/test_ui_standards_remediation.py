@@ -260,7 +260,9 @@ def test_lead_delivery_sent_records_state_and_time(db):
     assert sent is True
     assert notifier.send_editorial_alert.called
     assert lead.notified_at is not None
-    assert lead.delivery_state == "sent"
+    assert lead.delivery_state == "provider_accepted"
+    assert lead.delivery_reason == "PROVIDER_ACCEPTED_WITHOUT_MESSAGE_ID"
+    assert lead.delivery_receipt_id is not None
 
 
 def test_lead_delivery_failed_is_distinguishable_from_never_attempted(db):
@@ -277,6 +279,7 @@ def test_lead_delivery_gated_by_baseline(db):
     assert sent is False
     assert notifier.send_editorial_alert.called is False
     assert lead.delivery_state == "gated"
+    assert lead.delivery_reason == "BASELINE"
 
 
 def test_lead_sent_state_is_never_downgraded(db):
@@ -287,6 +290,9 @@ def test_lead_sent_state_is_never_downgraded(db):
 
 
 def test_lead_delivery_state_defaults_to_never_attempted(db):
+    """Raw ORM insert without notify remains NULL — that is the historical
+    hole the terminal-state contract closes on the ingest/notify path, and
+    the migration remediates for already-persisted rows."""
     lead = _make_lead(db)
     assert lead.delivery_state is None
     assert lead.notified_at is None
@@ -486,7 +492,7 @@ def test_correlation_followup_sent_records_state_without_touching_notified_at(db
     with patch("app.services.specialist_leads.get_settings", return_value=_settings_patch()):
         sent = service.notify_correlation(lead, notifier=notifier)
     assert sent is True
-    assert lead.delivery_state == "sent"
+    assert lead.delivery_state == "provider_accepted"
     assert lead.notified_at is None, "notified_at is the early-warning dedup guard; follow-up must not set it"
 
 
@@ -503,7 +509,8 @@ def test_correlation_followup_gated_and_failed_states(db):
     service = SpecialistLeadService(db)
     with patch("app.services.specialist_leads.get_settings", return_value=_settings_patch()):
         assert service.notify_correlation(lead, notifier=disabled) is False
-    assert lead.delivery_state == "gated"
+    assert lead.delivery_state == "failed"
+    assert lead.delivery_reason == "NOTIFIER_UNAVAILABLE"
 
     # failed: attempted, Discord did not accept
     w2 = _make_watch(db, reference_raw="T2N902", reference_canonical="T2N902")
@@ -515,6 +522,7 @@ def test_correlation_followup_gated_and_failed_states(db):
     with patch("app.services.specialist_leads.get_settings", return_value=_settings_patch()):
         assert service.notify_correlation(lead2, notifier=failing) is False
     assert lead2.delivery_state == "failed"
+    assert lead2.delivery_reason == "PROVIDER_ERROR"
     assert lead2.notified_at is None
 
 
