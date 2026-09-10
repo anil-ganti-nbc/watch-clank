@@ -617,12 +617,30 @@ def test_news_without_model_creates_lead_not_fake_watch(db_session: Session, tmp
     assert out.get("new_watch") is False
 
 
+class _CapturingLogger:
+    """Deterministic stand-in for the structlog pipeline logger: records
+    (event, kwargs) pairs. caplog is unreliable here because setup_logging()
+    clears root handlers mid-process."""
+
+    def __init__(self):
+        self.records = []
+
+    def info(self, event, **kw):
+        self.records.append({"event": event, **kw})
+
+
 def test_multi_source_news_success_catalog_blocked(db_session: Session, tmp_settings: Settings, monkeypatch):
+    """2026-09-10 incident repair: intl news SUCCESS + JP discovery BLOCKED
+    => parent PARTIAL, the blocked component persisted explicitly (components
+    + component_failures + status_reason), and one terminal structured
+    component record logged. failure_count stays item-level (0 here) and must
+    NOT be the thing that carries component health."""
+    import logging
     from unittest.mock import patch
 
-    from app.collectors.base import CollectorRunResult, FetchResult
+    from app.collectors.base import CollectorRunResult
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
 
@@ -650,27 +668,51 @@ def test_multi_source_news_success_catalog_blocked(db_session: Session, tmp_sett
         r.metadata["discovered_count"] = len(items)
         return r
 
-    def cat_run(self, *, max_items=None, known_product_urls=None, discovery_urls=None):
+    def jp_run_blocked(self, *, max_items=None, known_product_urls=None, sitemap_payload=None):
         r = CollectorRunResult(
-            collector_id="casio_japan",
-            collector_version="0.2.0",
-            region="JP",
-            trust_score=100.0,
+            collector_id="casio_jp_sitemap", collector_version="0.1.0", region="JP", trust_score=70.0
         )
         r.metadata["component_status"] = "BLOCKED"
         r.metadata["discovery_fetches"] = [
-            {"url": "x", "status": 403, "success": False, "blocked": True}
+            {"url": "https://www.casio.com/jp/sitemap/watches.xml", "status": 403, "success": False, "blocked": True}
         ]
         return r
 
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
-    with patch.object(CasioIntlNewsCollector, "run", news_run), patch.object(CasioJapanCollector, "run", cat_run):
+    captured = _CapturingLogger()
+    monkeypatch.setattr("app.services.pipeline.logger", captured)
+    with (
+        patch.object(CasioIntlNewsCollector, "run", news_run),
+        patch.object(CasioJPSitemapCollector, "run", jp_run_blocked),
+    ):
         run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
     assert run.status == "PARTIAL"
     assert run.summary_metadata["components"]["casio_intl_news"]["status"] == "SUCCESS"
-    assert run.summary_metadata["components"]["casio_japan"]["status"] == "BLOCKED"
+    assert run.summary_metadata["components"]["casio_jp_sitemap"]["status"] == "BLOCKED"
+    assert run.summary_metadata["components"]["casio_jp_sitemap"]["reason"] == "UPSTREAM_BLOCKED"
+    assert run.summary_metadata["component_failures"] == [
+        {
+            "component": "casio_jp_sitemap",
+            "status": "BLOCKED",
+            "reason": "UPSTREAM_BLOCKED",
+            "http_statuses": [403],
+        }
+    ]
+    assert "casio_jp_sitemap=BLOCKED" in run.summary_metadata["status_reason"]
+    # failure_count is item-level: the blocked DISCOVERY is not an item failure.
+    assert run.failure_count == 0
     from app.models import ReleaseLead
     assert db_session.scalars(select(ReleaseLead)).first() is not None
+    # one terminal structured component record reached the log, with the
+    # HTTP evidence summarized as status codes (never bodies)
+    terminal = [r for r in captured.records if r["event"] == "casio_component_finished"]
+    assert any(
+        r.get("component") == "casio_jp_sitemap"
+        and r.get("status") == "BLOCKED"
+        and r.get("reason") == "UPSTREAM_BLOCKED"
+        and r.get("http_statuses") == [403]
+        for r in terminal
+    )
 
 
 # --- 2026-08-15 incident: casio_multi could never emit an Event or notify --
@@ -700,8 +742,8 @@ def _casio_multi_new_product_mocks(list_html: bytes, detail: bytes):
         r.metadata["discovered_count"] = len(items)
         return r
 
-    def cat_run_blocked(self, *, max_items=None, known_product_urls=None, discovery_urls=None):
-        r = CollectorRunResult(collector_id="casio_japan", collector_version="0.2.0", region="JP", trust_score=100.0)
+    def cat_run_blocked(self, *, max_items=None, known_product_urls=None, sitemap_payload=None):
+        r = CollectorRunResult(collector_id="casio_jp_sitemap", collector_version="0.1.0", region="JP", trust_score=70.0)
         r.metadata["component_status"] = "BLOCKED"
         r.metadata["discovery_fetches"] = [{"url": "x", "status": 403, "success": False, "blocked": True}]
         return r
@@ -717,7 +759,7 @@ def test_scheduled_casio_new_product_creates_event_and_notifies(db_session: Sess
     from unittest.mock import patch
 
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.core.config import Settings
     from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
@@ -741,7 +783,7 @@ def test_scheduled_casio_new_product_creates_event_and_notifies(db_session: Sess
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     with (
         patch.object(CasioIntlNewsCollector, "run", news_run),
-        patch.object(CasioJapanCollector, "run", cat_run_blocked),
+        patch.object(CasioJPSitemapCollector, "run", cat_run_blocked),
         patch("app.services.pipeline.get_settings", return_value=configured),
         patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
     ):
@@ -764,7 +806,7 @@ def test_scheduled_casio_no_webhook_creates_event_no_crash(db_session: Session, 
     from unittest.mock import patch
 
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
@@ -780,7 +822,7 @@ def test_scheduled_casio_no_webhook_creates_event_no_crash(db_session: Session, 
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     with (
         patch.object(CasioIntlNewsCollector, "run", news_run),
-        patch.object(CasioJapanCollector, "run", cat_run_blocked),
+        patch.object(CasioJPSitemapCollector, "run", cat_run_blocked),
     ):
         run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
 
@@ -798,7 +840,7 @@ def test_scheduled_casio_notifier_failure_does_not_fail_the_run(db_session: Sess
     from unittest.mock import patch
 
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.core.config import Settings
     from app.models import CollectorRun, Event
     from app.services.pipeline import PipelineService
@@ -816,7 +858,7 @@ def test_scheduled_casio_notifier_failure_does_not_fail_the_run(db_session: Sess
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     with (
         patch.object(CasioIntlNewsCollector, "run", news_run),
-        patch.object(CasioJapanCollector, "run", cat_run_blocked),
+        patch.object(CasioJPSitemapCollector, "run", cat_run_blocked),
         patch("app.services.pipeline.get_settings", return_value=configured),
         patch("httpx.post", side_effect=ConnectionError("network unreachable")),
     ):
@@ -844,7 +886,7 @@ def test_scheduled_casio_catalog_known_watch_new_region_creates_event_and_notifi
 
     from app.collectors.base import CollectorRunResult, FetchResult
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.core.config import Settings
     from app.models import CollectorRun, Event, SourceObservation, Watch
     from app.parsers.base import ParsedWatch, ParseResult
@@ -869,10 +911,21 @@ def test_scheduled_casio_catalog_known_watch_new_region_creates_event_and_notifi
         r.metadata["component_status"] = "ZERO_ITEMS"
         return r
 
-    def cat_run_healthy(self, *, max_items=None, known_product_urls=None, discovery_urls=None):
-        r = CollectorRunResult(collector_id="casio_japan", collector_version="0.2.0", region="JP", trust_score=100.0)
+    def cat_run_healthy(self, *, max_items=None, known_product_urls=None, sitemap_payload=None):
+        # 2026-09-10 repair: the JP component is the watches.xml sitemap
+        # lane. Same scenario as before -- a reference already known from
+        # another source/region is now observed in JP -- but via the real
+        # synthetic-fetch shape the sitemap lane produces (parsed by the
+        # real parse_casio_jp_sitemap_item, not a parser stub).
+        r = CollectorRunResult(collector_id="casio_jp_sitemap", collector_version="0.1.0", region="JP", trust_score=70.0)
         r.fetched.append(
-            FetchResult(url="https://www.casio.com/jp/product/GMW-B5000D-1/", success=True, status_code=200, content_type="text/html", payload=b"<html></html>")
+            FetchResult(
+                url="https://www.casio.com/jp/watches/edifice/product.GMW-B5000D-1/",
+                success=True,
+                status_code=200,
+                content_type="application/json",
+                payload=b'{"reference": "GMW-B5000D-1", "lastmod": "2026-09-09T10:00:00Z"}',
+            )
         )
         r.metadata["component_status"] = "SUCCESS"
         return r
@@ -891,8 +944,7 @@ def test_scheduled_casio_catalog_known_watch_new_region_creates_event_and_notifi
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     with (
         patch.object(CasioIntlNewsCollector, "run", news_run_empty),
-        patch.object(CasioJapanCollector, "run", cat_run_healthy),
-        patch("app.services.pipeline.parse_casio_product_html", fake_parse),
+        patch.object(CasioJPSitemapCollector, "run", cat_run_healthy),
         patch("app.services.pipeline.get_settings", return_value=configured),
         patch("httpx.post", side_effect=lambda url, **kw: calls.append(url) or type("R", (), {"status_code": 204, "text": ""})()),
     ):
@@ -916,7 +968,7 @@ def test_scheduled_casio_epoch_baseline_creates_no_event(db_session: Session, tm
     from unittest.mock import patch
 
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.models import Event, ReleaseLead
     from app.services.epoch import start_baseline, start_epoch
     from app.services.pipeline import PipelineService
@@ -932,7 +984,7 @@ def test_scheduled_casio_epoch_baseline_creates_no_event(db_session: Session, tm
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     with (
         patch.object(CasioIntlNewsCollector, "run", news_run),
-        patch.object(CasioJapanCollector, "run", cat_run_blocked),
+        patch.object(CasioJPSitemapCollector, "run", cat_run_blocked),
     ):
         run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
 
@@ -1117,7 +1169,7 @@ def test_multi_source_active_backoff_skips_catalog_cleanly(db_session: Session, 
 
     from app.collectors.base import CollectorRunResult
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.models import SourceComponentState
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
@@ -1126,7 +1178,7 @@ def test_multi_source_active_backoff_skips_catalog_cleanly(db_session: Session, 
     # the pipeline sees exactly what a real second process would see.
     db_session.add(
         SourceComponentState(
-            source_id="casio_japan",
+            source_id="casio_jp_sitemap",
             last_status="BLOCKED",
             consecutive_blocks=1,
             backoff_until=datetime.now(UTC) + timedelta(hours=3),
@@ -1147,11 +1199,11 @@ def test_multi_source_active_backoff_skips_catalog_cleanly(db_session: Session, 
 
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     with patch.object(CasioIntlNewsCollector, "run", news_run), patch.object(
-        CasioJapanCollector, "run", cat_run_should_not_be_called
+        CasioJPSitemapCollector, "run", cat_run_should_not_be_called
     ):
         run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
 
-    assert run.summary_metadata["components"]["casio_japan"]["status"] == "BACKED_OFF"
+    assert run.summary_metadata["components"]["casio_jp_sitemap"]["status"] == "BACKED_OFF"
     assert run.status != "FAILED"
     assert run.status != "RUNNING"
     assert run.completed_at is not None
@@ -1163,14 +1215,14 @@ def test_multi_source_expired_backoff_allows_catalog_run(db_session: Session, tm
 
     from app.collectors.base import CollectorRunResult
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.models import SourceComponentState
     from app.services.pipeline import PipelineService
     from app.services.snapshot_storage import SnapshotStorageService
 
     db_session.add(
         SourceComponentState(
-            source_id="casio_japan",
+            source_id="casio_jp_sitemap",
             last_status="BLOCKED",
             consecutive_blocks=3,
             backoff_until=datetime.now(UTC) - timedelta(hours=1),
@@ -1188,21 +1240,21 @@ def test_multi_source_expired_backoff_allows_catalog_run(db_session: Session, tm
         r.metadata["component_status"] = "SUCCESS"
         return r
 
-    def cat_run(self, *, max_items=None, known_product_urls=None, discovery_urls=None):
+    def cat_run(self, *, max_items=None, known_product_urls=None, sitemap_payload=None):
         called["n"] += 1
         r = CollectorRunResult(
-            collector_id="casio_japan", collector_version="0.2.0", region="JP", trust_score=100.0
+            collector_id="casio_jp_sitemap", collector_version="0.1.0", region="JP", trust_score=70.0
         )
         r.metadata["component_status"] = "BLOCKED"
         r.metadata["discovery_fetches"] = [{"url": "x", "status": 403, "success": False, "blocked": True}]
         return r
 
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
-    with patch.object(CasioIntlNewsCollector, "run", news_run), patch.object(CasioJapanCollector, "run", cat_run):
+    with patch.object(CasioIntlNewsCollector, "run", news_run), patch.object(CasioJPSitemapCollector, "run", cat_run):
         run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
 
     assert called["n"] == 1
-    assert run.summary_metadata["components"]["casio_japan"]["status"] == "BLOCKED"
+    assert run.summary_metadata["components"]["casio_jp_sitemap"]["status"] == "BLOCKED"
     assert run.status == "PARTIAL"
     assert run.completed_at is not None
 
@@ -1220,7 +1272,7 @@ def test_news_success_catalog_backed_off_is_not_failure(db_session: Session, tmp
 
     db_session.add(
         SourceComponentState(
-            source_id="casio_japan",
+            source_id="casio_jp_sitemap",
             last_status="BLOCKED",
             consecutive_blocks=1,
             backoff_until=datetime.now(UTC) + timedelta(hours=3),
@@ -1241,7 +1293,7 @@ def test_news_success_catalog_backed_off_is_not_failure(db_session: Session, tmp
         run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
 
     assert run.summary_metadata["components"]["casio_intl_news"]["status"] == "SUCCESS"
-    assert run.summary_metadata["components"]["casio_japan"]["status"] == "BACKED_OFF"
+    assert run.summary_metadata["components"]["casio_jp_sitemap"]["status"] == "BACKED_OFF"
     assert run.status in ("SUCCESS", "PARTIAL")
 
 
