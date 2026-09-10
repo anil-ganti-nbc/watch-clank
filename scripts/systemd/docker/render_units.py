@@ -48,6 +48,16 @@ TIMER_TEMPLATE = (TEMPLATE_DIR / "watch-clank-docker.timer.template").read_text(
 # --scheduled path already defaults qualification_provenance to SCHEDULED
 # in scripts/run_pipeline.py, so no explicit flag is needed here.
 _SCHEDULED_OVERRIDE = {"casio_multi": ("--scheduled",)}
+# Horology Sentinel likewise has its own one-shot entrypoint (--sentinel);
+# --live would run the full pipeline, which the Sentinel must never do.
+# Unlike --scheduled, --sentinel has no scheduled-aware provenance default,
+# so the truthful provenance flag is explicit here (see the 2026-09-03
+# Seiko JP delivery-gating incident documented below).
+_SCHEDULED_OVERRIDE["horology_sentinel"] = (
+    "--sentinel",
+    "--qualification-provenance",
+    "SCHEDULED",
+)
 
 # 2026-09-03 incident fix (Seiko JP delivery-gating failure): every OTHER
 # registered collector is fired via --experimental-brand/--experimental-

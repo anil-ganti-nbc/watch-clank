@@ -10,6 +10,7 @@ from app.models.pipeline import CollectorRun, Event, EventWatch, PipelineLedger
 from app.models.qualification import QualificationEvidence
 from app.models.release_lead import ReleaseLead, SourceComponentState
 from app.models.review import DISPOSITIONS, EventReview
+from app.models.sentinel import SentinelIdentity, SentinelSighting, SentinelSourceState
 from app.models.snapshot import SnapshotBlob, SnapshotFetch
 from app.models.specialist_lead import SpecialistLead
 from app.models.specialist_lead_review import LEAD_DISPOSITIONS, SpecialistLeadReview
@@ -31,6 +32,9 @@ __all__ = [
     "PipelineLedger",
     "QualificationEvidence",
     "ReleaseLead",
+    "SentinelIdentity",
+    "SentinelSighting",
+    "SentinelSourceState",
     "SnapshotBlob",
     "SnapshotFetch",
     "SourceComponentState",
