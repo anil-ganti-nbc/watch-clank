@@ -28,18 +28,28 @@
 <table>
   <thead>
     <tr>
-      <th>ID</th><th>Collector</th><th>Layer</th><th>Status</th><th>Discovered</th><th>Fetched</th>
+      <th>ID</th><th>Collector</th><th>Layer</th><th>Status</th><th>Components</th><th>Discovered</th><th>Fetched</th>
       <th>Parsed</th><th>New</th><th>Obs</th><th>Fail</th><th>Duration</th><th>Started</th><th>Stages</th>
     </tr>
   </thead>
   <tbody>
   {% for r in runs %}
     {% set c = controls_by_id.get(r.collector_id) %}
+    {% set meta = r.summary_metadata or {} %}
     <tr>
       <td><a href="/runs/{{ r.id }}">{{ r.id }}</a></td>
       <td>{{ r.collector_id }}<br><span class="small muted">@{{ r.collector_version }}</span></td>
       <td>{% if c %}<span class="badge {{ 'badge-official' if c.layer == 'OFFICIAL' else 'badge-specialist' }}">{{ c.layer }}</span>{% else %}<span class="muted small">—</span>{% endif %}</td>
-      <td><span class="badge {{ 'badge-ok' if r.status == 'SUCCESS' else 'badge-warn' if r.status in ['PARTIAL','ZERO_ITEMS'] else 'badge-err' if r.status == 'FAILED' else 'badge-run' }}">{{ r.status }}</span></td>
+      <td><span class="badge {{ 'badge-ok' if r.status == 'SUCCESS' else 'badge-warn' if r.status in ['PARTIAL','ZERO_ITEMS'] else 'badge-err' if r.status == 'FAILED' else 'badge-run' }}">{{ r.status }}</span>
+        {%- if meta.get('status_reason') %}<br><span class="small muted" title="{{ meta.get('status_reason') }}">{{ meta.get('status_reason') }}</span>{% endif %}
+      </td>
+      <td class="small">
+        {%- for cid, comp in (meta.get('components') or {}).items() %}
+          <span class="badge {{ 'badge-ok' if comp.status == 'SUCCESS' else 'badge-warn' if comp.status in ['PARTIAL','ZERO_ITEMS','BACKED_OFF','SKIPPED'] else 'badge-err' }}" title="{{ comp.get('reason') or comp.status }}">{{ cid }}: {{ comp.status }}</span>
+        {%- else %}
+          <span class="muted small">—</span>
+        {%- endfor %}
+      </td>
       <td>{{ r.discovered_count }}</td>
       <td>{{ r.fetched_count }}</td>
       <td>{{ r.parsed_count }}</td>

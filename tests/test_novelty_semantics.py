@@ -58,7 +58,7 @@ def test_specimen_1_official_launch_announcement_is_new_reference(db_session: Se
     from unittest.mock import patch
 
     from app.collectors.casio_intl_news import CasioIntlNewsCollector
-    from app.collectors.casio_japan import CasioJapanCollector
+    from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
     from app.models import CollectorRun, Event
     from app.services.snapshot_storage import SnapshotStorageService
 
@@ -88,9 +88,9 @@ def test_specimen_1_official_launch_announcement_is_new_reference(db_session: Se
 
     def fake_blocked(self, *args, **kwargs):
         from app.collectors.base import CollectorRunResult, FetchResult
-        from app.collectors.casio_japan import COLLECTOR_ID as CAT_ID
-        from app.collectors.casio_japan import COLLECTOR_VERSION as CAT_VER
-        from app.collectors.casio_japan import TRUST_SCORE as CAT_TRUST
+        from app.collectors.casio_jp_sitemap import COLLECTOR_ID as CAT_ID
+        from app.collectors.casio_jp_sitemap import COLLECTOR_VERSION as CAT_VER
+        from app.collectors.casio_jp_sitemap import TRUST_SCORE as CAT_TRUST
 
         result = CollectorRunResult(
             collector_id=CAT_ID, collector_version=CAT_VER, region="JP", trust_score=CAT_TRUST,
@@ -102,7 +102,7 @@ def test_specimen_1_official_launch_announcement_is_new_reference(db_session: Se
     pipeline = PipelineService(db_session, SnapshotStorageService(tmp_settings))
     with (
         patch.object(CasioIntlNewsCollector, "run", fake_collector_run),
-        patch.object(CasioJapanCollector, "run", fake_blocked),
+        patch.object(CasioJPSitemapCollector, "run", fake_blocked),
     ):
         run = pipeline.run_multi_source_pipeline(max_items=2, skip_lock=True, include_catalog=True)
 

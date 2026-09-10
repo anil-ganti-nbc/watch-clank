@@ -997,6 +997,46 @@ class PipelineService:
         backoff_until = ensure_utc(state.backoff_until)
         return backoff_until > datetime.now(UTC)
 
+    def _log_component_finished(
+        self,
+        component: str,
+        status: str,
+        *,
+        reason: str | None = None,
+        discovered: int | None = None,
+        fetched_ok: int | None = None,
+        new_for_processing: int | None = None,
+        failures: int | None = None,
+        discovery_fetches: list[dict] | None = None,
+    ) -> None:
+        """One terminal structured record per casio_multi component exit.
+
+        2026-09-10 incident repair: the component skip path (BACKED_OFF)
+        used to log NOTHING, so a parent run could report SUCCESS for days
+        while the JP product component was never actually running. Every
+        component exit now emits exactly one terminal record here. HTTP
+        evidence is summarized as status codes only -- response bodies are
+        never logged.
+        """
+        http_statuses = sorted(
+            {
+                f.get("status")
+                for f in (discovery_fetches or [])
+                if isinstance(f, dict) and f.get("status") is not None
+            }
+        )
+        logger.info(
+            "casio_component_finished",
+            component=component,
+            status=status,
+            reason=reason,
+            http_statuses=http_statuses or None,
+            discovered=discovered,
+            fetched_ok=fetched_ok,
+            new_for_processing=new_for_processing,
+            item_failures=failures,
+        )
+
     def _prior_regions_for_watch(self, watch_id: int, *, exclude_lead_id: int | None) -> frozenset[str]:
         """Regions this watch has previously been announced/observed in.
 
@@ -2052,8 +2092,8 @@ class PipelineService:
         # rejected reference is additionally flagged human_qc_deprioritized,
         # which keeps it out of the DEFAULT queue but fully visible via the
         # explicit opt-in filter and /qc/history.
-        from app.services.qc import qc_memory_context
         from app.services.pipeline_constants import WEAK_FIRST_SEEN_QC_THRESHOLD
+        from app.services.qc import qc_memory_context
 
         qc_context, qc_deprioritize = qc_memory_context(
             self.session,
@@ -2617,7 +2657,30 @@ class PipelineService:
         from app.collectors.casio_intl_news import (
             CasioIntlNewsCollector,
         )
-        from app.collectors.casio_japan import COLLECTOR_ID as CAT_ID
+
+        # 2026-09-10 incident repair (see
+        # ai/handoff/INCIDENT_CASIO_MULTI_SILENT_COMPONENT_DEGRADATION.md):
+        # the JP product component is now the official Casio Japan
+        # watches.xml sitemap-delta lane. The legacy HTML listing collector
+        # (CasioJapanCollector) has never completed one successful poll from
+        # this vantage -- run #1 on 2026-08-10 was already Akamai-403 on all
+        # five discovery URLs; source_component_states recorded
+        # consecutive_blocks=33 with last_success_at=None; zero snapshots,
+        # zero products, and a live reprobe on 2026-09-10 still 403s every
+        # listing page. The sitemap lane is healthy (26k+ HTTP-200 fetches,
+        # its own production collector + timer). The legacy collector code
+        # and its tests remain untouched for historical correctness.
+        from app.collectors.casio_jp_sitemap import (
+            COLLECTOR_ID as CATALOG_ID,
+        )
+        from app.collectors.casio_jp_sitemap import (
+            COLLECTOR_VERSION as CATALOG_VER,
+        )
+        from app.collectors.casio_jp_sitemap import (
+            REGION as CATALOG_REGION,
+        )
+        from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
+        from app.parsers.casio_jp_sitemap import parse_casio_jp_sitemap_item
 
         settings = get_settings()
         auto_baseline = self._auto_baseline_for_first_run("casio_multi")
@@ -2672,6 +2735,12 @@ class PipelineService:
                 "fetched_ok": sum(1 for f in news_result.fetched if f.success),
             }
             self._update_component_state(NEWS_ID, news_status, len(news_result.discovered))
+            self._log_component_finished(
+                NEWS_ID,
+                news_status,
+                discovered=len(news_result.discovered),
+                fetched_ok=sum(1 for f in news_result.fetched if f.success),
+            )
 
             meta_by_url = {i.url: i.metadata | {"title": i.title} for i in news_result.discovered}
             for fr in news_result.fetched:
@@ -2697,41 +2766,119 @@ class PipelineService:
                 else:
                     failures += 1
 
-            # 2) Catalog enrichment (optional, with backoff)
+            # 2) JP product discovery (official Casio Japan sitemap-delta
+            # lane, with backoff). Discovery is new-first against the JP
+            # lane's own observation history, so an unchanged catalogue is a
+            # healthy silent ZERO_ITEMS and only genuinely new references
+            # are processed. Component health is surfaced three ways (see
+            # the 2026-09-10 incident): a terminal structured log record per
+            # component, the components block in summary_metadata, and the
+            # component_failures / component_skipped lists the run UI
+            # renders. failure_count remains strictly item-level and is
+            # deliberately NOT overloaded with component health.
             catalog_status = "SKIPPED"
             if include_catalog:
-                if self._should_skip_backed_off(CAT_ID):
+                if self._should_skip_backed_off(CATALOG_ID):
                     catalog_status = "BACKED_OFF"
-                    components[CAT_ID] = {"status": catalog_status, "discovered": 0}
+                    components[CATALOG_ID] = {
+                        "status": catalog_status,
+                        "discovered": 0,
+                        "reason": "BACKOFF_ACTIVE",
+                    }
+                    self._log_component_finished(
+                        CATALOG_ID,
+                        catalog_status,
+                        reason="BACKOFF_ACTIVE",
+                        discovered=0,
+                    )
                 else:
-                    from app.collectors.casio_japan import CasioJapanCollector
-
-                    cat = CasioJapanCollector()
-                    cat_result = cat.run(max_items=max_items)
+                    cat = CasioJPSitemapCollector()
+                    known_urls = {
+                        source_url
+                        for (source_url,) in self.session.query(SourceObservation.source_url)
+                        .filter(SourceObservation.collector_id == CATALOG_ID)
+                        .distinct()
+                        .all()
+                    }
+                    cat_result = cat.run(max_items=300, known_product_urls=known_urls)
                     catalog_status = cat_result.metadata.get("component_status") or "FAILED"
-                    components[CAT_ID] = {
+                    # Only genuinely new references are processed here: the
+                    # standalone casio_jp_sitemap timer already owns bulk
+                    # catalogue observation, and re-observing known URLs
+                    # every 90 minutes would be pure write churn.
+                    unseen = [fr for fr in cat_result.fetched if fr.url not in known_urls]
+                    components[CATALOG_ID] = {
                         "status": catalog_status,
                         "discovered": len(cat_result.discovered),
+                        "known_url_count": cat_result.metadata.get("known_url_count", len(known_urls)),
+                        "new_for_processing": len(unseen),
                         "discovery_fetches": cat_result.metadata.get("discovery_fetches"),
                     }
                     self._update_component_state(
-                        CAT_ID, catalog_status, len(cat_result.discovered)
+                        CATALOG_ID, catalog_status, len(unseen)
                     )
-                    if catalog_status not in ("BLOCKED", "ZERO_ITEMS", "FAILED"):
-                        for fr in cat_result.fetched:
+
+                    parsed_ok = 0
+                    item_failures = 0
+                    if catalog_status in ("BLOCKED", "FAILED"):
+                        reason = (
+                            "UPSTREAM_BLOCKED"
+                            if catalog_status == "BLOCKED"
+                            else "DISCOVERY_FAILED"
+                        )
+                        components[CATALOG_ID]["reason"] = reason
+                    else:
+                        # A healthy sitemap whose entire visible catalogue is
+                        # already known is ZERO_ITEMS -- routine and quiet,
+                        # never a failure ( WATCH_EVENT_SEMANTICS: re-crawl
+                        # of unchanged catalogue produces nothing).
+                        if catalog_status == "SUCCESS" and not unseen:
+                            catalog_status = "ZERO_ITEMS"
+                            components[CATALOG_ID]["status"] = catalog_status
+                            components[CATALOG_ID]["reason"] = "NO_NEW_REFERENCES"
+                        for fr in unseen:
                             if not fr.success:
+                                item_failures += 1
                                 failures += 1
                                 continue
                             out = self.process_fetch_result(
-                                fr, run_id=run.id, emit_events=emit_events, notify=emit_events,
+                                fr,
+                                run_id=run.id,
+                                collector_id=CATALOG_ID,
+                                collector_version=CATALOG_VER,
+                                parse_fn=parse_casio_jp_sitemap_item,
+                                default_region=CATALOG_REGION,
+                                emit_events=emit_events,
+                                notify=emit_events,
                                 force_baseline=auto_baseline,
                             )
                             if out["success"]:
                                 parsed += 1
+                                parsed_ok += 1
                                 if out.get("new_watch"):
                                     new_watches += 1
                             else:
+                                item_failures += 1
                                 failures += 1
+                        if unseen and parsed_ok == 0 and item_failures:
+                            # Every new reference failed to parse: that is a
+                            # component-level regression, not item noise.
+                            catalog_status = "FAILED"
+                            components[CATALOG_ID]["status"] = catalog_status
+                            components[CATALOG_ID]["reason"] = "PARSE_FAILURES"
+                        elif unseen and item_failures:
+                            catalog_status = "PARTIAL"
+                            components[CATALOG_ID]["status"] = catalog_status
+                            components[CATALOG_ID]["reason"] = "PARSE_FAILURES"
+                    self._log_component_finished(
+                        CATALOG_ID,
+                        catalog_status,
+                        reason=components[CATALOG_ID].get("reason"),
+                        discovered=components[CATALOG_ID].get("discovered", 0),
+                        new_for_processing=components[CATALOG_ID].get("new_for_processing", 0),
+                        failures=item_failures,
+                        discovery_fetches=components[CATALOG_ID].get("discovery_fetches"),
+                    )
 
             # Combined status
             statuses = [c.get("status") for c in components.values()]
@@ -2763,8 +2910,42 @@ class PipelineService:
             run.new_watch_count = new_watches
             run.failure_count = failures
             run.duration_ms = int((completed - started).total_seconds() * 1000)
+            # 2026-09-10 incident repair: component health gets its own
+            # first-class summary fields. failure_count stays strictly
+            # item-level (a blocked discovery fetch is NOT an item failure),
+            # and component degradation/skips are listed explicitly so a
+            # "PARTIAL ... Fail 0" row is never inexplicable again.
+            component_failures = [
+                {
+                    "component": cid,
+                    "status": c["status"],
+                    "reason": c.get("reason"),
+                    "http_statuses": sorted(
+                        {
+                            f.get("status")
+                            for f in (c.get("discovery_fetches") or [])
+                            if isinstance(f, dict) and f.get("status") is not None
+                        }
+                    )
+                    or None,
+                }
+                for cid, c in components.items()
+                if c.get("status") in ("BLOCKED", "FAILED", "PARTIAL")
+            ]
+            component_skipped = [
+                {"component": cid, "status": c["status"], "reason": c.get("reason")}
+                for cid, c in components.items()
+                if c.get("status") in ("BACKED_OFF", "SKIPPED")
+            ]
+            status_reason = "; ".join(
+                f"{e['component']}={e['status']}({e.get('reason') or 'no reason recorded'})"
+                for e in component_failures + component_skipped
+            )
             run.summary_metadata = {
                 "components": components,
+                "component_failures": component_failures,
+                "component_skipped": component_skipped,
+                "status_reason": status_reason or None,
                 "new_leads": new_leads,
                 "new_watches": new_watches,
                 "auto_baseline_applied": auto_baseline,

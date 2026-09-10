@@ -20,8 +20,36 @@
       <tr><th>New watches</th><td>{{ run.new_watch_count }}</td></tr>
       <tr><th>Observations</th><td>{{ run.observation_count }}</td></tr>
       <tr><th>Warnings</th><td>{{ run.warning_count }}</td></tr>
-      <tr><th>Failures</th><td>{{ run.failure_count }}</td></tr>
+      <tr><th>Failures</th><td>{{ run.failure_count }} <span class="muted small">(item-level)</span></td></tr>
     </table>
+  </div>
+  <div class="card">
+    <h3>Components</h3>
+    {% set meta = run.summary_metadata or {} %}
+    {% if meta.get('components') %}
+    <table>
+      {% for cid, comp in meta.get('components').items() %}
+      <tr>
+        <th>{{ cid }}</th>
+        <td>
+          <span class="badge {{ 'badge-ok' if comp.status == 'SUCCESS' else 'badge-warn' if comp.status in ['PARTIAL','ZERO_ITEMS','BACKED_OFF','SKIPPED'] else 'badge-err' }}">{{ comp.status }}</span>
+          {% if comp.get('reason') %}<span class="small muted">{{ comp.get('reason') }}</span>{% endif %}
+          <br><span class="muted small">
+            discovered={{ comp.get('discovered', 0) }}
+            {% if comp.get('fetched_ok') is not none %}· fetched_ok={{ comp.get('fetched_ok') }}{% endif %}
+            {% if comp.get('new_for_processing') is not none %}· new_for_processing={{ comp.get('new_for_processing') }}{% endif %}
+            {% set dfetches = comp.get('discovery_fetches') or [] %}{% if dfetches %}· discovery HTTP {% for f in dfetches %}{{ f.get('status') }}{% if not loop.last %},{% endif %}{% endfor %}{% endif %}
+          </span>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% if meta.get('component_failures') or meta.get('component_skipped') %}
+    <p class="muted small">Component degradation/skips are tracked separately from the item-level Failures count above, so a degraded component can never disappear behind <span class="small">Fail 0</span>.</p>
+    {% endif %}
+    {% else %}
+    <p class="muted">No component metadata recorded for this run (single-component collector, or a pre-components run).</p>
+    {% endif %}
   </div>
   <div class="card">
     <h3>Pipeline stages</h3>
