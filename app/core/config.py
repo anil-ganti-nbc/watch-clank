@@ -197,6 +197,22 @@ class Settings(BaseSettings):
     # "not configured," rendered honestly as UNLABELED rather than guessed.
     watch_clank_instance: str = Field(default="")
 
+    # Horology Sentinel (2026-09-08): the fast first-party tripwire. Alerts
+    # ride the existing editorial webhook/authority boundary (see
+    # app/sentinel/alerting.py); sentinel_enabled is only a local kill
+    # switch for the whole component, not a maturity state -- sightings are
+    # a distinct delivery intent and are deliberately NOT governed by the
+    # soak-contract experimental silence, which applies to pipeline Events.
+    sentinel_enabled: bool = Field(default=True)
+    # Circuit breaker against catalogue-replay floods: sightings beyond this
+    # count in one sweep are recorded with alert_state=CAPPED (never lost)
+    # and a single health ping raises the anomaly. Per-source baseline
+    # arming should make this unreachable in normal operation.
+    sentinel_max_alerts_per_sweep: int = Field(default=20, ge=1)
+    # Known-identity last_seen refresh threshold: a 15-minute poll must not
+    # turn into full-table write churn.
+    sentinel_last_seen_refresh_hours: int = Field(default=24, ge=1)
+
     # Phase 7: raw ISO timestamps (2026-08-12T07:12:26.678550+00:00) are not
     # acceptable in the UI. Every human-facing timestamp is rendered in this
     # IANA zone and always labeled with its abbreviation, never bare. UTC is

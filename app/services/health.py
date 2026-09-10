@@ -64,6 +64,12 @@ KNOWN_COLLECTORS = [
     # 360-min cadence mirrors timex_products per WATCH_SOAK_CONTRACT.md.
     "tissot_sitemap",
     "timex_uk_products",
+    # 2026-09-08 Horology Sentinel: the fast first-party tripwire (see
+    # ai/handoff/SENTINEL_RUNBOOK.md). Not a pipeline collector -- it
+    # creates no Events -- but it records collector_runs and has a timer,
+    # so it belongs in the same single source of truth as everything else
+    # that schedules.
+    "horology_sentinel",
 ]
 
 SUCCESS_STATUSES = {"SUCCESS", "PARTIAL", "ZERO_ITEMS"}
@@ -99,6 +105,11 @@ EXPECTED_CADENCE_MINUTES = {
     # 360-min cadence mirrors timex_products per WATCH_SOAK_CONTRACT.md.
     "tissot_sitemap": 360,
     "timex_uk_products": 360,
+    # Horology Sentinel: the fast tier's 15-minute tripwire sweep. Each
+    # source inside the sweep has its own declarative cadence (60 min for
+    # the 17.8k-URL Casio JP document); the heartbeat check below reads
+    # only this sweep-level number.
+    "horology_sentinel": 15,
 }
 
 
