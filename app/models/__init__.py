@@ -12,7 +12,10 @@ from app.models.release_lead import ReleaseLead, SourceComponentState
 from app.models.review import DISPOSITIONS, EventReview
 from app.models.sentinel import SentinelIdentity, SentinelSighting, SentinelSourceState
 from app.models.snapshot import SnapshotBlob, SnapshotFetch
-from app.models.specialist_lead import SpecialistLead
+from app.models.specialist_lead import (
+    LEAD_DELIVERY_STATES,
+    SpecialistLead,
+)
 from app.models.specialist_lead_review import LEAD_DISPOSITIONS, SpecialistLeadReview
 from app.models.watch import FamilyMembership, Watch, WatchFamily
 
@@ -27,6 +30,7 @@ __all__ = [
     "EventReview",
     "EventWatch",
     "FamilyMembership",
+    "LEAD_DELIVERY_STATES",
     "LEAD_DISPOSITIONS",
     "OperationalEpoch",
     "PipelineLedger",

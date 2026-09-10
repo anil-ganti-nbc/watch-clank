@@ -613,10 +613,12 @@ def qc_submit_review(event_id: int, request: Request, payload: ReviewSubmission,
 
 def _lead_to_qc_dict(lead: SpecialistLead) -> dict:
     published_or_discovered = lead.published_at or lead.discovered_at
-    if lead.notified_at:
-        delivery = {"state": "sent", "human": _humantime(lead.notified_at)}
-    else:
-        delivery = {"state": lead.delivery_state, "human": None}
+    delivery = {
+        "state": lead.delivery_state,
+        "reason": lead.delivery_reason,
+        "receipt_id": lead.delivery_receipt_id,
+        "human": _humantime(lead.notified_at) if lead.notified_at else None,
+    }
     return {
         "lead_id": lead.id,
         "when_human": _humantime(published_or_discovered),

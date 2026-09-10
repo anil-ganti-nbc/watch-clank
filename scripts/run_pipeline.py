@@ -260,6 +260,7 @@ def ingest_manual_lead(args: argparse.Namespace) -> int:
     bypassing authentication/anti-bot protections). A human pastes the
     post URL and what it claims; this stores it exactly like a collector
     would, with ingestion_method="manual" for traceability."""
+    from app.models import SpecialistLead
     from app.services.specialist_leads import SpecialistLeadService
 
     if not args.lead_title or not args.lead_url:
@@ -280,6 +281,9 @@ def ingest_manual_lead(args: argparse.Namespace) -> int:
             confidence=args.lead_confidence,
             ingestion_method="manual",
         )
+        if outcome.get("created"):
+            lead = session.get(SpecialistLead, outcome["lead_id"])
+            svc.notify_new_lead(lead)
         session.commit()
         print(outcome)
         return EXIT_OK
