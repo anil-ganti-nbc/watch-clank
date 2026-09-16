@@ -506,8 +506,10 @@ class SpecialistLeadService:
         if lead.confidence < settings.discord_specialist_min_confidence:
             self.record_lead_delivery_outcome(lead, "gated", LEAD_DELIVERY_REASON_BELOW_CONFIDENCE)
             return False
-        references = {ref.upper() for ref in lead.reference_candidates or []}
-        if references:
+        reference_candidates = lead.reference_candidates or []
+        reference_keys = {ref.strip().upper() for ref in reference_candidates if ref.strip()}
+        eligible_references = reference_candidates
+        if reference_keys:
             already_alerted = (
                 self.session.query(SpecialistLead)
                 .filter(
@@ -517,10 +519,21 @@ class SpecialistLeadService:
                 )
                 .all()
             )
-            if any(
-                references.intersection({ref.upper() for ref in other.reference_candidates or []})
+            alerted_keys = {
+                ref.strip().upper()
                 for other in already_alerted
-            ):
+                for ref in (other.reference_candidates or [])
+                if ref.strip()
+            }
+            seen_keys: set[str] = set()
+            eligible_references = []
+            for reference in reference_candidates:
+                key = reference.strip().upper()
+                if not key or key in alerted_keys or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                eligible_references.append(reference)
+            if not eligible_references:
                 self.record_lead_delivery_outcome(lead, "gated", LEAD_DELIVERY_REASON_DUPLICATE_REF)
                 return False
 
@@ -535,7 +548,10 @@ class SpecialistLeadService:
         text = format_early_warning_alert(
             manufacturer=lead.manufacturer,
             brand=lead.brand,
-            reference_candidates=lead.reference_candidates or [],
+            # Preserve the complete source record on the lead, but alert only
+            # the deterministic remainder not already delivered for this
+            # early-warning purpose.
+            reference_candidates=eligible_references,
             lead_type=lead.lead_type,
             source_display_name=profile.display_name,
             source_type=lead.source_type,

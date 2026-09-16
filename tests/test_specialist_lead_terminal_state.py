@@ -12,10 +12,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from alembic.config import Config
+import pytest
 from sqlalchemy import create_engine, text
 
 from alembic import command
+from alembic.config import Config
 from app.models import DeliveryReceipt, SpecialistLead
 from app.models.specialist_lead import (
     LEAD_DELIVERY_REASON_ALREADY_NOTIFIED,
@@ -226,6 +227,108 @@ def test_duplicate_reference_preserves_second_source_and_gates_resend(db_session
     assert notifier.send_editorial_alert.call_count == 1
 
 
+@pytest.mark.parametrize(
+    ("already_alerted", "grouped", "remainder"),
+    [
+        (
+            ["GWF-D1000BC-1JF"],
+            ["GWF-D1000BC-1JF", "GWG-B1000-1A3JF"],
+            ["GWG-B1000-1A3JF"],
+        ),
+        (["DW-6900"], ["DW-6900", "DW6900MO26"], ["DW6900MO26"]),
+        (["EQB-1300"], ["EQB-1300", "EQB-1300D"], ["EQB-1300D"]),
+    ],
+)
+def test_partial_reference_overlap_delivers_only_deterministic_remainder(
+    db_session, already_alerted, grouped, remainder
+):
+    settings = _fresh_settings()
+    svc = SpecialistLeadService(db_session)
+    first = svc.ingest_candidate(
+        **_fresh_lead_kwargs(
+            source_url=f"https://example.test/already-{grouped[0]}",
+            reference_candidates=already_alerted,
+        )
+    )
+    second = svc.ingest_candidate(
+        **_fresh_lead_kwargs(
+            source_id="fratello",
+            source_url=f"https://example.test/grouped-{grouped[-1]}",
+            reference_candidates=grouped,
+        )
+    )
+    first_lead = db_session.get(SpecialistLead, first["lead_id"])
+    second_lead = db_session.get(SpecialistLead, second["lead_id"])
+    notifier = MagicMock()
+    notifier.editorial_enabled = True
+    notifier.send_editorial_alert.return_value = True
+    notifier.last_editorial_attempt = DeliveryAttempt(
+        accepted=True,
+        provider_status=200,
+        provider_message_id="msg-partial-overlap",
+        destination_alias="editorial:deadbeef12ab",
+        attempt_count=1,
+    )
+
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=settings),
+        patch(
+            "app.services.specialist_leads.format_early_warning_alert",
+            return_value="bounded alert",
+        ) as format_alert,
+    ):
+        assert svc.notify_new_lead(first_lead, notifier=notifier) is True
+        assert svc.notify_new_lead(second_lead, notifier=notifier) is True
+
+    assert second_lead.reference_candidates == grouped
+    assert format_alert.call_args_list[-1].kwargs["reference_candidates"] == remainder
+    assert second_lead.notified_at is not None
+    assert notifier.send_editorial_alert.call_count == 2
+
+
+def test_distinct_grouped_references_remain_distinct_and_all_deliver(db_session):
+    settings = _fresh_settings()
+    svc = SpecialistLeadService(db_session)
+    prior = svc.ingest_candidate(
+        **_fresh_lead_kwargs(
+            source_url="https://example.test/prior",
+            reference_candidates=["GWF-D1000BC-1JF"],
+        )
+    )
+    distinct = ["GWG-B1000-1A3JF", "GR-B300-1A4"]
+    grouped = svc.ingest_candidate(
+        **_fresh_lead_kwargs(
+            source_id="fratello",
+            source_url="https://example.test/distinct-group",
+            reference_candidates=distinct,
+        )
+    )
+    prior_lead = db_session.get(SpecialistLead, prior["lead_id"])
+    grouped_lead = db_session.get(SpecialistLead, grouped["lead_id"])
+    notifier = MagicMock()
+    notifier.editorial_enabled = True
+    notifier.send_editorial_alert.return_value = True
+    notifier.last_editorial_attempt = DeliveryAttempt(
+        accepted=True,
+        provider_status=200,
+        provider_message_id="msg-distinct-group",
+        destination_alias="editorial:deadbeef12ab",
+        attempt_count=1,
+    )
+    with (
+        patch("app.services.specialist_leads.get_settings", return_value=settings),
+        patch(
+            "app.services.specialist_leads.format_early_warning_alert",
+            return_value="bounded alert",
+        ) as format_alert,
+    ):
+        assert svc.notify_new_lead(prior_lead, notifier=notifier) is True
+        assert svc.notify_new_lead(grouped_lead, notifier=notifier) is True
+
+    assert format_alert.call_args_list[-1].kwargs["reference_candidates"] == distinct
+    assert grouped_lead.reference_candidates == distinct
+
+
 def test_historical_null_backfill_is_unresolved_without_notification(tmp_path):
     db_path = tmp_path / "hist.db"
     cfg = Config(str(ROOT / "alembic.ini"))
@@ -370,7 +473,10 @@ def test_already_notified_without_message_id_is_provider_accepted(db_session):
     notifier.editorial_enabled = True
     notifier.send_editorial_alert.return_value = True
     notifier.last_editorial_attempt = DeliveryAttempt(
-        accepted=True, provider_status=204, attempt_count=1, destination_alias="editorial:deadbeef12ab"
+        accepted=True,
+        provider_status=204,
+        attempt_count=1,
+        destination_alias="editorial:deadbeef12ab",
     )
     with patch("app.services.specialist_leads.get_settings", return_value=settings):
         assert svc.notify_new_lead(lead, notifier=notifier) is True
