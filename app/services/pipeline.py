@@ -22,6 +22,7 @@ from app.core.logging import get_logger
 from app.core.time import ensure_utc
 from app.models import (
     CollectorRun,
+    Event,
     FamilyMembership,
     PipelineLedger,
     SnapshotBlob,
@@ -39,11 +40,39 @@ from app.normalization.references import (
     safe_overall_confidence,
 )
 from app.parsers.casio_japan import PARSER_VERSION, parse_casio_product_html
+from app.services.alert_priority import classify as classify_alert_priority
+from app.services.alert_priority import launch_group_key
+from app.services.delivery_receipts import PURPOSE_EDITORIAL_ALERT
+from app.services.discord_notify import DeliveryAttempt
 from app.services.editorial import EventEvidence, score_event
 from app.services.run_lock import RunLockService
 from app.services.snapshot_storage import SnapshotStorageService
 
 logger = get_logger(__name__)
+
+
+def _initial_delivery_outcome(
+    *, notify: bool, editorial_eligible: bool, first_seen_alertable: bool, maturity_allows_delivery: bool
+) -> dict[str, Any]:
+    """STD-UI-COM-011 remediation (2026-08-31): record the delivery outcome
+    the control flow can already determine at event-creation time, so the
+    UI can distinguish sent / failed / gated from never-eligible instead of
+    collapsing all non-sent events into alerted=False.
+
+    States: "ineligible" (editorially ineligible), "gated" (delivery
+    suppressed by policy, with a machine-readable reason). "sent"/"failed"
+    are recorded by the send block once a delivery is actually attempted.
+    Purely additive Event.extra JSON under the "delivery" key; "alerted"
+    keeps its existing meaning for backward compatibility."""
+    if not editorial_eligible:
+        return {"delivery": {"state": "ineligible"}}
+    if not maturity_allows_delivery:
+        return {"delivery": {"state": "gated", "reason": "experimental_maturity"}}
+    if not first_seen_alertable:
+        return {"delivery": {"state": "gated", "reason": "first_seen_opt_in"}}
+    if not notify:
+        return {"delivery": {"state": "gated", "reason": "notify_disabled"}}
+    return {}
 
 # Dispatch table for per-manufacturer reference normalization. Casio keeps its
 # exact original call path (default kwargs identical to pre-multi-brand code)
@@ -134,6 +163,57 @@ class PipelineService:
         # source batch, not insertion-order prefix state. Unarmed (None) in
         # every other path -- behavior is unchanged there.
         self._current_publication_batch: dict[str, list[dict]] | None = None
+
+    def _deliver_editorial_alert(self, event: Event, text: str, *, notifier, purpose: str) -> bool:
+        """Send one editorial alert and persist durable delivery evidence.
+
+        Track F (2026-09-03): the old code recorded `alerted=<bool>` and a
+        bare `delivery.state`, which could not distinguish "the operator
+        never got it" from "Discord accepted it into a channel nobody
+        watches" -- the exact ambiguity that left Citizen JY8144-50E
+        (event 442) unexplainable. The alert text and the send call shape
+        are unchanged; what changes is that the outcome is now written down.
+
+        The receipt is also the duplicate guard: Discord webhooks have no
+        server-side idempotency, so re-processing an event that already
+        reached the provider must not post it a second time.
+        """
+        from app.services.delivery_receipts import ENTITY_EVENT, DeliveryReceiptService
+
+        receipts = DeliveryReceiptService(self.session)
+        existing = receipts.find(ENTITY_EVENT, event.id, purpose)
+        if existing is not None and receipts.already_delivered(ENTITY_EVENT, event.id, purpose):
+            logger.info(
+                "editorial_alert_already_delivered", event_id=event.id, purpose=purpose,
+                lifecycle_state=existing.lifecycle_state,
+            )
+            event.extra = {**event.extra, "alerted": True, "delivery": receipts.delivery_extra(existing)}
+            self.session.commit()
+            return True
+
+        sent = bool(notifier.send_editorial_alert(text))
+        attempt = getattr(notifier, "last_editorial_attempt", None)
+        if not isinstance(attempt, DeliveryAttempt):
+            # A notifier that only implements the boolean contract. Record
+            # what is actually known rather than inventing a provider
+            # response -- weaker evidence, honestly labelled.
+            attempt = DeliveryAttempt(accepted=sent, attempt_count=1)
+        receipt = receipts.record(
+            entity_type=ENTITY_EVENT, entity_id=event.id, purpose=purpose, attempt=attempt
+        )
+        event.extra = {**event.extra, "alerted": sent, "delivery": receipts.delivery_extra(receipt)}
+        self.session.commit()
+        return sent
+
+    def _record_qualification_execution(self, run: CollectorRun, provenance: str) -> None:
+        """Persist one qualification credit at the terminal run boundary."""
+        from app.services.qualification import QualificationService
+        QualificationService(self.session).record_execution(run, provenance)
+
+    def _prepare_qualification_epoch(self, run: CollectorRun, provenance: str) -> None:
+        from app.services.qualification import QualificationService
+        QualificationService(self.session).prepare_epoch_for_run(run, provenance)
+        self.session.commit()
 
     def _epoch_fields(self, *, force_baseline: bool = False) -> dict:
         """epoch_id/is_baseline kwargs for a new CollectorRun -- see
@@ -691,7 +771,7 @@ class PipelineService:
         max_items: int | None = 10,
         known_product_urls: list[str] | None = None,
         discovery_urls: list[str] | None = None,
-        skip_lock: bool = False,
+        skip_lock: bool = False, qualification_provenance: str = "UNKNOWN",
     ) -> CollectorRun:
         """Full end-to-end run for Casio Japan with overlap protection."""
         settings = get_settings()
@@ -736,6 +816,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        self._prepare_qualification_epoch(run, qualification_provenance)
         if not skip_lock:
             lock.update_run_id(run.id)
 
@@ -818,6 +899,7 @@ class PipelineService:
             else:
                 run.status = "FAILED"
 
+            self._record_qualification_execution(run, qualification_provenance)
             self.session.commit()
             logger.info(
                 "pipeline_completed",
@@ -924,6 +1006,46 @@ class PipelineService:
             return False
         backoff_until = ensure_utc(state.backoff_until)
         return backoff_until > datetime.now(UTC)
+
+    def _log_component_finished(
+        self,
+        component: str,
+        status: str,
+        *,
+        reason: str | None = None,
+        discovered: int | None = None,
+        fetched_ok: int | None = None,
+        new_for_processing: int | None = None,
+        failures: int | None = None,
+        discovery_fetches: list[dict] | None = None,
+    ) -> None:
+        """One terminal structured record per casio_multi component exit.
+
+        2026-09-10 incident repair: the component skip path (BACKED_OFF)
+        used to log NOTHING, so a parent run could report SUCCESS for days
+        while the JP product component was never actually running. Every
+        component exit now emits exactly one terminal record here. HTTP
+        evidence is summarized as status codes only -- response bodies are
+        never logged.
+        """
+        http_statuses = sorted(
+            {
+                f.get("status")
+                for f in (discovery_fetches or [])
+                if isinstance(f, dict) and f.get("status") is not None
+            }
+        )
+        logger.info(
+            "casio_component_finished",
+            component=component,
+            status=status,
+            reason=reason,
+            http_statuses=http_statuses or None,
+            discovered=discovered,
+            fetched_ok=fetched_ok,
+            new_for_processing=new_for_processing,
+            item_failures=failures,
+        )
 
     def _prior_regions_for_watch(self, watch_id: int, *, exclude_lead_id: int | None) -> frozenset[str]:
         """Regions this watch has previously been announced/observed in.
@@ -1469,6 +1591,7 @@ class PipelineService:
                 notify=notify,
                 experimental=experimental,
                 prior_regions=None,
+                evidence=evidence,
             )
             from app.models import Event
 
@@ -1519,6 +1642,120 @@ class PipelineService:
         for event in rows:
             event.extra = {**(event.extra or {}), **context}
         return context
+
+    def _retain_discovery_evidence(self, result, *, run: CollectorRun) -> dict[str, Any] | None:
+        """Persist what a run selected from, and why candidates were skipped.
+
+        Track E (2026-09-03). Before this, a sitemap run kept only
+        {url, status, success} for its index fetch and nothing at all about
+        candidates it declined to process, so questions like "was
+        AQ-230ECK-3A in the JP sitemap on 2026-09-01, or did it appear
+        later?" were permanently unanswerable -- the exact
+        unreconstructable-history problem the archive flagged.
+
+        Two durable facts are written:
+          1. the index/catalogue document itself, stored content-addressed
+             through the existing snapshot service (deduped, so a sitemap
+             that has not changed costs nothing extra);
+          2. a PipelineLedger row naming the selection policy, the counts
+             and the reason candidates were deferred.
+
+        Never raises: evidence retention must not be able to fail a
+        collection run.
+        """
+        payloads = getattr(result, "discovery_payloads", None) or []
+        selection = (result.metadata or {}).get("selection")
+        if not payloads and not selection:
+            return None
+
+        stored_refs: list[str] = []
+        for fetch in payloads:
+            if not getattr(fetch, "payload", None):
+                continue
+            try:
+                stored = self.storage.store(
+                    fetch.payload,
+                    source_url=fetch.url,
+                    content_type=getattr(fetch, "content_type", None),
+                    collector_id=result.collector_id,
+                    collector_version=result.collector_version,
+                    extra_metadata={"role": "discovery_index", "run_id": run.id},
+                )
+                if stored and stored.get("content_hash"):
+                    stored_refs.append(stored["content_hash"])
+            except Exception as exc:  # noqa: BLE001 -- never fail a run over evidence
+                logger.warning(
+                    "discovery_index_snapshot_failed", collector_id=result.collector_id, error=str(exc)
+                )
+
+        metadata = {"selection": selection, "discovery_index_hashes": stored_refs}
+        try:
+            self._ledger(
+                correlation_id=f"run:{run.id}",
+                run_id=run.id,
+                entity_type="COLLECTOR_RUN",
+                entity_id=str(run.id),
+                stage="discovery_selection",
+                action="candidates_selected",
+                collector_version=result.collector_version,
+                metadata=metadata,
+            )
+            self.session.flush()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("discovery_selection_ledger_failed", run_id=run.id, error=str(exc))
+            return None
+
+        if selection:
+            logger.info(
+                "discovery_selection_recorded",
+                collector_id=result.collector_id,
+                run_id=run.id,
+                candidate_count=selection.get("candidate_count"),
+                selected_count=selection.get("selected_count"),
+                deferred_count=selection.get("deferred_count"),
+                truncated_at_max_candidates=selection.get("truncated_at_max_candidates"),
+            )
+        return metadata
+
+    def _stamp_launch_groups(self, *, event_ids: list[int], run_id: int | None) -> int:
+        """Label same-run/same-brand/same-type events as one launch cluster.
+
+        Track G (2026-09-03). Deliberately independent of the burst
+        annotation above: that one only fires on a PROBABLE BACKFILL (>=15
+        events), whereas the case this targets is the opposite extreme --
+        the Seiko Rukia Liberty Fabrics trio, three references from one
+        limited-edition launch arriving as three separate alerts. The
+        existing WatchFamily grouping does not bind them either, since they
+        are three different Seiko model lines.
+
+        This is a LABEL, not a delivery change: alerts for these events have
+        already been sent individually by the time this runs (same
+        disclosed limitation as _annotate_new_reference_burst). It exists so
+        a grouped-delivery decision can later be made against real observed
+        clusters, and so a buried alert is findable after the fact.
+        """
+        if not event_ids:
+            return 0
+
+        from app.models import EventWatch
+
+        rows = (
+            self.session.query(Event, Watch)
+            .join(EventWatch, EventWatch.event_id == Event.id)
+            .join(Watch, Watch.id == EventWatch.watch_id)
+            .filter(Event.id.in_(event_ids))
+            .all()
+        )
+        stamped = 0
+        for event, watch in rows:
+            key = launch_group_key(
+                run_id=run_id, manufacturer=watch.manufacturer, event_type=event.event_type
+            )
+            if key is None:
+                continue
+            event.extra = {**(event.extra or {}), "launch_group": key}
+            stamped += 1
+        return stamped
 
     def _record_product_transition(
         self, *, watch: Watch, new_obs: SourceObservation, is_new_watch: bool, notify: bool = False,
@@ -1712,6 +1949,7 @@ class PipelineService:
                 is_first_party=is_first_party,
                 evidence_grade=evidence_grade,
                 source_class=source_class,
+                evidence=evidence,
             )
 
         prior_product_regions = self._prior_product_regions_for_watch(
@@ -1758,6 +1996,7 @@ class PipelineService:
                 is_first_party=is_first_party,
                 evidence_grade=evidence_grade,
                 source_class=source_class,
+                evidence=evidence,
             )
 
         prior = (
@@ -1829,6 +2068,7 @@ class PipelineService:
             is_first_party=is_first_party,
             evidence_grade=evidence_grade,
             source_class=source_class,
+            evidence=evidence,
         )
 
     def _persist_product_event(
@@ -1847,8 +2087,15 @@ class PipelineService:
         is_first_party: bool = True,
         evidence_grade: str | None = None,
         source_class: str | None = None,
+        evidence=None,
     ) -> dict:
         """Persist a product-state Event after the caller proved its facts.
+
+        evidence (track G, 2026-09-03): the same EventEvidence the editorial
+        scorer consumed. Used only to label alert priority from its existing
+        is_limited_edition/is_collaboration flags -- never to re-derive or
+        re-score anything. Optional, and a missing value simply yields no
+        priority label, so every existing caller is unaffected.
 
         novelty_evidence (2026-08-21 Phase 7): the structured provenance of
         a novelty classification -- source, region, local first-seen time,
@@ -1908,6 +2155,32 @@ class PipelineService:
             else None
         )
 
+        # Delivery-gate decisions hoisted above Event creation so the
+        # recorded delivery outcome reflects every gate (STD-UI-COM-011).
+        # 2026-08-21: FIRST_SEEN_BY_CLANK is reviewable, not audible. The
+        # initial post-baseline crawl of a large catalogue emits hundreds of
+        # honest first-sightings per run (live-verified with casio_jp_sitemap:
+        # 400 in one run); at the experimental lane's threshold of 0 every
+        # one of them would ring Discord. They stay fully visible in the
+        # dashboard and QC queue; only the ping is gated behind an explicit
+        # operator opt-in.
+        first_seen_alertable = (
+            scored.event_type != "FIRST_SEEN_BY_CLANK" or settings.discord_first_seen_enabled
+        )
+        # 2026-08-25 fleet-wide maturity gate (canonized per owner decision):
+        # external delivery is a PROMOTION privilege. An experimental-maturity
+        # collector must be externally silent for ANY event type/score; its
+        # events stay visible in dashboard/QC. This replaces the incidental
+        # stacking of discord_first_seen_enabled=False + initial-fill
+        # suppression with an explicit, mechanical gate.
+        from app.services.qualification import QualificationService
+
+        # This is the sole runtime external-delivery enforcement boundary.
+        # It records each actual comparison and fails closed on gate drift.
+        maturity_allows_delivery = QualificationService(self.session).delivery_allowed(
+            collector_id or new_obs.collector_id
+        )
+
         event = Event(
             event_type=scored.event_type,
             title=f"{watch.manufacturer} {watch.reference_raw}: {scored.event_type}",
@@ -1934,6 +2207,25 @@ class PipelineService:
                 "editorial_eligibility_reasons": eligibility_reasons,
                 **(
                     {
+                        "priority": classify_alert_priority(
+                            is_limited_edition=getattr(evidence, "is_limited_edition", None),
+                            is_collaboration=getattr(evidence, "is_collaboration", None),
+                            limited_edition_quantity=getattr(
+                                evidence, "limited_edition_quantity", None
+                            ),
+                        ).as_extra()
+                    }
+                    if evidence is not None
+                    else {}
+                ),
+                **_initial_delivery_outcome(
+                    notify=notify,
+                    editorial_eligible=editorial_eligible,
+                    first_seen_alertable=first_seen_alertable,
+                    maturity_allows_delivery=maturity_allows_delivery,
+                ),
+                **(
+                    {
                         "human_qc_deprioritized": True,
                         "human_qc_context": qc_context,
                         "human_qc_deprioritization_reason": deprioritize_reason,
@@ -1957,31 +2249,22 @@ class PipelineService:
             score=scored.score,
         )
 
-        # 2026-08-21: FIRST_SEEN_BY_CLANK is reviewable, not audible. The
-        # initial post-baseline crawl of a large catalogue emits hundreds of
-        # honest first-sightings per run (live-verified with casio_jp_sitemap:
-        # 400 in one run); at the experimental lane's threshold of 0 every
-        # one of them would ring Discord. They stay fully visible in the
-        # dashboard and QC queue; only the ping is gated behind an explicit
-        # operator opt-in.
-        first_seen_alertable = (
-            scored.event_type != "FIRST_SEEN_BY_CLANK" or settings.discord_first_seen_enabled
-        )
-        # 2026-08-25 fleet-wide maturity gate (canonized per owner decision):
-        # external delivery is a PROMOTION privilege. An experimental-maturity
-        # collector must be externally silent for ANY event type/score; its
-        # events stay visible in dashboard/QC. This replaces the incidental
-        # stacking of discord_first_seen_enabled=False + initial-fill
-        # suppression with an explicit, mechanical gate.
-        from app.services.delivery_gate import experimental_delivery_blocked
-
-        maturity_allows_delivery = not experimental_delivery_blocked(collector_id)
         if notify and editorial_eligible and first_seen_alertable and maturity_allows_delivery:
             notifier = DiscordNotifier(settings)
             threshold = (
                 settings.discord_experimental_min_score if experimental else settings.discord_official_min_score
             )
-            if notifier.editorial_enabled and scored.score >= threshold:
+            if not notifier.editorial_enabled:
+                event.extra = {
+                    **event.extra,
+                    "delivery": {"state": "gated", "reason": "editorial_disabled"},
+                }
+            elif scored.score < threshold:
+                event.extra = {
+                    **event.extra,
+                    "delivery": {"state": "gated", "reason": "below_threshold"},
+                }
+            else:
                 text = format_alert(
                     manufacturer=watch.manufacturer,
                     brand=watch.brand,
@@ -1993,9 +2276,9 @@ class PipelineService:
                     observed_at=datetime.now(UTC).isoformat(),
                     experimental=experimental,
                 )
-                sent = notifier.send_editorial_alert(text)
-                event.extra = {**event.extra, "alerted": sent}
-                self.session.commit()
+                sent = self._deliver_editorial_alert(
+                    event, text, notifier=notifier, purpose=PURPOSE_EDITORIAL_ALERT
+                )
 
         return {"event_type": scored.event_type, "event_id": event.id, "score": scored.score, "confidence": scored.confidence}
 
@@ -2078,6 +2361,20 @@ class PipelineService:
                 "prior_regions": sorted(prior_regions),
                 "experimental": experimental,
                 "alerted": False,
+                "priority": classify_alert_priority(
+                    is_limited_edition=evidence.is_limited_edition,
+                    is_collaboration=evidence.is_collaboration,
+                    limited_edition_quantity=evidence.limited_edition_quantity,
+                ).as_extra(),
+                # This first-party news path has no eligibility/maturity/
+                # first-seen gates -- the only determinable pre-send outcome
+                # is "the caller chose not to notify" (STD-UI-COM-011).
+                **_initial_delivery_outcome(
+                    notify=notify,
+                    editorial_eligible=True,
+                    first_seen_alertable=True,
+                    maturity_allows_delivery=True,
+                ),
             },
         )
         self.session.add(event)
@@ -2099,7 +2396,17 @@ class PipelineService:
             threshold = (
                 settings.discord_experimental_min_score if experimental else settings.discord_official_min_score
             )
-            if notifier.editorial_enabled and scored.score >= threshold:
+            if not notifier.editorial_enabled:
+                event.extra = {
+                    **event.extra,
+                    "delivery": {"state": "gated", "reason": "editorial_disabled"},
+                }
+            elif scored.score < threshold:
+                event.extra = {
+                    **event.extra,
+                    "delivery": {"state": "gated", "reason": "below_threshold"},
+                }
+            else:
                 text = format_alert(
                     manufacturer=watch.manufacturer,
                     brand=watch.brand,
@@ -2111,9 +2418,9 @@ class PipelineService:
                     observed_at=datetime.now(UTC).isoformat(),
                     experimental=experimental,
                 )
-                sent = notifier.send_editorial_alert(text)
-                event.extra = {**event.extra, "alerted": sent}
-                self.session.commit()
+                sent = self._deliver_editorial_alert(
+                    event, text, notifier=notifier, purpose=PURPOSE_EDITORIAL_ALERT
+                )
 
         return {
             "event_type": scored.event_type,
@@ -2339,7 +2646,7 @@ class PipelineService:
         skip_lock: bool = False,
         include_catalog: bool = True,
         news_index_html: bytes | None = None,
-        emit_events: bool = True,
+        emit_events: bool = True, qualification_provenance: str = "UNKNOWN",
     ) -> CollectorRun:
         """Run accessible official Casio sources + optional catalog enrichment.
 
@@ -2381,7 +2688,30 @@ class PipelineService:
         from app.collectors.casio_intl_news import (
             CasioIntlNewsCollector,
         )
-        from app.collectors.casio_japan import COLLECTOR_ID as CAT_ID
+
+        # 2026-09-10 incident repair (see
+        # ai/handoff/INCIDENT_CASIO_MULTI_SILENT_COMPONENT_DEGRADATION.md):
+        # the JP product component is now the official Casio Japan
+        # watches.xml sitemap-delta lane. The legacy HTML listing collector
+        # (CasioJapanCollector) has never completed one successful poll from
+        # this vantage -- run #1 on 2026-08-10 was already Akamai-403 on all
+        # five discovery URLs; source_component_states recorded
+        # consecutive_blocks=33 with last_success_at=None; zero snapshots,
+        # zero products, and a live reprobe on 2026-09-10 still 403s every
+        # listing page. The sitemap lane is healthy (26k+ HTTP-200 fetches,
+        # its own production collector + timer). The legacy collector code
+        # and its tests remain untouched for historical correctness.
+        from app.collectors.casio_jp_sitemap import (
+            COLLECTOR_ID as CATALOG_ID,
+        )
+        from app.collectors.casio_jp_sitemap import (
+            COLLECTOR_VERSION as CATALOG_VER,
+        )
+        from app.collectors.casio_jp_sitemap import (
+            REGION as CATALOG_REGION,
+        )
+        from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
+        from app.parsers.casio_jp_sitemap import parse_casio_jp_sitemap_item
 
         settings = get_settings()
         auto_baseline = self._auto_baseline_for_first_run("casio_multi")
@@ -2415,6 +2745,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        self._prepare_qualification_epoch(run, qualification_provenance)
         if not skip_lock:
             lock.update_run_id(run.id)
 
@@ -2435,6 +2766,12 @@ class PipelineService:
                 "fetched_ok": sum(1 for f in news_result.fetched if f.success),
             }
             self._update_component_state(NEWS_ID, news_status, len(news_result.discovered))
+            self._log_component_finished(
+                NEWS_ID,
+                news_status,
+                discovered=len(news_result.discovered),
+                fetched_ok=sum(1 for f in news_result.fetched if f.success),
+            )
 
             meta_by_url = {i.url: i.metadata | {"title": i.title} for i in news_result.discovered}
             for fr in news_result.fetched:
@@ -2460,41 +2797,119 @@ class PipelineService:
                 else:
                     failures += 1
 
-            # 2) Catalog enrichment (optional, with backoff)
+            # 2) JP product discovery (official Casio Japan sitemap-delta
+            # lane, with backoff). Discovery is new-first against the JP
+            # lane's own observation history, so an unchanged catalogue is a
+            # healthy silent ZERO_ITEMS and only genuinely new references
+            # are processed. Component health is surfaced three ways (see
+            # the 2026-09-10 incident): a terminal structured log record per
+            # component, the components block in summary_metadata, and the
+            # component_failures / component_skipped lists the run UI
+            # renders. failure_count remains strictly item-level and is
+            # deliberately NOT overloaded with component health.
             catalog_status = "SKIPPED"
             if include_catalog:
-                if self._should_skip_backed_off(CAT_ID):
+                if self._should_skip_backed_off(CATALOG_ID):
                     catalog_status = "BACKED_OFF"
-                    components[CAT_ID] = {"status": catalog_status, "discovered": 0}
+                    components[CATALOG_ID] = {
+                        "status": catalog_status,
+                        "discovered": 0,
+                        "reason": "BACKOFF_ACTIVE",
+                    }
+                    self._log_component_finished(
+                        CATALOG_ID,
+                        catalog_status,
+                        reason="BACKOFF_ACTIVE",
+                        discovered=0,
+                    )
                 else:
-                    from app.collectors.casio_japan import CasioJapanCollector
-
-                    cat = CasioJapanCollector()
-                    cat_result = cat.run(max_items=max_items)
+                    cat = CasioJPSitemapCollector()
+                    known_urls = {
+                        source_url
+                        for (source_url,) in self.session.query(SourceObservation.source_url)
+                        .filter(SourceObservation.collector_id == CATALOG_ID)
+                        .distinct()
+                        .all()
+                    }
+                    cat_result = cat.run(max_items=300, known_product_urls=known_urls)
                     catalog_status = cat_result.metadata.get("component_status") or "FAILED"
-                    components[CAT_ID] = {
+                    # Only genuinely new references are processed here: the
+                    # standalone casio_jp_sitemap timer already owns bulk
+                    # catalogue observation, and re-observing known URLs
+                    # every 90 minutes would be pure write churn.
+                    unseen = [fr for fr in cat_result.fetched if fr.url not in known_urls]
+                    components[CATALOG_ID] = {
                         "status": catalog_status,
                         "discovered": len(cat_result.discovered),
+                        "known_url_count": cat_result.metadata.get("known_url_count", len(known_urls)),
+                        "new_for_processing": len(unseen),
                         "discovery_fetches": cat_result.metadata.get("discovery_fetches"),
                     }
                     self._update_component_state(
-                        CAT_ID, catalog_status, len(cat_result.discovered)
+                        CATALOG_ID, catalog_status, len(unseen)
                     )
-                    if catalog_status not in ("BLOCKED", "ZERO_ITEMS", "FAILED"):
-                        for fr in cat_result.fetched:
+
+                    parsed_ok = 0
+                    item_failures = 0
+                    if catalog_status in ("BLOCKED", "FAILED"):
+                        reason = (
+                            "UPSTREAM_BLOCKED"
+                            if catalog_status == "BLOCKED"
+                            else "DISCOVERY_FAILED"
+                        )
+                        components[CATALOG_ID]["reason"] = reason
+                    else:
+                        # A healthy sitemap whose entire visible catalogue is
+                        # already known is ZERO_ITEMS -- routine and quiet,
+                        # never a failure ( WATCH_EVENT_SEMANTICS: re-crawl
+                        # of unchanged catalogue produces nothing).
+                        if catalog_status == "SUCCESS" and not unseen:
+                            catalog_status = "ZERO_ITEMS"
+                            components[CATALOG_ID]["status"] = catalog_status
+                            components[CATALOG_ID]["reason"] = "NO_NEW_REFERENCES"
+                        for fr in unseen:
                             if not fr.success:
+                                item_failures += 1
                                 failures += 1
                                 continue
                             out = self.process_fetch_result(
-                                fr, run_id=run.id, emit_events=emit_events, notify=emit_events,
+                                fr,
+                                run_id=run.id,
+                                collector_id=CATALOG_ID,
+                                collector_version=CATALOG_VER,
+                                parse_fn=parse_casio_jp_sitemap_item,
+                                default_region=CATALOG_REGION,
+                                emit_events=emit_events,
+                                notify=emit_events,
                                 force_baseline=auto_baseline,
                             )
                             if out["success"]:
                                 parsed += 1
+                                parsed_ok += 1
                                 if out.get("new_watch"):
                                     new_watches += 1
                             else:
+                                item_failures += 1
                                 failures += 1
+                        if unseen and parsed_ok == 0 and item_failures:
+                            # Every new reference failed to parse: that is a
+                            # component-level regression, not item noise.
+                            catalog_status = "FAILED"
+                            components[CATALOG_ID]["status"] = catalog_status
+                            components[CATALOG_ID]["reason"] = "PARSE_FAILURES"
+                        elif unseen and item_failures:
+                            catalog_status = "PARTIAL"
+                            components[CATALOG_ID]["status"] = catalog_status
+                            components[CATALOG_ID]["reason"] = "PARSE_FAILURES"
+                    self._log_component_finished(
+                        CATALOG_ID,
+                        catalog_status,
+                        reason=components[CATALOG_ID].get("reason"),
+                        discovered=components[CATALOG_ID].get("discovered", 0),
+                        new_for_processing=components[CATALOG_ID].get("new_for_processing", 0),
+                        failures=item_failures,
+                        discovery_fetches=components[CATALOG_ID].get("discovery_fetches"),
+                    )
 
             # Combined status
             statuses = [c.get("status") for c in components.values()]
@@ -2526,12 +2941,47 @@ class PipelineService:
             run.new_watch_count = new_watches
             run.failure_count = failures
             run.duration_ms = int((completed - started).total_seconds() * 1000)
+            # 2026-09-10 incident repair: component health gets its own
+            # first-class summary fields. failure_count stays strictly
+            # item-level (a blocked discovery fetch is NOT an item failure),
+            # and component degradation/skips are listed explicitly so a
+            # "PARTIAL ... Fail 0" row is never inexplicable again.
+            component_failures = [
+                {
+                    "component": cid,
+                    "status": c["status"],
+                    "reason": c.get("reason"),
+                    "http_statuses": sorted(
+                        {
+                            f.get("status")
+                            for f in (c.get("discovery_fetches") or [])
+                            if isinstance(f, dict) and f.get("status") is not None
+                        }
+                    )
+                    or None,
+                }
+                for cid, c in components.items()
+                if c.get("status") in ("BLOCKED", "FAILED", "PARTIAL")
+            ]
+            component_skipped = [
+                {"component": cid, "status": c["status"], "reason": c.get("reason")}
+                for cid, c in components.items()
+                if c.get("status") in ("BACKED_OFF", "SKIPPED")
+            ]
+            status_reason = "; ".join(
+                f"{e['component']}={e['status']}({e.get('reason') or 'no reason recorded'})"
+                for e in component_failures + component_skipped
+            )
             run.summary_metadata = {
                 "components": components,
+                "component_failures": component_failures,
+                "component_skipped": component_skipped,
+                "status_reason": status_reason or None,
                 "new_leads": new_leads,
                 "new_watches": new_watches,
                 "auto_baseline_applied": auto_baseline,
             }
+            self._record_qualification_execution(run, qualification_provenance)
             self.session.commit()
             logger.info(
                 "multi_pipeline_completed",
@@ -2568,7 +3018,7 @@ class PipelineService:
         max_items: int | None = 10,
         index_html: bytes | None = None,
         emit_events: bool = True,
-        force_baseline: bool = False,
+        force_baseline: bool = False, qualification_provenance: str = "UNKNOWN",
     ) -> CollectorRun:
         """Run an experimental single-brand news-discovery pipeline.
 
@@ -2688,6 +3138,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        self._prepare_qualification_epoch(run, qualification_provenance)
         lock.update_run_id(run.id)
 
         try:
@@ -2746,6 +3197,7 @@ class PipelineService:
                 "events": events,
                 "auto_baseline_applied": effective_force_baseline and not force_baseline,
             }
+            self._record_qualification_execution(run, qualification_provenance)
             self.session.commit()
             logger.info(
                 "brand_news_pipeline_completed",
@@ -2783,7 +3235,7 @@ class PipelineService:
         max_items: int | None = None,
         offline_fixture: object = None,
         emit_events: bool = True,
-        force_baseline: bool = False,
+        force_baseline: bool = False, qualification_provenance: str = "UNKNOWN",
     ) -> CollectorRun:
         """Run an experimental single-brand product/catalogue observation
         pipeline. brand: "citizen", "seiko", or "timex". Casio's product
@@ -3118,6 +3570,7 @@ class PipelineService:
         )
         self.session.add(run)
         self.session.commit()
+        self._prepare_qualification_epoch(run, qualification_provenance)
         lock.update_run_id(run.id)
 
         try:
@@ -3151,6 +3604,7 @@ class PipelineService:
             result = collector.run(**run_kwargs)
             status = result.metadata.get("component_status") or "FAILED"
             self._update_component_state(cfg["collector_id"], status, len(result.discovered))
+            self._retain_discovery_evidence(result, run=run)
 
             # 2026-08-25 initial-fill gate decision: with the fill window armed
             # (under the run ceiling) AND this slice purely unseen (the pass has
@@ -3232,6 +3686,10 @@ class PipelineService:
                 ],
                 discovered_count=len(result.discovered),
             )
+            self._stamp_launch_groups(
+                event_ids=[pe["event_id"] for pe in events if pe.get("event_id")],
+                run_id=run.id,
+            )
 
             completed = datetime.now(UTC)
             run.completed_at = completed
@@ -3273,6 +3731,7 @@ class PipelineService:
                 ),
                 **({"backfill_context": backfill_context} if backfill_context else {}),
             }
+            self._record_qualification_execution(run, qualification_provenance)
             self.session.commit()
             logger.info(
                 "product_observation_pipeline_completed",

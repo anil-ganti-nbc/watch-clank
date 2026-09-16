@@ -1,6 +1,8 @@
 """Application-level overlap protection for collector runs.
 
-Uses a file lock with PID + timestamp metadata plus DB RUNNING records.
+The operating-system advisory-lock grant is the sole ownership authority.
+The adjacent JSON is intentionally diagnostic: it identifies the holder but
+must never be used to reclaim or deny a lock.
 """
 
 from __future__ import annotations
@@ -57,6 +59,41 @@ class RunLockService:
         self.settings = settings or get_settings()
         self.lock_path = lock_path or self.settings.resolved_lock_path
         self.collector_id = collector_id
+        self._handle = None
+
+    def _try_grant(self) -> bool:
+        """Acquire the kernel-granted advisory lock; metadata is diagnostic only."""
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.lock_path.open("a+", encoding="utf-8")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                if handle.tell() == 0:
+                    handle.write(" "); handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return False
+        self._handle = handle
+        return True
+
+    def _drop_grant(self) -> None:
+        if self._handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self._handle.seek(0); msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close(); self._handle = None
 
     def _stale_cutoff(self) -> datetime:
         return datetime.now(UTC) - timedelta(minutes=self.settings.stale_run_threshold_minutes)
@@ -166,73 +203,46 @@ class RunLockService:
         """Try to acquire the run lock. Recovers stale runs first."""
         self.recover_stale_runs()
 
-        active = self.find_active_run()
-        if active:
-            return LockResult(
-                acquired=False,
-                reason="active_db_run",
-                active_run_id=active.id,
-            )
+        if not self._try_grant():
+            return LockResult(acquired=False, reason="active_file_grant")
 
-        meta = self._read_lock_file()
-        if meta is not None:
-            pid = int(meta.get("pid") or 0)
-            if not self._lock_is_stale(meta) and self._pid_alive(pid):
-                return LockResult(
-                    acquired=False,
-                    reason="active_file_lock",
-                    active_run_id=meta.get("run_id"),
-                )
-            # Stale lock file – remove
-            try:
-                self.lock_path.unlink(missing_ok=True)
-                logger.info("stale_lock_file_removed", path=str(self.lock_path))
-            except OSError:
-                pass
-
-        # Write lock
+        # PID/timestamp identify the holder for diagnostics only. They never
+        # decide whether a grant is live or can be reclaimed.
         payload = {
             "pid": os.getpid(),
             "acquired_at": datetime.now(UTC).isoformat(),
             "collector_id": self.collector_id,
         }
         try:
-            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            # Atomic-ish write
-            tmp = self.lock_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
-            tmp.replace(self.lock_path)
+            self._handle.seek(0); self._handle.truncate(); self._handle.write(json.dumps(payload)); self._handle.flush()
         except OSError as exc:
             logger.error("lock_acquire_failed", error=str(exc))
-            return LockResult(acquired=False, reason=f"lock_write_failed:{exc}")
+            self._drop_grant()
+            return LockResult(acquired=False, reason=f"lock_metadata_failed:{exc}")
 
         return LockResult(acquired=True, reason="acquired")
 
     def update_run_id(self, run_id: int) -> None:
+        """Update diagnostics without replacing the file that carries a grant."""
+        if self._handle is None:
+            return
         meta = self._read_lock_file() or {}
         meta["run_id"] = run_id
         meta["pid"] = os.getpid()
-        import contextlib
-        with contextlib.suppress(OSError):
-            self.lock_path.write_text(json.dumps(meta), encoding="utf-8")
+        try:
+            self._handle.seek(0)
+            self._handle.truncate()
+            self._handle.write(json.dumps(meta))
+            self._handle.flush()
+        except OSError as exc:
+            logger.warning("lock_metadata_update_failed", error=str(exc))
 
     def release(self) -> None:
-        try:
-            if self.lock_path.exists():
-                meta = self._read_lock_file() or {}
-                if meta.get("pid") in (None, os.getpid()):
-                    self.lock_path.unlink(missing_ok=True)
-                    logger.info("run_lock_released", path=str(self.lock_path))
-        except OSError as exc:
-            logger.warning("lock_release_failed", error=str(exc))
+        self._drop_grant()
 
     def is_locked(self) -> bool:
         self.recover_stale_runs()
-        if self.find_active_run() is not None:
-            return True
-        meta = self._read_lock_file()
-        if meta is None:
+        if self._try_grant():
+            self._drop_grant()
             return False
-        if self._lock_is_stale(meta):
-            return False
-        return self._pid_alive(int(meta.get("pid") or 0))
+        return True

@@ -91,7 +91,9 @@ def parse_goldsmiths_uk_product_html(html: str | bytes, *, source_url: str = "")
     if isinstance(html, bytes):
         html = html.decode("utf-8", errors="ignore")
     if not html or not html.strip():
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="empty html")
+        return ParseResult(
+            success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="empty html"
+        )
 
     product = _extract_product(html)
     if not product:
@@ -113,13 +115,17 @@ def parse_goldsmiths_uk_product_html(html: str | bytes, *, source_url: str = "")
 
     price, currency, price_error = _price(product)
     if price_error:
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=price_error)
+        return ParseResult(
+            success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=price_error
+        )
     if price is not None and currency != EXPECTED_CURRENCY:
         if currency is None:
             error = "price present but currency missing for GB retailer evidence"
         else:
             error = f"unexpected currency for GB retailer evidence: {currency!r}"
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=error)
+        return ParseResult(
+            success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=error
+        )
 
     availability = _availability(product)
     confidence: dict[str, float] = {"reference": 1.0}
@@ -152,4 +158,6 @@ def parse_goldsmiths_uk_product_html(html: str | bytes, *, source_url: str = "")
         overall_confidence=safe_overall_confidence(confidence),
         source_url=source_url,
     )
-    return ParseResult(success=True, parser_id=PARSER_ID, parser_version=PARSER_VERSION, watches=[watch])
+    return ParseResult(
+        success=True, parser_id=PARSER_ID, parser_version=PARSER_VERSION, watches=[watch]
+    )

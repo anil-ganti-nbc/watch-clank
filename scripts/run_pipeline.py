@@ -88,7 +88,7 @@ def run_fixture_mode(max_items: int = 5) -> int:
         return EXIT_OK if run.status != "FAILED" else EXIT_FAILED
 
 
-def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
+def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False, *, qualification_provenance: str | None = None) -> int:
     settings = get_settings()
     db_url = settings.resolved_database_url
     print(f"database_url={db_url}")
@@ -113,7 +113,10 @@ def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
     with session_scope() as session:
         pipeline = PipelineService(session)
         try:
-            run = pipeline.run_multi_source_pipeline(max_items=max_items)
+            run = pipeline.run_multi_source_pipeline(
+                max_items=max_items,
+                qualification_provenance=qualification_provenance or ("SCHEDULED" if scheduled else "MANUAL"),
+            )
         except Exception as exc:
             logger.exception("scheduled_run_fatal", error=str(exc))
             print(f"FATAL: {exc}")
@@ -148,7 +151,7 @@ def run_live_or_scheduled(max_items: int = 10, scheduled: bool = False) -> int:
         return EXIT_FAILED
 
 
-def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: bool = False) -> int:
+def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: bool = False, qualification_provenance: str = "UNKNOWN") -> int:
     """EXPERIMENTAL lane: Citizen/Seiko/Timex news discovery. Isolated overlap
     protection (own lock file + collector_id, see RunLockService), own
     collector_runs rows — cannot interact with the Casio production run
@@ -161,7 +164,7 @@ def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: b
     with session_scope() as session:
         pipeline = PipelineService(session)
         try:
-            run = pipeline.run_brand_news_pipeline(brand, max_items=max_items, force_baseline=force_baseline)
+            run = pipeline.run_brand_news_pipeline(brand, max_items=max_items, force_baseline=force_baseline, qualification_provenance=qualification_provenance)
         except Exception as exc:
             logger.exception("experimental_brand_run_fatal", brand=brand, error=str(exc))
             print(f"FATAL: {exc}")
@@ -172,7 +175,7 @@ def run_experimental_brand(brand: str, max_items: int = 10, *, force_baseline: b
         return EXIT_FAILED
 
 
-def run_experimental_product(brand: str, max_items: int | None = None, *, force_baseline: bool = False) -> int:
+def run_experimental_product(brand: str, max_items: int | None = None, *, force_baseline: bool = False, qualification_provenance: str = "UNKNOWN") -> int:
     """EXPERIMENTAL lane: Citizen (US/DE), Seiko, or Timex catalogue observation.
     Same isolation as run_experimental_brand above — own lock file +
     collector_id, own collector_runs rows, cannot touch Casio state.
@@ -184,7 +187,7 @@ def run_experimental_product(brand: str, max_items: int | None = None, *, force_
     with session_scope() as session:
         pipeline = PipelineService(session)
         try:
-            run = pipeline.run_product_observation_pipeline(brand, max_items=max_items, force_baseline=force_baseline)
+            run = pipeline.run_product_observation_pipeline(brand, max_items=max_items, force_baseline=force_baseline, qualification_provenance=qualification_provenance)
         except Exception as exc:
             logger.exception("experimental_product_run_fatal", brand=brand, error=str(exc))
             print(f"FATAL: {exc}")
@@ -257,6 +260,7 @@ def ingest_manual_lead(args: argparse.Namespace) -> int:
     bypassing authentication/anti-bot protections). A human pastes the
     post URL and what it claims; this stores it exactly like a collector
     would, with ingestion_method="manual" for traceability."""
+    from app.models import SpecialistLead
     from app.services.specialist_leads import SpecialistLeadService
 
     if not args.lead_title or not args.lead_url:
@@ -277,6 +281,9 @@ def ingest_manual_lead(args: argparse.Namespace) -> int:
             confidence=args.lead_confidence,
             ingestion_method="manual",
         )
+        if outcome.get("created"):
+            lead = session.get(SpecialistLead, outcome["lead_id"])
+            svc.notify_new_lead(lead)
         session.commit()
         print(outcome)
         return EXIT_OK
@@ -384,12 +391,69 @@ def ingest_manual_uk_evidence(args: argparse.Namespace) -> int:
         session.commit()
         print(f"[manual_uk_evidence] Run id={run.id} status={run.status} outcome={outcome}")
         return EXIT_OK if outcome["success"] else EXIT_FAILED
+def run_sentinel(
+    *,
+    force_baseline: bool = False,
+    only_source: str | None = None,
+) -> int:
+    """Horology Sentinel sweep (2026-09-08): the fast first-party tripwire.
+    One sweep = one cheap poll of every due Sentinel source (sitemap /
+    products.json feeds only -- never the full pipeline), immediate Discord
+    WATCH SIGHTING for genuinely unseen identities, durable dedup store.
+    See ai/handoff/SENTINEL_RUNBOOK.md."""
+    from app.sentinel.runner import SentinelRunner
+
+    settings = get_settings()
+    print(f"database_url={settings.resolved_database_url} sentinel baseline={force_baseline}")
+    schema = check_schema(get_engine())
+    if not schema.matches:
+        msg = (
+            f"SCHEMA MISMATCH: database is at "
+            f"{schema.actual_version or '(uninitialized)'}, code expects "
+            f"{schema.expected_head}. Run `python -m scripts.migrate` "
+            "explicitly, then retry."
+        )
+        logger.error("schema_mismatch", expected=schema.expected_head, actual=schema.actual_version)
+        print(msg)
+        from app.services.discord_notify import DiscordNotifier
+
+        DiscordNotifier(settings).send_health_alert(f"WATCH CLANK — OPS\n{msg}")
+        return EXIT_SCHEMA_MISMATCH
+
+    if not settings.sentinel_enabled:
+        print("Horology Sentinel is disabled (SENTINEL_ENABLED=false); nothing to do.")
+        return EXIT_OK
+
+    with session_scope() as session:
+        try:
+            runner = SentinelRunner(session, settings)
+            run = runner.run_sweep(force_baseline=force_baseline, only_source=only_source)
+        except Exception as exc:
+            logger.exception("sentinel_sweep_fatal", error=str(exc))
+            print(f"FATAL: {exc}")
+            return EXIT_FATAL
+
+    summary = (run.summary_metadata or {}).get("totals", {})
+    print(
+        f"Sentinel run id={run.id} status={run.status} "
+        f"candidates={summary.get('candidates_observed', 0)} "
+        f"unseen={summary.get('unseen_admitted', 0)} "
+        f"suppressed={summary.get('known_suppressed', 0)} "
+        f"alerts_sent={summary.get('alerts_sent', 0)} "
+        f"alerts_failed={summary.get('alerts_failed', 0)}"
+    )
+    if run.status in ("SUCCESS", "PARTIAL", "ZERO_ITEMS", "BLOCKED", "SKIPPED_OVERLAP"):
+        return EXIT_OK
+    return EXIT_FAILED
 
 
 def main() -> None:
+    from app.sentinel.config import SENTINEL_SOURCES
+
     parser = argparse.ArgumentParser(description="Watch Clank Casio pipeline")
     parser.add_argument("--fixture-mode", action="store_true")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--qualification-provenance", choices=["SCHEDULED", "MANUAL", "DEPLOY", "RECOVERY", "UNKNOWN"], default=None)
     parser.add_argument(
         "--scheduled",
         action="store_true",
@@ -423,6 +487,27 @@ def main() -> None:
         "--ingest-manual-lead",
         action="store_true",
         help="Manually ingest one early-warning lead (e.g. a @geesgshock post) — see --lead-* flags",
+    )
+    parser.add_argument(
+        "--sentinel",
+        action="store_true",
+        help="Run one Horology Sentinel sweep: fast first-party tripwire poll "
+        "(products.json/sitemaps only), Discord WATCH SIGHTING for unseen "
+        "identities. See ai/handoff/SENTINEL_RUNBOOK.md.",
+    )
+    parser.add_argument(
+        "--sentinel-baseline",
+        action="store_true",
+        help="Force a silent Sentinel re-baseline sweep: every observed identity "
+        "is imported without alerts. Use after a deliberate reset or when "
+        "adding a new source you want pre-armed quietly.",
+    )
+    parser.add_argument(
+        "--sentinel-source",
+        choices=sorted(SENTINEL_SOURCES),
+        default=None,
+        help="Poll a single Sentinel source (debug/single-lane runs); polls it "
+        "regardless of cadence",
     )
     parser.add_argument("--lead-source-id", default="geesgshock_manual")
     parser.add_argument(
@@ -477,17 +562,21 @@ def main() -> None:
         sys.exit(ingest_manual_lead(args))
     if args.ingest_manual_uk_evidence:
         sys.exit(ingest_manual_uk_evidence(args))
+    if args.sentinel or args.sentinel_baseline:
+        sys.exit(
+            run_sentinel(force_baseline=args.sentinel_baseline, only_source=args.sentinel_source)
+        )
     if args.experimental_specialist:
         sys.exit(run_experimental_specialist(args.experimental_specialist, args.max_items or 20, force_baseline=args.force_baseline))
     if args.experimental_brand:
-        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10, force_baseline=args.force_baseline))
+        sys.exit(run_experimental_brand(args.experimental_brand, args.max_items or 10, force_baseline=args.force_baseline, qualification_provenance=args.qualification_provenance or "UNKNOWN"))
     if args.experimental_product:
         kwargs = {} if args.max_items is None else {"max_items": args.max_items}
-        sys.exit(run_experimental_product(args.experimental_product, force_baseline=args.force_baseline, **kwargs))
+        sys.exit(run_experimental_product(args.experimental_product, force_baseline=args.force_baseline, qualification_provenance=args.qualification_provenance or "UNKNOWN", **kwargs))
     if args.fixture_mode:
         sys.exit(run_fixture_mode(args.max_items or 10))  # preserves prior argparse-default behavior (10, not the function's own 5)
     if args.live or args.scheduled:
-        sys.exit(run_live_or_scheduled(args.max_items or 10, scheduled=args.scheduled))
+        sys.exit(run_live_or_scheduled(args.max_items or 10, scheduled=args.scheduled, qualification_provenance=args.qualification_provenance))
     parser.print_help()
     sys.exit(1)
 

@@ -5,6 +5,8 @@ privilege. Experimental-maturity collectors must be externally silent for
 ANY event type and ANY score — not just FIRST_SEEN, and not merely because
 initial-fill suppression happens to be active.
 """
+from sqlalchemy import select
+
 from app.services.delivery_gate import (
     EXPERIMENTAL_MATURITY_COLLECTORS,
     experimental_delivery_blocked,
@@ -15,10 +17,22 @@ from tests.test_core import (
 )
 
 
-def test_experimental_collectors_are_delivery_blocked():
-    assert experimental_delivery_blocked("tissot_sitemap")
-    assert experimental_delivery_blocked("timex_uk_products")
+def test_only_goldsmiths_remains_delivery_blocked_after_operator_promotions():
+    assert EXPERIMENTAL_MATURITY_COLLECTORS == frozenset({"goldsmiths_uk_retailer"})
+    assert not experimental_delivery_blocked("tissot_sitemap")
+    assert not experimental_delivery_blocked("timex_uk_products")
     assert experimental_delivery_blocked("goldsmiths_uk_retailer")
+
+
+def test_gate_still_blocks_any_future_experimental_collector():
+    """The retained mechanism: adding an id to the maturity set blocks its
+    external delivery again, with no other code change."""
+    from unittest.mock import patch
+
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
+               frozenset({"future_soaking_collector"})):
+        assert experimental_delivery_blocked("future_soaking_collector")
+        assert not experimental_delivery_blocked("casio_multi")
 
 
 def test_established_collectors_are_not_blocked_by_the_maturity_gate():
@@ -30,14 +44,15 @@ def test_established_collectors_are_not_blocked_by_the_maturity_gate():
 
 
 def test_promotion_removes_block():
-    """Promotion review = removing the id from the maturity set. Simulate a
-    promoted tissot by patching the frozenset."""
+    """Promotion review = removing the id from the maturity set. Simulated
+    against another populated set without changing Goldsmiths state."""
     from unittest.mock import patch
 
-    promoted = EXPERIMENTAL_MATURITY_COLLECTORS - {"tissot_sitemap"}
-    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS", promoted):
-        assert not experimental_delivery_blocked("tissot_sitemap")
-        assert experimental_delivery_blocked("timex_uk_products")  # others unaffected
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
+               frozenset({"still_soaking"})):
+        assert experimental_delivery_blocked("still_soaking")
+    with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS", frozenset()):
+        assert not experimental_delivery_blocked("still_soaking")
 
 
 def test_notify_path_respects_gate_for_non_first_seen_events(db_session, tmp_settings):
@@ -98,3 +113,149 @@ def _gate_obs(watch_id):
         overall_confidence=90.0,
         observed_at=datetime.now(UTC),
     )
+
+
+def _seed_seiko_jp_qualification_evidence(db_session, provenance: str) -> None:
+    """Simulate the collector's own prior completed run recording its
+    terminal qualification credit under the given provenance -- exactly
+    what scripts/run_pipeline.py's --experimental-product path does at the
+    end of every real run via PipelineService._record_qualification_execution.
+    QualificationService.delivery_allowed() reads THIS prior record when
+    gating the current run's events (see app/services/qualification.py),
+    so a realistic test seeds it via a separate, already-completed run
+    rather than asserting the current run gates on its own evidence."""
+    from app.models import CollectorRun
+    from app.services.qualification import QualificationService
+
+    prior_run = CollectorRun(collector_id="seiko_jp_products", collector_version="test", status="SUCCESS")
+    db_session.add(prior_run)
+    db_session.flush()
+    QualificationService(db_session).record_execution(prior_run, provenance)
+    db_session.commit()
+
+
+def test_seiko_jp_scheduled_provenance_unblocks_eligible_delivery(db_session, tmp_settings):
+    """2026-09-03 incident regression, positive case: once a Seiko JP run
+    has recorded SCHEDULED provenance (the render_units.py fix's real
+    effect), a subsequent editorially-eligible product transition must NOT
+    be gated -- confirmed via a real QualificationEvidence row and a real
+    notifier dispatch attempt, not just the isolated gate predicate."""
+    from unittest.mock import MagicMock, patch
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    _seed_seiko_jp_qualification_evidence(db_session, "SCHEDULED")
+
+    watch = Watch(manufacturer="Seiko", brand="Seiko", reference_raw="HBC008J", reference_canonical="HBC008J")
+    db_session.add(watch)
+    db_session.flush()
+    not_yet = SourceObservation(
+        watch_id=watch.id, collector_id="seiko_jp_products", collector_version="0.1.0", parser_id="t",
+        parser_version="0", region="JP", source_url="https://x/hbc008j", price=155100.0, currency="JPY",
+        availability_status="SOLD_OUT", overall_confidence=90.0,
+    )
+    db_session.add(not_yet)
+    db_session.commit()
+    now_orderable = SourceObservation(
+        watch_id=watch.id, collector_id="seiko_jp_products", collector_version="0.1.0", parser_id="t",
+        parser_version="0", region="JP", source_url="https://x/hbc008j", price=155100.0, currency="JPY",
+        availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(now_orderable)
+    db_session.flush()
+
+    notifier_mock = MagicMock()
+    notifier_mock.editorial_enabled = True
+    notifier_mock.send_editorial_alert.return_value = True
+    with (
+        patch("app.services.discord_notify.DiscordNotifier", return_value=notifier_mock) as ctor,
+        patch("app.services.editorial.editorial_eligibility", return_value=(True, ["test"])),
+    ):
+        result = PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+            watch=watch, new_obs=now_orderable, is_new_watch=False, notify=True,
+            collector_id="seiko_jp_products",
+        )
+
+    assert result["event_type"] == "RESTOCK"
+    event = db_session.scalars(select(Event).where(Event.event_type == "RESTOCK")).first()
+    assert event is not None
+    assert event.extra.get("delivery", {}).get("state") == "sent"
+    ctor.assert_called_once()
+    notifier_mock.send_editorial_alert.assert_called_once()
+
+
+def test_seiko_jp_unknown_provenance_stays_gated(db_session, tmp_settings):
+    """2026-09-03 incident regression, safety control: UNKNOWN provenance
+    (the pre-fix default every --experimental-product invocation carried)
+    must continue failing closed -- this is the exact mechanism the fix
+    must NOT weaken. Same transition as the positive case above, only the
+    seeded provenance differs."""
+    from unittest.mock import MagicMock, patch
+
+    from app.models import Event, SourceObservation, Watch
+    from app.services.pipeline import PipelineService
+    from app.services.snapshot_storage import SnapshotStorageService
+
+    _seed_seiko_jp_qualification_evidence(db_session, "UNKNOWN")
+
+    watch = Watch(manufacturer="Seiko", brand="Seiko", reference_raw="HBC009J", reference_canonical="HBC009J")
+    db_session.add(watch)
+    db_session.flush()
+    not_yet = SourceObservation(
+        watch_id=watch.id, collector_id="seiko_jp_products", collector_version="0.1.0", parser_id="t",
+        parser_version="0", region="JP", source_url="https://x/hbc009j", price=155100.0, currency="JPY",
+        availability_status="SOLD_OUT", overall_confidence=90.0,
+    )
+    db_session.add(not_yet)
+    db_session.commit()
+    now_orderable = SourceObservation(
+        watch_id=watch.id, collector_id="seiko_jp_products", collector_version="0.1.0", parser_id="t",
+        parser_version="0", region="JP", source_url="https://x/hbc009j", price=155100.0, currency="JPY",
+        availability_status="AVAILABLE", overall_confidence=90.0,
+    )
+    db_session.add(now_orderable)
+    db_session.flush()
+
+    notifier_mock = MagicMock()
+    notifier_mock.editorial_enabled = True
+    with (
+        patch("app.services.discord_notify.DiscordNotifier", return_value=notifier_mock) as ctor,
+        patch("app.services.editorial.editorial_eligibility", return_value=(True, ["test"])),
+    ):
+        PipelineService(db_session, SnapshotStorageService(tmp_settings))._record_product_transition(
+            watch=watch, new_obs=now_orderable, is_new_watch=False, notify=True,
+            collector_id="seiko_jp_products",
+        )
+
+    event = db_session.scalars(select(Event).where(Event.event_type == "RESTOCK")).first()
+    assert event is not None
+    assert event.extra.get("delivery", {}).get("state") == "gated"
+    assert event.extra.get("delivery", {}).get("reason") == "experimental_maturity"
+    ctor.assert_not_called()
+    notifier_mock.send_editorial_alert.assert_not_called()
+
+
+# ------------------------------------------------------------ promotion guard
+
+
+def test_only_goldsmiths_is_registered_experimental():
+    """The 2026-09-05 promotions remain intact while the newly integrated
+    Goldsmiths lane stays explicitly experimental."""
+    from app.services.collector_registry import all_controls
+
+    registered = {c.collector_id for c in all_controls()}
+    still_experimental = sorted(registered & EXPERIMENTAL_MATURITY_COLLECTORS)
+    assert still_experimental == ["goldsmiths_uk_retailer"]
+
+
+def test_promoted_collectors_are_run_all_eligible():
+    """No split-brain: promotion means Run All selects them exactly as it
+    selects any other production collector."""
+    from app.services.collector_registry import SAFE_COLLECTOR_IDS, all_controls
+
+    for collector_id in ("tissot_sitemap", "timex_uk_products"):
+        assert collector_id in SAFE_COLLECTOR_IDS, f"{collector_id} not Run-All eligible"
+    registered = {c.collector_id for c in all_controls()}
+    assert set(SAFE_COLLECTOR_IDS) == registered - EXPERIMENTAL_MATURITY_COLLECTORS

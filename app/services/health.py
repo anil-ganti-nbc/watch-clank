@@ -65,6 +65,12 @@ KNOWN_COLLECTORS = [
     "tissot_sitemap",
     "timex_uk_products",
     "goldsmiths_uk_retailer",
+    # 2026-09-08 Horology Sentinel: the fast first-party tripwire (see
+    # ai/handoff/SENTINEL_RUNBOOK.md). Not a pipeline collector -- it
+    # creates no Events -- but it records collector_runs and has a timer,
+    # so it belongs in the same single source of truth as everything else
+    # that schedules.
+    "horology_sentinel",
 ]
 
 SUCCESS_STATUSES = {"SUCCESS", "PARTIAL", "ZERO_ITEMS"}
@@ -101,6 +107,11 @@ EXPECTED_CADENCE_MINUTES = {
     "tissot_sitemap": 360,
     "timex_uk_products": 360,
     "goldsmiths_uk_retailer": 360,
+    # Horology Sentinel: the fast tier's 15-minute tripwire sweep. Each
+    # source inside the sweep has its own declarative cadence (60 min for
+    # the 17.8k-URL Casio JP document); the heartbeat check below reads
+    # only this sweep-level number.
+    "horology_sentinel": 15,
 }
 
 
@@ -132,6 +143,9 @@ class HealthSnapshot:
     latest_observation_at: str | None
     latest_event_at: str | None
     latest_specialist_lead_at: str | None
+    specialist_leads_unresolved_historical: int = 0
+    specialist_leads_missing_delivery_outcome: int = 0
+    specialist_leads_ingest_unfinalized: int = 0
     # 2026-08-24 repair: explicit EMPTY/BASELINING/ESTABLISHED state so a
     # fresh database can never silently present itself as established
     # operation (see app.services.history).
@@ -376,6 +390,27 @@ def get_health_snapshot(session: Session, settings: Settings, *, engine: Engine 
     latest_obs = session.query(SourceObservation).order_by(SourceObservation.observed_at.desc()).first()
     latest_event = session.query(Event).order_by(Event.created_at.desc()).first()
     latest_lead = session.query(SpecialistLead).order_by(SpecialistLead.discovered_at.desc()).first()
+    unresolved_historical_leads = (
+        session.query(func.count(SpecialistLead.id))
+        .filter(SpecialistLead.delivery_state == "unresolved_historical")
+        .scalar()
+        or 0
+    )
+    missing_delivery_leads = (
+        session.query(func.count(SpecialistLead.id))
+        .filter(SpecialistLead.delivery_state.is_(None))
+        .scalar()
+        or 0
+    )
+    ingest_unfinalized_leads = (
+        session.query(func.count(SpecialistLead.id))
+        .filter(
+            SpecialistLead.delivery_state == "unresolved",
+            SpecialistLead.delivery_reason == "INGEST_UNFINALIZED",
+        )
+        .scalar()
+        or 0
+    )
 
     sources = [_source_health(session, cid) for cid in KNOWN_COLLECTORS]
 
@@ -410,6 +445,9 @@ def get_health_snapshot(session: Session, settings: Settings, *, engine: Engine 
         latest_specialist_lead_at=(
             ensure_utc(latest_lead.discovered_at).isoformat() if latest_lead else None
         ),
+        specialist_leads_unresolved_historical=unresolved_historical_leads,
+        specialist_leads_missing_delivery_outcome=missing_delivery_leads,
+        specialist_leads_ingest_unfinalized=ingest_unfinalized_leads,
         history_state=h_state,
         sources=sources,
         active_locks=active_locks,

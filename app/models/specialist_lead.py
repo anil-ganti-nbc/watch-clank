@@ -101,6 +101,45 @@ EDITORIAL_FRESHNESS_STATES = frozenset(
 # must never be presented as an exact-reference confirmation.
 CORRELATION_TYPES = frozenset({"EXACT_REFERENCE_MATCH", "FAMILY_MATCH"})
 
+# Coarse lead-delivery outcomes. `sent` is a legacy transport-accepted label
+# retained for pre-contract rows; new writes never use it and must not be
+# read as operator-visible delivery. `unresolved_historical` is the truthful
+# backfill for pre-contract NULL rows whose real disposition is unknown.
+LEAD_DELIVERY_STATES = frozenset(
+    {
+        "gated",
+        "failed",
+        "sent",
+        "provider_accepted",
+        "provider_identified",
+        "unresolved",
+        "unresolved_historical",
+    }
+)
+LEAD_DELIVERY_PROVIDER_STATES = frozenset({"provider_accepted", "provider_identified", "sent"})
+LEAD_DELIVERY_PROVISIONAL_STATES = frozenset({"unresolved"})
+LEAD_DELIVERY_REASON_EDITORIAL_DISABLED = "EDITORIAL_NOTIFICATIONS_DISABLED"
+LEAD_DELIVERY_REASON_BASELINE = "BASELINE"
+LEAD_DELIVERY_REASON_STALE_FRESHNESS = "STALE_OR_UNKNOWN_FRESHNESS"
+LEAD_DELIVERY_REASON_BELOW_CONFIDENCE = "BELOW_SPECIALIST_CONFIDENCE_FLOOR"
+LEAD_DELIVERY_REASON_DUPLICATE_REF = "DUPLICATE_REFERENCE_ALREADY_ALERTED"
+LEAD_DELIVERY_REASON_NOTIFIER_UNAVAILABLE = "NOTIFIER_UNAVAILABLE"
+LEAD_DELIVERY_REASON_PROVIDER_ERROR = "PROVIDER_ERROR"
+LEAD_DELIVERY_REASON_PROVIDER_ACCEPTED = "PROVIDER_ACCEPTED_WITHOUT_MESSAGE_ID"
+LEAD_DELIVERY_REASON_PROVIDER_IDENTIFIED = "PROVIDER_MESSAGE_IDENTIFIED"
+LEAD_DELIVERY_REASON_UNRESOLVED_HISTORICAL = "PRE_TERMINAL_STATE_CONTRACT"
+LEAD_DELIVERY_REASON_INGEST_UNFINALIZED = "INGEST_UNFINALIZED"
+LEAD_DELIVERY_REASON_RUN_MISSING_OUTCOME = "RUN_COMPLETION_MISSING_OUTCOME"
+LEAD_DELIVERY_REASON_ALREADY_NOTIFIED = "ALREADY_NOTIFIED"
+LEAD_DELIVERY_PROVISIONAL_REASONS = frozenset(
+    {
+        LEAD_DELIVERY_REASON_INGEST_UNFINALIZED,
+        LEAD_DELIVERY_REASON_RUN_MISSING_OUTCOME,
+    }
+)
+LEAD_DELIVERY_REASON_CORRELATION_WATCH_MISSING = "CORRELATION_WATCH_MISSING"
+LEAD_DELIVERY_REASON_CORRELATION_NOT_LINKED = "CORRELATION_NOT_LINKED"
+
 
 class SpecialistLead(Base):
     """One discovered piece of early-warning evidence from a non-official
@@ -133,6 +172,13 @@ class SpecialistLead(Base):
             "editorial_freshness IS NULL OR editorial_freshness IN "
             "('FRESH','STALE_PUBLICATION','BASELINE','UNKNOWN_TIMESTAMP','MANUAL_UNDATED')",
             name="ck_specialist_lead_editorial_freshness",
+        ),
+        CheckConstraint(
+            "delivery_state IS NULL OR delivery_state IN ("
+            "'sent','failed','gated',"
+            "'provider_accepted','provider_identified',"
+            "'unresolved','unresolved_historical')",
+            name="ck_specialist_lead_delivery_state",
         ),
     )
 
@@ -192,6 +238,16 @@ class SpecialistLead(Base):
     # Discord dedup (Sprint 6 Phase 4): set once an alert is actually sent so
     # a repeat pipeline run never re-notifies for the same lead.
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # STD-UI-COM-011 + 2026-09-09 terminal-state contract: coarse delivery
+    # outcome so diagnosis can distinguish gated / failed / provider-accepted
+    # / provider-identified / unresolved / unresolved-historical. ingest_candidate
+    # writes unresolved/INGEST_UNFINALIZED on the same INSERT as the lead, so a
+    # crash after persist cannot leave NULL. Notify overwrites that placeholder.
+    # Legacy 'sent' means transport-accepted, never operator-visible.
+    delivery_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    delivery_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    delivery_receipt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Sprint 7 epoch/baseline tracking -- see app/models/epoch.py. A lead
     # discovered during Epoch 1's baseline is real data (correlation/

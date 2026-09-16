@@ -15,9 +15,7 @@ from tests.test_core import db_session, tmp_settings  # noqa: F401 -- shared DB 
 
 def _child_xml(urls: list[str]) -> bytes:
     return (
-        "<urlset>"
-        + "".join(f"<url><loc>{url}</loc></url>" for url in urls)
-        + "</urlset>"
+        "<urlset>" + "".join(f"<url><loc>{url}</loc></url>" for url in urls) + "</urlset>"
     ).encode()
 
 
@@ -68,14 +66,8 @@ def test_full_child_sitemap_filter_prevents_budget_starvation():
 
 
 def test_detail_budget_is_independent_from_full_sitemap_pass():
-    urls = [
-        f"https://www.goldsmiths.co.uk/Citizen-{n}-AW1911-{n:02d}/p/{n}"
-        for n in range(61)
-    ]
-    details = {
-        url: _detail(f"AW1911-{n:02d}")
-        for n, url in enumerate(urls)
-    }
+    urls = [f"https://www.goldsmiths.co.uk/Citizen-{n}-AW1911-{n:02d}/p/{n}" for n in range(61)]
+    details = {url: _detail(f"AW1911-{n:02d}") for n, url in enumerate(urls)}
     result = GoldsmithsUkRetailerCollector().run(
         sitemap_payload=_fixture(urls, details),
         max_items=300,
@@ -98,7 +90,15 @@ def test_goldsmiths_parser_uses_detail_mpn_and_maps_gbp_stock():
 def test_goldsmiths_parser_rejects_non_gbp_price():
     html = (
         '<script id="ng-state" type="application/json">'
-        + json.dumps({"product": {"mpn": "AW1911-53E", "manufacturer": "Citizen", "price": {"value": 279, "currencyIso": "EUR"}}})
+        + json.dumps(
+            {
+                "product": {
+                    "mpn": "AW1911-53E",
+                    "manufacturer": "Citizen",
+                    "price": {"value": 279, "currencyIso": "EUR"},
+                }
+            }
+        )
         + "</script>"
     )
     parsed = parse_goldsmiths_uk_product_html(html)
@@ -108,7 +108,9 @@ def test_goldsmiths_parser_rejects_non_gbp_price():
 def test_goldsmiths_parser_rejects_price_without_currency():
     html = (
         '<script id="ng-state" type="application/json">'
-        + json.dumps({"product": {"mpn": "AW1911-53E", "manufacturer": "Citizen", "price": {"value": 279}}})
+        + json.dumps(
+            {"product": {"mpn": "AW1911-53E", "manufacturer": "Citizen", "price": {"value": 279}}}
+        )
         + "</script>"
     )
     parsed = parse_goldsmiths_uk_product_html(html)
@@ -119,7 +121,15 @@ def test_goldsmiths_parser_accepts_literal_zero_price():
     """A real 0 value must not silently fall through to formattedValue."""
     html = (
         '<script id="ng-state" type="application/json">'
-        + json.dumps({"product": {"mpn": "AW1911-53E", "manufacturer": "Citizen", "price": {"value": 0, "currencyIso": "GBP"}}})
+        + json.dumps(
+            {
+                "product": {
+                    "mpn": "AW1911-53E",
+                    "manufacturer": "Citizen",
+                    "price": {"value": 0, "currencyIso": "GBP"},
+                }
+            }
+        )
         + "</script>"
     )
     parsed = parse_goldsmiths_uk_product_html(html)
@@ -153,30 +163,37 @@ def test_offline_fixture_without_details_never_touches_the_network(monkeypatch):
 
 
 def test_manual_uk_evidence_requires_attestation_and_gbp():
-    good = parse_manual_uk_evidence({
-        "reference": "AW1911-53A",
-        "source_url": "https://www.citizenwatch.co.uk/product/AW1911-53A",
-        "submitter": "operator",
-        "captured_at": "2026-08-29T10:00:00+05:30",
-        "price": 279,
-        "currency": "GBP",
-        "availability": "AVAILABLE",
-        "operator_confirmed": True,
-    })
+    good = parse_manual_uk_evidence(
+        {
+            "reference": "AW1911-53A",
+            "source_url": "https://www.citizenwatch.co.uk/product/AW1911-53A",
+            "submitter": "operator",
+            "captured_at": "2026-08-29T10:00:00+05:30",
+            "price": 279,
+            "currency": "GBP",
+            "availability": "AVAILABLE",
+            "operator_confirmed": True,
+        }
+    )
     assert good.success
     assert good.watches[0].extra_specs["manual_evidence"]["operator_confirmed"] is True
 
-    unconfirmed = parse_manual_uk_evidence({
-        "reference": "AW1911-53A",
-        "source_url": "https://example.test/AW1911-53A",
-        "submitter": "operator",
-        "captured_at": "2026-08-29T10:00:00+05:30",
-        "operator_confirmed": False,
-    })
+    unconfirmed = parse_manual_uk_evidence(
+        {
+            "reference": "AW1911-53A",
+            "source_url": "https://example.test/AW1911-53A",
+            "submitter": "operator",
+            "captured_at": "2026-08-29T10:00:00+05:30",
+            "operator_confirmed": False,
+        }
+    )
     assert not unconfirmed.success and "operator_confirmed" in unconfirmed.error
 
 
-def test_goldsmiths_pipeline_preserves_retailer_provenance_and_delivery_silence(db_session, tmp_settings):  # noqa: F811
+def test_goldsmiths_pipeline_preserves_retailer_provenance_and_delivery_silence(
+    db_session,  # noqa: F811
+    tmp_settings,  # noqa: F811
+):
     from app.collectors.base import FetchResult
     from app.models import Event, SourceObservation, Watch
     from app.services.pipeline import PipelineService
@@ -233,7 +250,9 @@ def test_goldsmiths_pipeline_preserves_retailer_provenance_and_delivery_silence(
     )
 
     assert outcome["success"]
-    observation = db_session.query(SourceObservation).filter_by(collector_id="goldsmiths_uk_retailer").one()
+    observation = (
+        db_session.query(SourceObservation).filter_by(collector_id="goldsmiths_uk_retailer").one()
+    )
     assert observation.region == "GB" and observation.source_trust_score == 70.0
     assert observation.fetch.extra_metadata["discovery_role"] == "product_detail"
     event = db_session.query(Event).filter_by(event_type="NEW_REGION").one()
@@ -261,5 +280,8 @@ def test_goldsmiths_product_registry_runs_silent_baseline(db_session, tmp_settin
     assert run.status == "SUCCESS"
     assert run.summary_metadata["source_class"] == "RETAILER"
     assert run.summary_metadata["detail_fetch_count"] == 1
-    assert db_session.query(SourceObservation).filter_by(collector_id="goldsmiths_uk_retailer").count() == 1
+    assert (
+        db_session.query(SourceObservation).filter_by(collector_id="goldsmiths_uk_retailer").count()
+        == 1
+    )
     assert db_session.query(Event).count() == 0

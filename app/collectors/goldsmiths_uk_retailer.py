@@ -107,10 +107,16 @@ def _child_urls(payload: bytes | str | dict) -> list[str]:
                 elif isinstance(entry, str):
                     values.append(entry)
             return list(dict.fromkeys(values))
-    return list(dict.fromkeys(_locs_from_xml(payload if isinstance(payload, (bytes, str)) else _as_bytes(payload))))
+    return list(
+        dict.fromkeys(
+            _locs_from_xml(payload if isinstance(payload, bytes | str) else _as_bytes(payload))
+        )
+    )
 
 
-def _fixture_value(mapping: dict[str, Any], key: str, url: str, fallback: bytes | str | dict | list | None = None):
+def _fixture_value(
+    mapping: dict[str, Any], key: str, url: str, fallback: bytes | str | dict | list | None = None
+):
     value = mapping.get(key)
     if isinstance(value, dict):
         return value.get(url, fallback)
@@ -126,10 +132,11 @@ def _fixture_value(mapping: dict[str, Any], key: str, url: str, fallback: bytes 
 class GoldsmithsUkRetailerCollector:
     """Full-sitemap discovery plus bounded Goldsmiths detail fetching."""
 
-    def discover_candidates(self, index_payload: bytes | str | dict, child_payloads: dict[str, bytes | str | dict]) -> list[DiscoveredItem]:
+    def discover_candidates(
+        self, index_payload: bytes | str | dict, child_payloads: dict[str, bytes | str | dict]
+    ) -> list[DiscoveredItem]:
         children = [
-            url for url in _child_urls(index_payload)
-            if url.startswith(PRODUCT_SITEMAP_PREFIX)
+            url for url in _child_urls(index_payload) if url.startswith(PRODUCT_SITEMAP_PREFIX)
         ]
         seen: set[str] = set()
         candidates: list[DiscoveredItem] = []
@@ -137,7 +144,9 @@ class GoldsmithsUkRetailerCollector:
             payload = child_payloads.get(child_url)
             if payload is None:
                 continue
-            for url in _locs_from_xml(payload if isinstance(payload, (bytes, str)) else _as_bytes(payload)):
+            for url in _locs_from_xml(
+                payload if isinstance(payload, bytes | str) else _as_bytes(payload)
+            ):
                 if not _is_citizen_url(url) or url in seen:
                     continue
                 seen.add(url)
@@ -150,7 +159,9 @@ class GoldsmithsUkRetailerCollector:
                         metadata={
                             "source_region": REGION,
                             "sitemap_child_url": child_url,
-                            "reference_hint_source": "goldsmiths_url_shape" if hint else "detail_page_only",
+                            "reference_hint_source": "goldsmiths_url_shape"
+                            if hint
+                            else "detail_page_only",
                         },
                     )
                 )
@@ -182,13 +193,9 @@ class GoldsmithsUkRetailerCollector:
             )
             index_payload = fixture["index"]
             child_urls = [
-                url for url in _child_urls(index_payload)
-                if url.startswith(PRODUCT_SITEMAP_PREFIX)
+                url for url in _child_urls(index_payload) if url.startswith(PRODUCT_SITEMAP_PREFIX)
             ]
-            child_payloads = {
-                url: _fixture_value(fixture, "children", url)
-                for url in child_urls
-            }
+            child_payloads = {url: _fixture_value(fixture, "children", url) for url in child_urls}
             child_fetches = [
                 FetchResult(
                     url=url,
@@ -201,14 +208,17 @@ class GoldsmithsUkRetailerCollector:
                 )
                 for url, payload in child_payloads.items()
             ]
-            child_payloads = {url: value for url, value in child_payloads.items() if value is not None}
+            child_payloads = {
+                url: value for url, value in child_payloads.items() if value is not None
+            }
         else:
             index_fetch = fetch_url(SITEMAP_INDEX_URL, accept_language="en-GB,en;q=0.9")
             index_payload = index_fetch.payload or b""
             child_fetches = []
             child_payloads = {}
             child_urls = [
-                url for url in (_child_urls(index_payload) if index_fetch.success else [])
+                url
+                for url in (_child_urls(index_payload) if index_fetch.success else [])
                 if url.startswith(PRODUCT_SITEMAP_PREFIX)
             ]
             for child_url in child_urls:
@@ -234,15 +244,19 @@ class GoldsmithsUkRetailerCollector:
 
         if not index_fetch.success or not index_payload:
             result.fetched = [index_fetch]
-            result.metadata["component_status"] = "BLOCKED" if is_blocked_response(
-                index_fetch.status_code, index_fetch.payload, index_fetch.error
-            ) else "FAILED"
+            result.metadata["component_status"] = (
+                "BLOCKED"
+                if is_blocked_response(
+                    index_fetch.status_code, index_fetch.payload, index_fetch.error
+                )
+                else "FAILED"
+            )
             result.metadata["healthy"] = False
             return result
 
         candidates = self.discover_candidates(index_payload, child_payloads)
         result.metadata["raw_sitemap_url_count"] = sum(
-            len(_locs_from_xml(payload if isinstance(payload, (bytes, str)) else _as_bytes(payload)))
+            len(_locs_from_xml(payload if isinstance(payload, bytes | str) else _as_bytes(payload)))
             for payload in child_payloads.values()
         )
         result.metadata["filtered_candidate_count"] = len(candidates)
@@ -252,9 +266,7 @@ class GoldsmithsUkRetailerCollector:
         known_items = [item for item in candidates if item.url in known]
         ordered = new_items + known_items if known else candidates
         detail_budget = (
-            DETAIL_FETCH_CAP
-            if max_items is None
-            else max(0, min(max_items, DETAIL_FETCH_CAP))
+            DETAIL_FETCH_CAP if max_items is None else max(0, min(max_items, DETAIL_FETCH_CAP))
         )
         pending = ordered[:detail_budget]
         result.discovered = pending
@@ -306,10 +318,14 @@ class GoldsmithsUkRetailerCollector:
         elif successful_details:
             status = "SUCCESS"
         elif child_failures and not any(fetch.success for fetch in child_fetches):
-            status = "BLOCKED" if all(
-                is_blocked_response(fetch.status_code, fetch.payload, fetch.error)
-                for fetch in child_fetches
-            ) else "FAILED"
+            status = (
+                "BLOCKED"
+                if all(
+                    is_blocked_response(fetch.status_code, fetch.payload, fetch.error)
+                    for fetch in child_fetches
+                )
+                else "FAILED"
+            )
         elif not candidates or not result.fetched:
             status = "ZERO_ITEMS"
         else:

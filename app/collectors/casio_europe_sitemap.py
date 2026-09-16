@@ -99,6 +99,9 @@ class CasioEuropeSitemapCollector:
             result.fetched = discovery_fetches
             return result
 
+        # Track E: retain the document this run actually selected from.
+        result.discovery_payloads = [sitemap_fetch]
+
         discovered = self.discover_from_sitemap_xml(sitemap_fetch.payload)
         result.metadata["candidate_count"] = len(discovered)
 
@@ -106,11 +109,28 @@ class CasioEuropeSitemapCollector:
         new_items = [i for i in discovered if i.url not in known]
         known_items = [i for i in discovered if i.url in known]
         pending = (new_items + known_items) if known else discovered
+        deferred = pending[max_items:] if max_items is not None else []
         if max_items is not None:
             pending = pending[:max_items]
         result.discovered = pending
         result.metadata["discovered_count"] = len(pending)
         result.metadata["known_url_count"] = len(known)
+        # Track E.2 / D.5: report why a candidate was not processed this
+        # run, so a later "was it in the feed?" question is answerable.
+        # The MAX_CANDIDATES ceiling is reported separately from the
+        # per-run budget: it caps what is even CONSIDERED, not just what is
+        # processed this cycle.
+        result.metadata["selection"] = {
+            "policy": "unseen_first" if known else "document_order",
+            "candidate_count": len(discovered),
+            "selected_count": len(pending),
+            "deferred_count": len(deferred),
+            "max_items": max_items,
+            "max_candidates": MAX_CANDIDATES,
+            "truncated_at_max_candidates": len(discovered) >= MAX_CANDIDATES,
+            "deferred_reason": "per_run_item_budget" if deferred else None,
+            "deferred_sample": [i.reference_hint for i in deferred[:20]],
+        }
 
         # No per-item fetch: the sitemap itself is the entire evidence base
         # (see module docstring). Each "fetch" is a synthetic wrapper around

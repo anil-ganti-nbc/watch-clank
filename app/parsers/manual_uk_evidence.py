@@ -36,24 +36,54 @@ def parse_manual_uk_evidence(payload: bytes | str | dict, *, source_url: str = "
                 error=f"invalid manual evidence JSON: {exc}",
             )
     if not isinstance(data, dict):
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="manual evidence must be an object")
+        return ParseResult(
+            success=False,
+            parser_id=PARSER_ID,
+            parser_version=PARSER_VERSION,
+            error="manual evidence must be an object",
+        )
 
     reference = str(data.get("reference") or "").strip()
     submitter = str(data.get("submitter") or "").strip()
     captured_at = str(data.get("captured_at") or "").strip()
     evidence_url = str(data.get("source_url") or source_url or "").strip()
     if not _REFERENCE_RE.fullmatch(reference):
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=f"invalid Citizen reference shape: {reference!r}")
+        return ParseResult(
+            success=False,
+            parser_id=PARSER_ID,
+            parser_version=PARSER_VERSION,
+            error=f"invalid Citizen reference shape: {reference!r}",
+        )
     if not submitter or not evidence_url:
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="submitter and source_url are required")
+        return ParseResult(
+            success=False,
+            parser_id=PARSER_ID,
+            parser_version=PARSER_VERSION,
+            error="submitter and source_url are required",
+        )
     if data.get("operator_confirmed") is not True:
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="operator_confirmed must be true")
+        return ParseResult(
+            success=False,
+            parser_id=PARSER_ID,
+            parser_version=PARSER_VERSION,
+            error="operator_confirmed must be true",
+        )
     try:
         captured = datetime.fromisoformat(captured_at)
     except ValueError:
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="captured_at must be ISO 8601")
+        return ParseResult(
+            success=False,
+            parser_id=PARSER_ID,
+            parser_version=PARSER_VERSION,
+            error="captured_at must be ISO 8601",
+        )
     if captured.tzinfo is None:
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="captured_at must include a timezone")
+        return ParseResult(
+            success=False,
+            parser_id=PARSER_ID,
+            parser_version=PARSER_VERSION,
+            error="captured_at must include a timezone",
+        )
 
     raw_price = data.get("price")
     price = None
@@ -61,16 +91,36 @@ def parse_manual_uk_evidence(payload: bytes | str | dict, *, source_url: str = "
         try:
             price = float(raw_price)
         except (TypeError, ValueError):
-            return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="price must be numeric")
+            return ParseResult(
+                success=False,
+                parser_id=PARSER_ID,
+                parser_version=PARSER_VERSION,
+                error="price must be numeric",
+            )
         if price < 0:
-            return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="price must be non-negative")
+            return ParseResult(
+                success=False,
+                parser_id=PARSER_ID,
+                parser_version=PARSER_VERSION,
+                error="price must be non-negative",
+            )
     currency = str(data.get("currency") or EXPECTED_CURRENCY).upper()
     if currency != EXPECTED_CURRENCY:
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error="manual UK evidence currency must be GBP")
+        return ParseResult(
+            success=False,
+            parser_id=PARSER_ID,
+            parser_version=PARSER_VERSION,
+            error="manual UK evidence currency must be GBP",
+        )
 
     availability = str(data.get("availability") or "UNKNOWN").upper()
     if availability not in _AVAILABILITY:
-        return ParseResult(success=False, parser_id=PARSER_ID, parser_version=PARSER_VERSION, error=f"unsupported availability: {availability!r}")
+        return ParseResult(
+            success=False,
+            parser_id=PARSER_ID,
+            parser_version=PARSER_VERSION,
+            error=f"unsupported availability: {availability!r}",
+        )
     availability_status = None if availability == "UNKNOWN" else availability
 
     confidence = {"reference": 1.0}
@@ -78,7 +128,10 @@ def parse_manual_uk_evidence(payload: bytes | str | dict, *, source_url: str = "
         confidence["price"] = 0.95
     if availability_status:
         confidence["availability_status"] = 0.95
-    warnings = ["manual_operator_attestation", "third_party_or_first_party_url_requires_human_review"]
+    warnings = [
+        "manual_operator_attestation",
+        "third_party_or_first_party_url_requires_human_review",
+    ]
     if price is None:
         warnings.append("no_price_in_manual_evidence")
     if availability_status is None:
@@ -105,4 +158,6 @@ def parse_manual_uk_evidence(payload: bytes | str | dict, *, source_url: str = "
         overall_confidence=safe_overall_confidence(confidence),
         source_url=evidence_url,
     )
-    return ParseResult(success=True, parser_id=PARSER_ID, parser_version=PARSER_VERSION, watches=[watch])
+    return ParseResult(
+        success=True, parser_id=PARSER_ID, parser_version=PARSER_VERSION, watches=[watch]
+    )

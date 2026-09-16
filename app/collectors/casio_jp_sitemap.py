@@ -107,6 +107,9 @@ class CasioJPSitemapCollector:
             result.fetched = discovery_fetches
             return result
 
+        # Track E: retain the document this run actually selected from.
+        result.discovery_payloads = [sitemap_fetch]
+
         discovered = self.discover_from_sitemap_xml(sitemap_fetch.payload)
         result.metadata["candidate_count"] = len(discovered)
 
@@ -114,11 +117,30 @@ class CasioJPSitemapCollector:
         new_items = [i for i in discovered if i.url not in known]
         known_items = [i for i in discovered if i.url in known]
         pending = (new_items + known_items) if known else discovered
+        deferred = pending[max_items:] if max_items is not None else []
         if max_items is not None:
             pending = pending[:max_items]
         result.discovered = pending
         result.metadata["discovered_count"] = len(pending)
         result.metadata["known_url_count"] = len(known)
+        # Track E.2 / D.5: why a candidate did NOT get processed this run.
+        # Reported, never silently dropped -- the pipeline writes it to the
+        # ledger. MAX_CANDIDATES truncation is called out separately from
+        # the per-run budget because it is a HARD ceiling on what is even
+        # considered: this sitemap carries ~17,800 URLs against a 3,000
+        # candidate cap, so ~14,800 are invisible to every run regardless of
+        # budget or prioritization.
+        result.metadata["selection"] = {
+            "policy": "unseen_first" if known else "document_order",
+            "candidate_count": len(discovered),
+            "selected_count": len(pending),
+            "deferred_count": len(deferred),
+            "max_items": max_items,
+            "max_candidates": MAX_CANDIDATES,
+            "truncated_at_max_candidates": len(discovered) >= MAX_CANDIDATES,
+            "deferred_reason": "per_run_item_budget" if deferred else None,
+            "deferred_sample": [i.reference_hint for i in deferred[:20]],
+        }
 
         # No per-item fetch: the sitemap itself is the entire evidence base
         # (see module docstring). Each "fetch" is a synthetic wrapper around

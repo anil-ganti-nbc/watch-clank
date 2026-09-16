@@ -34,7 +34,7 @@
       <td>{{ o.overall_confidence }} (trust {{ o.source_trust_score }})</td>
       <td>{% if o.price %}{{ o.currency }} {{ o.price }}{% else %}—{% endif %}</td>
       <td>{% if o.parser_warnings %}{{ o.parser_warnings|length }}{% else %}0{% endif %}</td>
-      <td class="muted">{{ o.observed_at }}</td>
+      <td class="muted">{{ o.observed_at|humantime }}</td>
     </tr>
   {% endfor %}
   </tbody>
@@ -49,7 +49,7 @@
   {% for e in ledger %}
   <li>
     <strong>{{ e.stage }}</strong> · {{ e.action }}
-    <div class="muted">{{ e.created_at }} · correlation {{ e.correlation_id[:8] }}…</div>
+    <div class="muted">{{ e.created_at|humantime }} · <a href="/correlation/{{ e.correlation_id }}" title="Full ordered stage timeline for this correlation">correlation {{ e.correlation_id[:8] }}…</a></div>
   </li>
   {% endfor %}
 </ul>

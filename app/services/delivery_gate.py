@@ -25,11 +25,11 @@ from __future__ import annotations
 # Collectors currently in EXPERIMENTAL maturity per WATCH_SOAK_CONTRACT.md.
 # Promotion review removes ids from this set; nothing is auto-added here —
 # inclusion requires an operator decision recorded in the contract.
-EXPERIMENTAL_MATURITY_COLLECTORS: frozenset[str] = frozenset({
-    "tissot_sitemap",
-    "timex_uk_products",
-    "goldsmiths_uk_retailer",
-})
+#
+# tissot_sitemap and timex_uk_products were promoted to PRODUCTION maturity
+# on 2026-09-05 by explicit operator decision. Goldsmiths remains
+# experimental and externally silent pending its own admission review.
+EXPERIMENTAL_MATURITY_COLLECTORS: frozenset[str] = frozenset({"goldsmiths_uk_retailer"})
 
 
 def experimental_delivery_blocked(collector_id: str | None) -> bool:
