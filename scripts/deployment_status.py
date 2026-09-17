@@ -1,7 +1,7 @@
 """Verify a deployment claim from independently observed running state.
 
 The host-side observer must set WATCH_CLANK_RUNNING_REVISION and, where
-applicable, WATCH_CLANK_CONFIG_MATCHES / WATCH_CLANK_WIRING_MATCHES / 
+applicable, WATCH_CLANK_CONFIG_MATCHES / WATCH_CLANK_WIRING_MATCHES /
 WATCH_CLANK_COMPONENTS_CONVERGED.  This command never substitutes the
 requested revision for absent host evidence.
 """

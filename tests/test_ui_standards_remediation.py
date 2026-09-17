@@ -619,10 +619,8 @@ def test_operations_shows_maturity_at_each_run_control(web_client):  # noqa: F81
     from app.services.collector_registry import all_controls
     from app.services.delivery_gate import EXPERIMENTAL_MATURITY_COLLECTORS
 
-    # The real maturity set is empty since the 2026-09-05 operator promotion,
-    # so the standard is proven by patching one registered collector back to
-    # experimental: STD-UI-COM-007 is about the rendering contract, and it
-    # must keep being enforced whenever a collector IS experimental.
+    # Patch a second collector experimental to prove the rendering contract
+    # independently of the real Goldsmiths marker.
     from unittest.mock import patch
 
     marked = sorted(c.collector_id for c in all_controls())[0]
@@ -633,10 +631,12 @@ def test_operations_shows_maturity_at_each_run_control(web_client):  # noqa: F81
         production_ids = [c.collector_id for c in all_controls() if c.collector_id != marked]
         assert html.count("PRODUCTION") >= len(production_ids)
 
-    # And with the real (empty) set, every run control reads PRODUCTION.
+    # In real state Goldsmiths is experimental and every other run control is
+    # production.
     html = web_client.get("/operations").text
-    assert EXPERIMENTAL_MATURITY_COLLECTORS == frozenset()
-    assert html.count("PRODUCTION") >= len(list(all_controls()))
+    assert EXPERIMENTAL_MATURITY_COLLECTORS == frozenset({"goldsmiths_uk_retailer"})
+    assert html.count("EXPERIMENTAL") >= 1
+    assert html.count("PRODUCTION") >= len(list(all_controls())) - 1
 
 
 def test_experimental_run_control_is_distinguishable_from_production(web_client):  # noqa: F811
@@ -648,9 +648,8 @@ def test_experimental_run_control_is_distinguishable_from_production(web_client)
 
     from app.services.collector_registry import all_controls
 
-    # Proven against a patched experimental collector: the real set is empty
-    # since the 2026-09-05 promotion, but the forbidden rendering must stay
-    # impossible for any future experimental collector.
+    # Proven against a patched experimental collector independently of the
+    # real Goldsmiths lane.
     experimental_id = sorted(c.collector_id for c in all_controls())[0]
     with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
                frozenset({experimental_id})):

@@ -79,6 +79,10 @@ _CONTROLS: dict[str, CollectorControl] = {
         "timex_uk_products", "Timex products (UK Shopify, regional lane, GBP)", "OFFICIAL",
         ("--experimental-product", "timex_uk"),
     ),
+    "goldsmiths_uk_retailer": CollectorControl(
+        "goldsmiths_uk_retailer", "Citizen products (Goldsmiths UK retailer)", "SPECIALIST",
+        ("--experimental-product", "goldsmiths_uk"),
+    ),
     "casioblog_rss": CollectorControl(
         "casioblog_rss", "CASIOBLOG", "SPECIALIST", ("--experimental-specialist", "casioblog")
     ),

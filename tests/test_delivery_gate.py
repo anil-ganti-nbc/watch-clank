@@ -17,14 +17,11 @@ from tests.test_core import (
 )
 
 
-def test_experimental_maturity_set_is_empty_after_the_operator_promotion():
-    """tissot_sitemap and timex_uk_products were promoted to PRODUCTION on
-    2026-09-05 by explicit operator decision, so nothing is delivery-blocked
-    on maturity grounds today. The gate mechanism is unchanged and is still
-    proven by the hypothetical-member test below."""
-    assert EXPERIMENTAL_MATURITY_COLLECTORS == frozenset()
+def test_only_goldsmiths_remains_delivery_blocked_after_operator_promotions():
+    assert EXPERIMENTAL_MATURITY_COLLECTORS == frozenset({"goldsmiths_uk_retailer"})
     assert not experimental_delivery_blocked("tissot_sitemap")
     assert not experimental_delivery_blocked("timex_uk_products")
+    assert experimental_delivery_blocked("goldsmiths_uk_retailer")
 
 
 def test_gate_still_blocks_any_future_experimental_collector():
@@ -48,7 +45,7 @@ def test_established_collectors_are_not_blocked_by_the_maturity_gate():
 
 def test_promotion_removes_block():
     """Promotion review = removing the id from the maturity set. Simulated
-    against a populated set, since the real set is now empty."""
+    against another populated set without changing Goldsmiths state."""
     from unittest.mock import patch
 
     with patch("app.services.delivery_gate.EXPERIMENTAL_MATURITY_COLLECTORS",
@@ -243,14 +240,14 @@ def test_seiko_jp_unknown_provenance_stays_gated(db_session, tmp_settings):
 # ------------------------------------------------------------ promotion guard
 
 
-def test_no_registered_collector_is_experimental():
-    """Fleet guard (operator decision 2026-09-05): zero registered collectors
-    may hold EXPERIMENTAL maturity."""
+def test_only_goldsmiths_is_registered_experimental():
+    """The 2026-09-05 promotions remain intact while the newly integrated
+    Goldsmiths lane stays explicitly experimental."""
     from app.services.collector_registry import all_controls
 
     registered = {c.collector_id for c in all_controls()}
     still_experimental = sorted(registered & EXPERIMENTAL_MATURITY_COLLECTORS)
-    assert still_experimental == [], f"still experimental: {still_experimental}"
+    assert still_experimental == ["goldsmiths_uk_retailer"]
 
 
 def test_promoted_collectors_are_run_all_eligible():
@@ -260,4 +257,5 @@ def test_promoted_collectors_are_run_all_eligible():
 
     for collector_id in ("tissot_sitemap", "timex_uk_products"):
         assert collector_id in SAFE_COLLECTOR_IDS, f"{collector_id} not Run-All eligible"
-    assert set(SAFE_COLLECTOR_IDS) == {c.collector_id for c in all_controls()}
+    registered = {c.collector_id for c in all_controls()}
+    assert set(SAFE_COLLECTOR_IDS) == registered - EXPERIMENTAL_MATURITY_COLLECTORS

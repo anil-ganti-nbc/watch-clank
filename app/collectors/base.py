@@ -27,6 +27,9 @@ class FetchResult:
     payload: bytes | None = None
     error: str | None = None
     elapsed_ms: int | None = None
+    # Collector-specific provenance that must survive into SnapshotFetch.
+    # Kept at the end so existing positional construction remains compatible.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

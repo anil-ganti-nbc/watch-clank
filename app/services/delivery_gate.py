@@ -26,12 +26,10 @@ from __future__ import annotations
 # Promotion review removes ids from this set; nothing is auto-added here —
 # inclusion requires an operator decision recorded in the contract.
 #
-# Empty since 2026-09-05: tissot_sitemap and timex_uk_products were promoted
-# to PRODUCTION maturity by explicit operator decision, which overrode the
-# soak/promotion queue rather than re-running it. The set and the gate below
-# are deliberately retained: a future experimental collector is blocked from
-# external delivery again by adding its id here, with no other change.
-EXPERIMENTAL_MATURITY_COLLECTORS: frozenset[str] = frozenset()
+# tissot_sitemap and timex_uk_products were promoted to PRODUCTION maturity
+# on 2026-09-05 by explicit operator decision. Goldsmiths remains
+# experimental and externally silent pending its own admission review.
+EXPERIMENTAL_MATURITY_COLLECTORS: frozenset[str] = frozenset({"goldsmiths_uk_retailer"})
 
 
 def experimental_delivery_blocked(collector_id: str | None) -> bool:
