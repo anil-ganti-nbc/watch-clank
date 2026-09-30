@@ -99,7 +99,7 @@ _REFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
     # model. GCW added alongside the existing G-prefixed families for the
     # real full-carbon GCW-B5000 square -- a genuine Casio reference
     # prefix, not a specimen-specific special case.
-    "Casio": re.compile(r"\b((?:GA|GW|GM|GMW|GCW|GBD|GBDH|GBX|GWR|GBA|GMA|GMD|GME|GSH|GST|EFK|EF|OCW|PRG|PRW|MRG|MTG|BGA|MSG)[-]?(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,24})\b", re.IGNORECASE | re.ASCII),
+    "Casio": re.compile(r"\b((?:F(?=-?(?:B\d|\d))|DW|AW|AE|GA|GW|GM|GMW|GCW|GBD|GBDH|GBX|GWR|GBA|GMA|GMD|GME|GSH|GST|EFK|EF|OCW|PRG|PRW|MRG|MTG|BGA|MSG)[-]?(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,24})\b", re.IGNORECASE | re.ASCII),
     "Seiko": re.compile(r"\b((?:S[A-Z]{2,3}[0-9]{3,4}|H(?:CC|BC|DB)[A-Z0-9]{3,5}))\b", re.IGNORECASE | re.ASCII),
     "Citizen": re.compile(r"\b([A-Z]{2}[0-9]{4}-[0-9A-Z]{2,4})\b", re.IGNORECASE | re.ASCII),
     # Timex requires a digit somewhere in the candidate (same lookahead
