@@ -672,6 +672,38 @@ def _attach_lead_delivery_report(session: Session, run: CollectorRun, metadata: 
         "missing_repaired": report["missing_repaired"],
         "by_state": report["by_state"],
     }
+    # Keep source/polling delay separate from provider acceptance. A fast
+    # webhook must not disguise a story discovered hours after publication.
+    publication_lags = []
+    delivery_lags = []
+    undated = invalid_order = 0
+    leads = session.query(SpecialistLead).filter(SpecialistLead.collector_run_id == run.id).all()
+    for lead in leads:
+        discovered = ensure_utc(lead.discovered_at)
+        if lead.published_at is None:
+            undated += 1
+        else:
+            lag = (discovered - ensure_utc(lead.published_at)).total_seconds()
+            if lag >= 0:
+                publication_lags.append(lag)
+            else:
+                invalid_order += 1
+        if lead.notified_at is not None:
+            lag = (ensure_utc(lead.notified_at) - discovered).total_seconds()
+            if lag >= 0:
+                delivery_lags.append(lag)
+            else:
+                invalid_order += 1
+    merged["new_lead_latency"] = {
+        "publication_to_discovery_seconds": {
+            "samples": len(publication_lags), "max": max(publication_lags, default=None),
+        },
+        "discovery_to_provider_acceptance_seconds": {
+            "samples": len(delivery_lags), "max": max(delivery_lags, default=None),
+        },
+        "undated_publication_count": undated,
+        "invalid_timestamp_order_count": invalid_order,
+    }
     if report["missing_repaired"]:
         logger.warning(
             "specialist_lead_missing_outcome_repaired",

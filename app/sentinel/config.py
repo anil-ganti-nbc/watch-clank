@@ -17,8 +17,10 @@ Source selection rules (2026-09-08 reconnaissance, Hetzner vantage):
   methods (discovery_kind), so URL->reference extraction, option/strap
   exclusions, and sitemap URLs cannot drift from the proven collectors.
   No Cloudflare/Akamai-blocked product page is ever fetched.
-- citizenwatch.eu is the only Citizen surface that is simultaneously
-  first-party and machine-readable from this vantage; citizenwatch.co.uk
+- Citizen US men's/women's new-arrivals pages expose the same structured
+  search hits as the full collector (live-verified 2026-09-30, including
+  AT8296-53A). Bounded pagination checks completeness before arming.
+  citizenwatch.co.uk
   is robots-disallowed (ClaudeBot) + Cloudflare-blocked and must never be
   added. The EU lane is valid Sentinel input because dedup is global --
   region=EU is metadata, never a UK/US commercialisation claim.
@@ -41,7 +43,7 @@ class SentinelSourceConfig:
     manufacturer: str
     region: str
     display_name: str
-    adapter: str  # "shopify_products" | "sitemap"
+    adapter: str  # shopify_products | sitemap | citizen_search | gshock_collaborations
     # Cadence tier: fast-tier brands poll every sweep (the 15-minute
     # timer); heavier surfaces set a larger cadence_minutes and the runner
     # skips them until due. One timer serves every tier.
@@ -109,6 +111,40 @@ SENTINEL_SOURCES: dict[str, SentinelSourceConfig] = {
         "identity via identity.py's regional-suffix allowlist, so a Timex "
         "UK listing never re-alerts a model Timex US already sighted.",
     ),
+    "timex_in": SentinelSourceConfig(
+        name="timex_in",
+        manufacturer="Timex",
+        region="IN",
+        display_name="Timex India",
+        adapter="shopify_products",
+        listing_url_template="https://shop.timexindia.com/products.json?limit=250&page={page}",
+        product_url_template="https://shop.timexindia.com/products/{handle}",
+        product_type_filter="Watch",
+        notes="Robots permits the public feed; page 1 newest-first verified 2026-09-30. "
+        "Contains TWG027900JQ and TW2Y70600UJ. Preserve India SKU suffixes; "
+        "listing sightings are regional evidence, not global launch dates. "
+        "Page-2+ and bulk republishing remain coverage limitations.",
+    ),
+    "citizen_us_mens_new": SentinelSourceConfig(
+        name="citizen_us_mens_new",
+        manufacturer="Citizen",
+        region="US",
+        display_name="Citizen US men's new arrivals",
+        adapter="citizen_search",
+        listing_url_template="https://citizenwatch.com/us/en/collection/mens-new-watches?offset={offset}&limit=48",
+        notes="30 products in one request on 2026-09-30, including AT8296-53A. "
+        "Source's new-arrival designation is not a publication timestamp.",
+    ),
+    "citizen_us_womens_new": SentinelSourceConfig(
+        name="citizen_us_womens_new",
+        manufacturer="Citizen",
+        region="US",
+        display_name="Citizen US women's new arrivals",
+        adapter="citizen_search",
+        listing_url_template="https://citizenwatch.com/us/en/collection/womens-new-watches?offset={offset}&limit=48",
+        notes="18 products in one request on 2026-09-30. Shared identities "
+        "deduplicate references also listed on the men's page.",
+    ),
     "seiko_us": SentinelSourceConfig(
         name="seiko_us",
         manufacturer="Seiko",
@@ -135,6 +171,18 @@ SENTINEL_SOURCES: dict[str, SentinelSourceConfig] = {
         sitemap_url=_CASIO_UK_SITEMAP_URL,
         discovery_kind="casio_uk",
         notes="Same published sitemap the casio_uk_sitemap collector uses.",
+    ),
+    "gshock_us_collaborations": SentinelSourceConfig(
+        name="gshock_us_collaborations",
+        manufacturer="Casio",
+        region="US",
+        display_name="G-SHOCK US collaboration archive",
+        adapter="gshock_collaborations",
+        listing_url_template="https://gshock.casio.com/us/collaborations/",
+        notes="Robots-allowed, one-request first-party archive verified 2026-09-30. "
+        "Use collaboration landing-page URL identities: an existing DW5600 "
+        "base family must not suppress a distinct new collaboration. "
+        "BAIT Yamagata was absent on the audit date; archive update timing is unknown.",
     ),
     "casio_jp_sitemap": SentinelSourceConfig(
         name="casio_jp_sitemap",
