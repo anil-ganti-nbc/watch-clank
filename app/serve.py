@@ -20,10 +20,6 @@ from __future__ import annotations
 
 import argparse
 
-import uvicorn
-
-from app.core.config import Settings
-
 
 def prepare_app(profile: str):
     """Build the ASGI app for a launch profile. Kept separate from uvicorn
@@ -43,7 +39,9 @@ def prepare_app(profile: str):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--discovery-only", action="store_true")
+    parser.add_argument("--settings", help="explicit absolute Discovery-only settings")
     parser.add_argument(
         "--profile",
         choices=["read-only", "local-operator"],
@@ -52,7 +50,19 @@ def main() -> None:
         "operator-safe mutations (QC, corrections, run-one, run-all-safe) from loopback",
     )
     args = parser.parse_args()
-    settings = Settings(app_host=args.host, app_port=args.port)
+    if args.discovery_only:
+        if not args.settings or args.host != '127.0.0.1' or args.profile != 'read-only':
+            parser.error('Discovery requires explicit --settings, 127.0.0.1 and read-only profile')
+        from app.discovery_cli import load
+        from app.discovery_dashboard import serve
+        serve(load(args.settings), port=8790 if args.port is None else args.port)
+        return
+    if args.settings:
+        parser.error('--settings is only supported with --discovery-only')
+    import uvicorn
+
+    from app.core.config import Settings
+    settings = Settings(app_host=args.host, app_port=8765 if args.port is None else args.port)
     prepare_app(args.profile)
     uvicorn.run("app.main:app", host=settings.app_host, port=settings.app_port)
 

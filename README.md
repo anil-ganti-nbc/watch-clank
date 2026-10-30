@@ -1,5 +1,8 @@
 # Watch Clank
 
+Manual isolated proposal inbox: [D1 Discovery](docs/D1_DISCOVERY.md) (disabled by default;
+separate settings and data, traditional watches only).
+
 > **Phase 0: UNVERIFIED_PRODUCTION — promotion frozen.** The unauthenticated
 > dashboard supports loopback binding only; LAN, NAS, Tailscale, and public
 > exposure are unsupported until an authenticated profile exists.
