@@ -1,0 +1,8 @@
+{
+  "producer_id": "watch-d1-v1",
+  "producer": "C:/D1/accepted/d1.py",
+  "profiles": "C:/D1/accepted/profiles.json",
+  "evidence_root": "C:/WatchDiscovery/producer-evidence",
+  "data_dir": "C:/WatchDiscovery/consumer",
+  "enabled": false
+}

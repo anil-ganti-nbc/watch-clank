@@ -1,0 +1,14 @@
+{
+  "schema_version": "watch.discovery.routing.v1",
+  "excluded_title_patterns": [
+    "\\bsmart[ -]?watch(?:es)?\\b|connected watch|智能手表",
+    "\\bfitness[ -]?(?:tracker|band)s?\\b|\\bactivity tracker\\b",
+    "\\b(?:laptop|notebook|tablet|mini[ -]?pc|single.board computer)s?\\b",
+    "\\b(?:retrospective|auction|discount|coupon|buying guide)\\b"
+  ],
+  "accessory_primary_subject": {
+    "attribute_boundary_pattern": "\\b(?:with|including|on|fitted with|equipped with|supplied with|delivered with|complete with)\\b",
+    "accessory_pattern": "\\b(?:(?:smart[ -]?|watch[ -]?)?straps?|watch[ -]?bands?|bracelets?|watch winders?|watch box(?:es)?|watch rolls?)\\b",
+    "watch_pattern": "\\b(?:watch(?:es)?|timepieces?|chronographs?|tourbillons?)\\b"
+  }
+}
