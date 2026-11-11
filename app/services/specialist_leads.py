@@ -701,6 +701,8 @@ def _fail_specialist_run(
     run.status = "FAILED"
     run.completed_at = datetime.now(UTC)
     meta = {"fatal_error": str(exc)}
+    if run.collector_id == "monochrome_rss" and run.summary_metadata:
+        meta.update(run.summary_metadata)
     if extra:
         meta.update(extra)
     try:
@@ -1096,6 +1098,8 @@ def run_publication_pipeline(
             summary_metadata={
                 "reason": lock_result.reason,
                 "active_run_id": lock_result.active_run_id,
+                **({"monochrome_request": {"attempts_charged": 0, "disposition": "NO_TRANSPORT"}}
+                   if source_id == "monochrome" else {}),
             },
         )
         session.add(skip_run)
@@ -1111,13 +1115,20 @@ def run_publication_pipeline(
         status="RUNNING",
         epoch_id=active_epoch.id if active_epoch else None,
         is_baseline=bool(force_baseline or (active_epoch and is_baseline_active(session))),
+        summary_metadata=({"monochrome_request": {"attempts_charged": 0, "disposition": "NO_TRANSPORT"}}
+                          if source_id == "monochrome" else None),
     )
     session.add(run)
     session.commit()
     lock.update_run_id(run.id)
 
     try:
-        result = SpecialistPublicationCollector(source_id).run(feed_xml=feed_xml)
+        if source_id == "monochrome" and feed_xml is None:
+            result = SpecialistPublicationCollector(source_id).run(
+                native_session=session, native_run=run, native_lock=lock
+            )
+        else:
+            result = SpecialistPublicationCollector(source_id).run(feed_xml=feed_xml)
         status = result.metadata.get("component_status") or "FAILED"
         new_leads = 0
         if status == "SUCCESS":
@@ -1183,7 +1194,7 @@ def run_publication_pipeline(
         run.summary_metadata = _attach_lead_delivery_report(
             session,
             run,
-            {"new_leads": new_leads, "component_status": status, "force_baseline": force_baseline},
+            {**((run.summary_metadata or {}) if source_id == "monochrome" else {}), "new_leads": new_leads, "component_status": status, "force_baseline": force_baseline},
         )
         session.commit()
         logger.info(
