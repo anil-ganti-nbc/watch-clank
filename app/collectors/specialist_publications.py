@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import httpx
+
 from app.collectors.base import CollectorRunResult, FetchResult
 from app.collectors.http_util import fetch_url, is_blocked_response
 
@@ -55,24 +57,29 @@ class SpecialistPublicationCollector:
     def __init__(self, source_id: str) -> None:
         self.source = PUBLICATION_SOURCES[source_id]
 
-    def run(self, *, feed_xml: bytes | None = None) -> CollectorRunResult:
+    def run(self, *, feed_xml: bytes | None = None, native_session=None, native_run=None,
+            native_lock=None) -> CollectorRunResult:
         result = CollectorRunResult(
             collector_id=self.source.collector_id,
             collector_version=self.collector_version,
             region="GLOBAL",
             trust_score=60.0,
         )
-        fr = (
-            FetchResult(
+        if feed_xml is not None:
+            fr = FetchResult(
                 url=self.source.feed_url,
                 success=True,
                 status_code=200,
                 content_type="application/atom+xml" if self.source.feed_format == "atom" else "application/rss+xml",
                 payload=feed_xml,
             )
-            if feed_xml is not None
-            else fetch_url(self.source.feed_url)
-        )
+        elif self.source.source_id == "monochrome":
+            if native_session is None or native_run is None or native_lock is None:
+                fr = FetchResult(url=self.source.feed_url, success=False, error="MONOCHROME native admission absent")
+            else:
+                fr = self._fetch_monochrome(native_session, native_run, native_lock)
+        else:
+            fr = fetch_url(self.source.feed_url)
         result.fetched = [fr]
         result.metadata["index_blocked"] = is_blocked_response(fr.status_code, fr.payload, fr.error)
         if not fr.success or not fr.payload:
@@ -82,3 +89,23 @@ class SpecialistPublicationCollector:
         result.metadata["component_status"] = "SUCCESS"
         result.metadata["healthy"] = True
         return result
+
+    def _fetch_monochrome(self, native_session, native_run, native_lock) -> FetchResult:
+        # Every caller, including a direct one, must durably reserve under the
+        # existing native source lock before this method opens transport.
+        from app.collectors.monochrome_request_guard import reserve_monochrome_attempt
+
+        reserve_monochrome_attempt(native_session, native_run, self.source.feed_url, native_lock)
+        try:
+            with httpx.Client(follow_redirects=False, trust_env=False, timeout=20) as client:
+                response = client.get(self.source.feed_url)
+            return FetchResult(
+                url=self.source.feed_url,
+                success=response.status_code == 200,
+                status_code=response.status_code,
+                content_type=response.headers.get("content-type"),
+                payload=response.content if response.status_code == 200 else None,
+                error=None if response.status_code == 200 else f"HTTP {response.status_code}; no redirect/retry",
+            )
+        except httpx.HTTPError as exc:
+            return FetchResult(url=self.source.feed_url, success=False, error=str(exc))
