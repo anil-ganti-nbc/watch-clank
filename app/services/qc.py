@@ -475,7 +475,12 @@ def fetch_lead_queue_page(
     if before_id is not None:
         stmt = stmt.where(SpecialistLead.id < before_id)
     stmt = stmt.order_by(desc(SpecialistLead.id)).limit(limit)
-    return list(db.scalars(stmt).unique().all())
+    leads = list(db.scalars(stmt).unique().all())
+    from app.collectors.newsroom_snapshot import validate_native_notes
+
+    for lead in leads:
+        validate_native_notes(lead)
+    return leads
 
 
 def fetch_lead_history_page(
@@ -504,7 +509,12 @@ def fetch_lead_history_page(
     if before_id is not None:
         stmt = stmt.where(SpecialistLeadReview.id < before_id)
     stmt = stmt.order_by(desc(SpecialistLeadReview.id)).limit(limit)
-    return list(db.scalars(stmt).unique().all())
+    reviews = list(db.scalars(stmt).unique().all())
+    from app.collectors.newsroom_snapshot import validate_native_notes
+
+    for review in reviews:
+        validate_native_notes(review.lead)
+    return reviews
 
 
 def submit_lead_review(
@@ -516,6 +526,10 @@ def submit_lead_review(
     for the same manufacturer/reference."""
     if disposition not in LEAD_DISPOSITIONS:
         raise InvalidDispositionError(f"unknown disposition: {disposition!r}")
+
+    from app.collectors.newsroom_snapshot import validate_native_notes
+
+    validate_native_notes(lead)
 
     now = datetime.now(UTC)
     existing = db.scalar(select(SpecialistLeadReview).where(SpecialistLeadReview.specialist_lead_id == lead.id))
