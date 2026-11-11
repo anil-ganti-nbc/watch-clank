@@ -192,6 +192,8 @@ class SpecialistLeadService:
         notes: str | None = None,
         force_baseline: bool = False,
         collector_run_id: int | None = None,
+        observed_at: datetime | None = None,
+        freshness_window_hours: int | None = None,
     ) -> dict:
         """Create (or silently skip, if already seen) one SpecialistLead.
         Dedup key is source_url — reprocessing the same feed/post is a
@@ -205,6 +207,10 @@ class SpecialistLeadService:
         if published_at:
             try:
                 pub_dt = datetime.fromisoformat(published_at)
+                # SQLite drops offsets, not wall time: normalize while the
+                # source offset is still available, before flush/commit.
+                if pub_dt.tzinfo is not None:
+                    pub_dt = pub_dt.astimezone(UTC)
             except ValueError:
                 pub_dt = None
 
@@ -213,7 +219,7 @@ class SpecialistLeadService:
         # without reopening the global baseline.  The flag is deliberately
         # scoped to this ingestion call, matching official-lane semantics.
         is_baseline = bool(force_baseline or (active_epoch and is_baseline_active(self.session)))
-        now = datetime.now(UTC)
+        now = ensure_utc(observed_at) if observed_at is not None else datetime.now(UTC)
         discovered_at = now
         freshness = classify_lead_freshness(
             source_type=profile.source_type,
@@ -222,7 +228,8 @@ class SpecialistLeadService:
             published_at=pub_dt,
             discovered_at=discovered_at,
             now=now,
-            window_hours=get_settings().specialist_freshness_window_hours,
+            window_hours=(freshness_window_hours if freshness_window_hours is not None
+                          else get_settings().specialist_freshness_window_hours),
         )
 
         lead = SpecialistLead(
@@ -239,6 +246,7 @@ class SpecialistLeadService:
             claim_text=claim_text,
             source_url=source_url,
             published_at=pub_dt,
+            discovered_at=discovered_at,
             confidence=max(0.0, min(100.0, confidence)),
             verification_status="UNCONFIRMED",
             ingestion_method=ingestion_method,

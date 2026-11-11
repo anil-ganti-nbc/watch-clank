@@ -136,6 +136,18 @@ SOURCE_REGISTRY: dict[str, SourceProfile] = {
 }
 
 
+# Metadata only: these entries do not register collectors, controls or timers.
+for _company, _publisher in {
+    "25284": "株式会社ウエニ貿易",
+    "68154": "株式会社 東栄",
+    "46261": "スウォッチグループジャパン株式会社",
+}.items():
+    _source_id = f"prtimes_jp_{_company}"
+    SOURCE_REGISTRY[_source_id] = SourceProfile(
+        _source_id, "ISSUER_PRESS_RELEASE", 3, "prtimes.jp", f"{_publisher} (PR TIMES issuer release)"
+    )
+
+
 def get_source_profile(source_id: str) -> SourceProfile:
     """Fail loudly on an unregistered source_id rather than silently
     defaulting to a tier — every source that can create a SpecialistLead

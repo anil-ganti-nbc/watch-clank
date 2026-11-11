@@ -41,6 +41,7 @@ SOURCE_TYPES = frozenset(
         "RETAILER_EARLY_LISTING",
         "SOCIAL_LEAKER",
         "COMMUNITY_SIGNAL",
+        "ISSUER_PRESS_RELEASE",
     }
 )
 
@@ -149,7 +150,7 @@ class SpecialistLead(Base):
     __table_args__ = (
         CheckConstraint(
             "source_type IN ('SPECIALIST_PUBLICATION','SPECIALIST_BLOG',"
-            "'RETAILER_EARLY_LISTING','SOCIAL_LEAKER','COMMUNITY_SIGNAL')",
+            "'RETAILER_EARLY_LISTING','SOCIAL_LEAKER','COMMUNITY_SIGNAL','ISSUER_PRESS_RELEASE')",
             name="ck_specialist_lead_source_type",
         ),
         CheckConstraint(
