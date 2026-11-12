@@ -92,7 +92,7 @@ EXPECTED_CADENCE_MINUTES = {
     "seiko_products": 360,
     "seiko_jp_products": 360,
     "casioblog_rss": 45,
-    "gcentral_rss": 45,
+    "gcentral_rss": 15,  # bounded public feed; reduce publication-to-discovery lag
     "plus9time_rss": 360,
     "monochrome_rss": 45,
     "deployant_rss": 90,

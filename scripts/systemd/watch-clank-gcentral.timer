@@ -1,11 +1,10 @@
 [Unit]
-Description=Run Watch Clank's EXPERIMENTAL G-Central specialist lane every 45 minutes
+Description=Run Watch Clank's G-Central specialist lane every 15 minutes
 
 [Timer]
-# Matches the Windows Task Scheduler cadence (WatchClank-GCentral, 45 min --
-# see scripts/install_windows_gcentral_plus9time_tasks.ps1).
+# One public RSS GET. Reduce polling delay after source publication.
 OnBootSec=9min
-OnUnitActiveSec=45min
+OnUnitActiveSec=15min
 Persistent=true
 
 [Install]

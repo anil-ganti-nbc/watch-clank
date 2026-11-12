@@ -1783,6 +1783,21 @@ def test_discord_notifier_noop_without_webhook_configured():
     assert notifier.send_health_alert("test") is False
 
 
+def test_discord_notifier_reports_nas_editorial_authority():
+    from app.core.config import Settings
+    from app.services.discord_notify import DiscordNotifier
+
+    settings = Settings(
+        discord_editorial_webhook_url="https://discord.example/editorial",
+        editorial_notifications_enabled=True,
+        watch_clank_instance="NAS",
+    )
+    assert DiscordNotifier(settings).notification_authority() == "NAS"
+
+    settings.editorial_notifications_enabled = False
+    assert DiscordNotifier(settings).notification_authority() == "NONE"
+
+
 def test_discord_notifier_never_raises_on_network_failure():
     from unittest.mock import patch
 

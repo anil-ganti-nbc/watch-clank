@@ -117,6 +117,8 @@ def _watch_from_product_data(
             "crystal_material_detail": data.get("c_crystalMaterial"),
             "case_width_mm": data.get("c_caseWidth"),
             "model_intro_date": data.get("c_modelIntroDate"),
+            "website_first_received_date": data.get("c_modelWebsiteFirstReceivedDate"),
+            "source_badges": data.get("c_badgeNames"),
             "market_status": data.get("c_marketStatus"),
             "promotional_price": data.get("c_originalPrice") if data.get("c_originalPrice") != str(price) else None,
         }.items()

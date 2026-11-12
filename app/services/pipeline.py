@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.collectors.base import FetchResult
@@ -3397,6 +3398,7 @@ class PipelineService:
                         "offline_kwarg": "sitemap_payload",
                         "default_max_items": 300,
                         "known_urls_from_observations": True,
+                        "refresh_oldest_observed": True,
                     },
                     "casio_jp": {
                         "collector_cls": CasioJPSitemapCollector,
@@ -3407,6 +3409,7 @@ class PipelineService:
                         "offline_kwarg": "sitemap_payload",
                         "default_max_items": 300,
                         "known_urls_from_observations": True,
+                        "refresh_oldest_observed": True,
                     },
                     "casio_europe": {
                         "collector_cls": CasioEuropeSitemapCollector,
@@ -3417,6 +3420,7 @@ class PipelineService:
                         "offline_kwarg": "sitemap_payload",
                         "default_max_items": 300,
                         "known_urls_from_observations": True,
+                        "refresh_oldest_observed": True,
                     },
                     "citizen": {
                         "collector_cls": CitizenProductsCollector,
@@ -3583,23 +3587,25 @@ class PipelineService:
             run_kwargs = {"max_items": effective_max_items}
             if offline_fixture is not None:
                 run_kwargs[cfg["offline_kwarg"]] = offline_fixture
-            if cfg.get("known_urls_from_observations"):
-                run_kwargs["known_product_urls"] = {
-                    source_url
-                    for (source_url,) in self.session.query(SourceObservation.source_url)
-                    .filter(SourceObservation.collector_id == cfg["collector_id"])
-                    .distinct()
-                    .all()
-                }
             known_urls_this_run = None
             if cfg.get("known_urls_from_observations"):
-                known_urls_this_run = {
-                    source_url
-                    for (source_url,) in self.session.query(SourceObservation.source_url)
-                    .filter(SourceObservation.collector_id == cfg["collector_id"])
-                    .distinct()
-                    .all()
-                }
+                if cfg.get("refresh_oldest_observed"):
+                    last_observed = dict(
+                        self.session.query(SourceObservation.source_url, func.max(SourceObservation.observed_at))
+                        .filter(SourceObservation.collector_id == cfg["collector_id"])
+                        .group_by(SourceObservation.source_url)
+                        .all()
+                    )
+                    run_kwargs["last_observed_by_url"] = last_observed
+                    known_urls_this_run = set(last_observed)
+                else:
+                    known_urls_this_run = {
+                        source_url
+                        for (source_url,) in self.session.query(SourceObservation.source_url)
+                        .filter(SourceObservation.collector_id == cfg["collector_id"])
+                        .distinct()
+                        .all()
+                    }
                 run_kwargs["known_product_urls"] = set(known_urls_this_run)
             result = collector.run(**run_kwargs)
             status = result.metadata.get("component_status") or "FAILED"

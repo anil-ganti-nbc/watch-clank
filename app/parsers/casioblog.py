@@ -25,9 +25,9 @@ PARSER_VERSION = "0.1.0"
 # Casio reference patterns, reused conservatively from the family prefixes
 # already validated in app/parsers/casio_news.py — title/category text only.
 _REF_RE = re.compile(
-    r"\b((?:GA|GW|GM|GMW|GBD|GBDH|GWR|GBA|GMA|GMD|GME|GSH|GST|GTS|DW|AW|AE|"
+    r"\b((?:F(?:-?B)?(?=-?\d)|GA|GW|GM|GMW|GBD|GBDH|GWR|GBA|GMA|GMD|GME|GSH|GST|GTS|DW|AW|AE|"
     r"EF|EFB|EFV|EFK|EQB|EQW|EQS|ECB|OCW|OCIS|PRG|PRW|PRT|"
-    r"MRG|MR-G|MTG|MT-G|BSA|BGA|MSG|SHB|SHE)[-]?[A-Z0-9]{2,20})\b",
+    r"MRG|MR-G|MTG|MT-G|BSA|BGA|MSG|SHB|SHE)[-]?(?=[A-Z0-9]*[0-9])[A-Z0-9]{2,20})\b",
     re.IGNORECASE,
 )
 _RUMOR_RE = re.compile(r"\[\s*rumors?\s*\]", re.IGNORECASE)

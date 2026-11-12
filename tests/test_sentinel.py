@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -36,10 +37,68 @@ from app.sentinel.alerting import (
     SentinelAlerter,
     format_sighting,
 )
+from app.sentinel.config import SENTINEL_SOURCES
 from app.sentinel.identity import build_identity, collapse_regional_suffix
 from app.sentinel.runner import SentinelRunner
 from app.services.discord_notify import DeliveryAttempt
 from tests.test_core import db_session, tmp_settings  # noqa: F401 -- shared fixtures
+
+
+@pytest.mark.parametrize("source,fixture_name", [
+    ("timex_in", "timex_india_recent_misses.json"),
+    ("citizen_us_mens_new", "citizen_new_arrivals_at8296.html"),
+])
+def test_added_sources_baseline_silently_then_send_one_receipt_per_new_identity(
+    make_runner, db_session, source, fixture_name  # noqa: F811 -- shared fixture
+):
+    cfg = SENTINEL_SOURCES[source]
+    url = cfg.listing_url_template.format(page=1, offset=0)
+    payload = (Path(__file__).parent / "fixtures" / fixture_name).read_bytes()
+    notifier = RecordingNotifier()
+    # Installation must not replay the September misses as new launches.
+    first = _arm(make_runner, notifier, source, url, payload)
+    assert first.status == "SUCCESS"
+    assert first.summary_metadata["totals"]["alerts_sent"] == 0
+    assert db_session.query(DeliveryReceipt).count() == 0
+    assert db_session.query(SentinelSighting).count() == 0
+    assert db_session.query(SentinelSourceState).filter_by(source=source).one().armed_at is not None
+    # A later, genuinely unseen reference follows the ordinary delivery path.
+    old = b"TWG027900JQ" if source == "timex_in" else b"AT8296-53A"
+    new = b"TWG027901JQ" if source == "timex_in" else b"AT8298-53A"
+    next_payload = payload.replace(old, new)
+    fetch = _fetch_map({url: next_payload})
+    second = run_sweep(make_runner, notifier, only_source=source, fetch=fetch)
+    assert second.summary_metadata["totals"]["alerts_sent"] == 1
+    sighting = db_session.query(SentinelSighting).one()
+    assert sighting.reference == new.decode()
+    assert sighting.region == cfg.region and sighting.alert_state == "SENT"
+    assert db_session.query(DeliveryReceipt).count() == 1
+    third = run_sweep(make_runner, notifier, only_source=source, fetch=fetch)
+    assert third.summary_metadata["totals"]["alerts_sent"] == 0
+    assert db_session.query(DeliveryReceipt).count() == 1
+
+
+def test_new_collaboration_url_alerts_even_when_base_model_is_known(make_runner, db_session):  # noqa: F811
+    cfg = SENTINEL_SOURCES["gshock_us_collaborations"]
+    notifier = RecordingNotifier()
+    # Known DW5600 family cannot swallow a distinct named collaboration URL.
+    _arm(make_runner, notifier, "casio_uk_sitemap", "https://www.casio.com/uk/sitemap.xml",
+        _CASIO_UK_SITEMAP.replace(b"GA-2100-1A1", b"DW5600"))
+    payload = (Path(__file__).parent / "fixtures" / "gshock_us_collaboration_cards.html").read_bytes()
+    _arm(make_runner, notifier, cfg.name, cfg.listing_url_template, payload)
+    assert not notifier.calls
+    new_card = b'<a href="/us/products/collection/limited/new-dw5600-collab/" aria-label="New DW5600 collaboration"></a>'
+    payload = payload.replace(b"</main>", new_card + b"</main>")
+    fetch = _fetch_map({cfg.listing_url_template: payload})
+    run = run_sweep(make_runner, notifier, only_source=cfg.name, fetch=fetch)
+    assert run.summary_metadata["totals"]["alerts_sent"] == 1
+    sighting = db_session.query(SentinelSighting).one()
+    assert sighting.reference is None
+    assert sighting.source_url.endswith("/new-dw5600-collab/")
+    assert db_session.query(DeliveryReceipt).count() == 1
+    third = run_sweep(make_runner, notifier, only_source=cfg.name, fetch=fetch)
+    assert third.summary_metadata["totals"]["alerts_sent"] == 0
+    assert db_session.query(DeliveryReceipt).count() == 1
 
 # ---------------------------------------------------------------------------
 # offline fixtures

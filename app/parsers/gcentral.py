@@ -30,7 +30,7 @@ PARSER_VERSION = "0.1.0"
 # Found live during this sprint's isolated validation against the real feed
 # (title: "G-Shock is now on Roblox with new obby game and virtual items").
 _REF_RE = re.compile(
-    r"\b((?:GA|GW|GM|GMW|GBD|GBDH|GWR|GBA|GMA|GMD|GME|GSH|GST|GTS|DW|AW|AE|"
+    r"\b((?:F(?:-?B)?(?=-?\d)|GA|GW|GM|GMW|GBD|GBDH|GWR|GBA|GMA|GMD|GME|GSH|GST|GTS|DW|AW|AE|"
     r"EF|EFB|EFV|EFK|EQB|EQW|EQS|ECB|OCW|OCIS|PRG|PRW|PRJ|PRT|"
     r"MRG|MR-G|MTG|MT-G|BSA|BGA|MSG|SHB|SHE)[-]?(?=[A-Z0-9]*[0-9])[A-Z0-9]{2,20})\b",
     re.IGNORECASE,
