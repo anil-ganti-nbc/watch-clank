@@ -3,6 +3,10 @@
 **Shipped:** 2026-09-08/09 (branch `feature/horology-sentinel`)
 **Status:** implemented + tested; NOT deployed, NOT scheduled anywhere. Every activation step below is an explicit operator action.
 
+September 30 source additions and NAS-specific deployment evidence supersede
+the original September 8 activation status. See
+[RECENT_MISSES_REPAIR_20260930.md](RECENT_MISSES_REPAIR_20260930.md).
+
 ## What it is
 
 A cheap, deterministic first-stage tripwire: every 15 minutes it polls first-party
@@ -23,7 +27,7 @@ judgement; it can correlate sightings later via `sentinel_sightings.identity_key
 
 ```text
 manufacturer/source (declarative registry: app/sentinel/config.py)
-  -> adapter poll (app/sentinel/adapters.py: shopify_products | sitemap)
+  -> adapter poll (shopify_products | sitemap | citizen_search | gshock_collaborations)
   -> identity (app/sentinel/identity.py: reference extraction + normalization
                + global cross-region dedup key)
   -> store (app/sentinel/store.py: sentinel_identities unique-constraint dedup,
@@ -53,22 +57,43 @@ manufacturer/source (declarative registry: app/sentinel/config.py)
 |---|---|---|---|
 | `timex_us` | `https://www.timex.com/products.json` page 1 | US | shopify_products |
 | `timex_uk` | `https://timex.co.uk/products.json` page 1 | UK | shopify_products |
+| `timex_in` | `https://shop.timexindia.com/products.json` page 1 | IN | shopify_products |
+| `citizen_us_mens_new` | Citizen US `mens-new-watches`, 48 hits/page | US | citizen_search (1 request normally; at most 4) |
+| `citizen_us_womens_new` | Citizen US `womens-new-watches`, 48 hits/page | US | citizen_search (1 request normally; at most 4) |
 | `seiko_us` | `https://seikousa.com/products.json` page 1 | US | shopify_products |
 | `casio_uk_sitemap` | `casio.com/uk/sitemap.xml` | UK | sitemap (reuses casio_uk_sitemap collector's parser) |
+| `gshock_us_collaborations` | `gshock.casio.com/us/collaborations/` | US | gshock_collaborations (campaign URL identities) |
 | `casio_jp_sitemap` | `casio.com/jp/sitemap/watches.xml` (~17.8k URLs) | JP | sitemap, **60-minute cadence** |
 | `citizen_eu_sitemap` | `citizenwatch.eu` product sitemap | EU | sitemap (generic) |
 
 Deliberately absent: `citizenwatch.co.uk` (robots explicitly disallows
 ClaudeBot + Cloudflare 403 — must never be added), Casio US sitemap (not
-published yet — see WATCH_REGIONAL_GAP_MAP.md), Citizen US (HTML search API,
-not a cheap machine-readable feed — declarative follow-up).
+published yet — see WATCH_REGIONAL_GAP_MAP.md). Citizen US new-arrivals
+hydration was verified on September 30: 30 men's and 18 women's hits,
+including AT8296-53A. Full-catalogue discovery stays on its existing lane.
 
 Ordering evidence (2026-09-08, Hetzner vantage): the plain unscoped
 `/products.json` endpoint returns newest-first on all three stores; the
 collection-scoped variant is NOT reliably ordered and must not be swapped in.
 Page 1 only (250 products) is the documented tripwire limitation: an item
 pushed past position 250 by a mass catalogue import would be caught by the
-normal Horology Clank pipeline instead.
+normal Horology Clank pipeline instead where such a lane exists. Timex
+India currently has only the Sentinel lane: page-2+ coverage is unknown.
+The India feed passed newest-first and robots checks on September 30 and
+both missed India SKUs appeared on page 1. UJ/JQ suffixes are preserved.
+
+Citizen new-arrivals discovery verifies the reported total, follows at
+most four pages, and rejects incomplete, malformed, changing-total or
+over-budget listings before admitting identities. Its first successful
+complete poll silently baselines each new source; no historical alert replay.
+
+The US collaboration archive uses first-party campaign URLs as identities
+without inferring SKUs. New campaigns using a known base family (e.g.
+DW5600) can therefore produce a sighting. Only campaign links in the
+archive's main content are admitted; navigation, foreign domains and
+figures are excluded. All existing campaign URLs silently baseline. This
+archive did not list BAIT Yamagata on the audit date, so that specific
+earlier signal remains uncovered.
 
 ## Identity / deduplication logic (exact)
 

@@ -36,16 +36,18 @@ extra_specs as weak recency evidence; it is NOT a publication timestamp.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from app.collectors.base import CollectorRunResult, DiscoveredItem, FetchResult
 from app.collectors.http_util import component_status_from_fetches, fetch_url, is_blocked_response
+from app.collectors.refresh_selection import order_known_refresh
 
 COLLECTOR_ID = "casio_jp_sitemap"
 COLLECTOR_VERSION = "0.1.0"
 REGION = "JP"
 TRUST_SCORE = 70.0  # same evidence class as casio_uk_sitemap: URL+lastmod only
 JP_WATCHES_SITEMAP_URL = "https://www.casio.com/jp/sitemap/watches.xml"
-MAX_CANDIDATES = 3000
+MAX_CANDIDATES = 25000
 
 _URL_BLOCK_RE = re.compile(r"<url>\s*<loc>([^<]+)</loc>\s*(?:<lastmod>([^<]+)</lastmod>\s*)?</url>", re.IGNORECASE)
 _REFERENCE_RE = re.compile(r"/watches/[a-z]+/product\.([A-Za-z0-9-]+?)/?$", re.IGNORECASE)
@@ -89,6 +91,7 @@ class CasioJPSitemapCollector:
         max_items: int | None = 300,
         sitemap_payload: bytes | None = None,
         known_product_urls: set[str] | None = None,
+        last_observed_by_url: dict[str, datetime] | None = None,
     ) -> CollectorRunResult:
         result = CollectorRunResult(
             collector_id=COLLECTOR_ID, collector_version=COLLECTOR_VERSION, region=REGION, trust_score=TRUST_SCORE
@@ -115,7 +118,7 @@ class CasioJPSitemapCollector:
 
         known = known_product_urls or set()
         new_items = [i for i in discovered if i.url not in known]
-        known_items = [i for i in discovered if i.url in known]
+        known_items = order_known_refresh([i for i in discovered if i.url in known], last_observed_by_url)
         pending = (new_items + known_items) if known else discovered
         deferred = pending[max_items:] if max_items is not None else []
         if max_items is not None:
@@ -127,11 +130,10 @@ class CasioJPSitemapCollector:
         # Reported, never silently dropped -- the pipeline writes it to the
         # ledger. MAX_CANDIDATES truncation is called out separately from
         # the per-run budget because it is a HARD ceiling on what is even
-        # considered: this sitemap carries ~17,800 URLs against a 3,000
-        # candidate cap, so ~14,800 are invisible to every run regardless of
-        # budget or prioritization.
+        # considered. Parse the full normal catalogue before selection;
+        # the 25,000 ceiling guards against pathological source growth.
         result.metadata["selection"] = {
-            "policy": "unseen_first" if known else "document_order",
+            "policy": ("unseen_first_oldest_observed" if last_observed_by_url is not None else "unseen_first") if known else "document_order",
             "candidate_count": len(discovered),
             "selected_count": len(pending),
             "deferred_count": len(deferred),

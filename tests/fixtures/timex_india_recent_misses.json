@@ -1,0 +1,64 @@
+{
+  "products": [
+    {
+      "id": 10551975084321,
+      "title": "Timex Main Street Round 36mm Black Dial Analog Men Watch - TWG027900JQ",
+      "handle": "timex-main-street-round-36mm-black-dial-analog-men-watch-twg027900jq",
+      "product_type": "Watch",
+      "vendor": "Timex",
+      "published_at": "2026-09-22T13:56:50+05:30",
+      "created_at": "2026-09-18T11:58:48+05:30",
+      "variants": [
+        {
+          "id": 53524223525153,
+          "title": "Default Title",
+          "option1": "Default Title",
+          "option2": null,
+          "option3": null,
+          "sku": "TWG027900JQ",
+          "requires_shipping": true,
+          "taxable": true,
+          "featured_image": null,
+          "available": true,
+          "price": "11995.00",
+          "grams": 0,
+          "compare_at_price": null,
+          "position": 1,
+          "product_id": 10551975084321,
+          "created_at": "2026-09-18T11:58:48+05:30",
+          "updated_at": "2026-09-30T12:36:46+05:30"
+        }
+      ]
+    },
+    {
+      "id": 10551974625569,
+      "title": "Timex Waterbury Round 39mm Blue Dial Analog Men Watch - TW2Y70600UJ",
+      "handle": "timex-waterbury-round-39mm-blue-dial-analog-men-watch-tw2y70600uj",
+      "product_type": "Watch",
+      "vendor": "Timex",
+      "published_at": "2026-09-22T13:56:35+05:30",
+      "created_at": "2026-09-18T11:58:23+05:30",
+      "variants": [
+        {
+          "id": 53524223033633,
+          "title": "Default Title",
+          "option1": "Default Title",
+          "option2": null,
+          "option3": null,
+          "sku": "TW2Y70600UJ",
+          "requires_shipping": true,
+          "taxable": true,
+          "featured_image": null,
+          "available": true,
+          "price": "21995.00",
+          "grams": 0,
+          "compare_at_price": null,
+          "position": 1,
+          "product_id": 10551974625569,
+          "created_at": "2026-09-18T11:58:23+05:30",
+          "updated_at": "2026-09-30T12:36:46+05:30"
+        }
+      ]
+    }
+  ]
+}

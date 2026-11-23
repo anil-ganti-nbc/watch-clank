@@ -25,7 +25,7 @@ $SqlitePath = Join-Path $RepoRoot "data\watch_clank.db"
 $CurrentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 $Lanes = @(
-    @{ Name = "gcentral";  Task = "WatchClank-GCentral";  Interval = 45 },
+    @{ Name = "gcentral";  Task = "WatchClank-GCentral";  Interval = 15 },
     @{ Name = "plus9time"; Task = "WatchClank-Plus9Time"; Interval = 360 }
 )
 

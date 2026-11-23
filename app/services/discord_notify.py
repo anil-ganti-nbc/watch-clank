@@ -231,7 +231,7 @@ class DiscordNotifier:
         return self._post_detailed(self.settings.discord_health_webhook_url, text, lane="health").accepted
 
     def notification_authority(self) -> str:
-        """WINDOWS / HETZNER / UNLABELED / NONE — never a raw webhook URL.
+        """WINDOWS / HETZNER / NAS / UNLABELED / NONE — never a raw webhook URL.
 
         Reports which *labeled instance* (see Settings.watch_clank_instance)
         would actually send an editorial alert right now, so an operator can
@@ -247,6 +247,8 @@ class DiscordNotifier:
         if not self.editorial_enabled:
             return "NONE"
         label = (self.settings.watch_clank_instance or "").strip().upper()
+        if label == "NAS":
+            return "NAS"
         if "HETZNER" in label:
             return "HETZNER"
         if "WINDOWS" in label:

@@ -2,7 +2,8 @@
 
 Contract:
 - One poll = ONE discovery request (plus at most one index-child fetch for
-  sitemaps). No product-page fetches: a sitemap/JSON feed must identify a
+  sitemaps). Citizen new-arrivals use at most four 48-hit listing pages,
+  with completeness checked before admitting anything. No product-page fetches: a feed must identify a
   candidate on its own, exactly like the sitemap_family collectors.
 - Adapters never touch the database and never decide novelty -- they only
   surface (reference?, title?, url) tuples for the identity stage.
@@ -16,10 +17,14 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
+from selectolax.parser import HTMLParser
 
 from app.collectors.base import FetchResult
 from app.collectors.casio_jp_sitemap import CasioJPSitemapCollector
 from app.collectors.casio_uk_sitemap import CasioUKSitemapCollector
+from app.collectors.citizen_products import SEARCH_PAGE_SIZE, CitizenProductsCollector
 from app.collectors.http_util import fetch_url, is_blocked_response
 from app.collectors.sitemap_family import SitemapDeltaCollector, SitemapDeltaConfig
 from app.core.logging import get_logger
@@ -183,9 +188,94 @@ class SitemapAdapter:
         return None
 
 
+class CitizenSearchAdapter:
+    """Structured first-party new-arrivals listings; no detail requests.
+
+    Never baseline a partial catalogue: overflow, malformed pages and
+    later-page failures fail the source poll without admitting candidates.
+    The normal live shape is one page per source.
+    """
+
+    MAX_PAGES = 4
+
+    def poll(self, config: SentinelSourceConfig, fetch_fn: FetchFn) -> PollOutcome:
+        assert config.listing_url_template
+        parser = CitizenProductsCollector()
+        candidates: dict[str, Candidate] = {}
+        expected_total = None
+        for page in range(self.MAX_PAGES):
+            offset = page * SEARCH_PAGE_SIZE
+            url = config.listing_url_template.format(offset=offset)
+            fr = fetch_fn(url)
+            requests = page + 1
+            if not fr.success or not fr.payload:
+                status = "BLOCKED" if is_blocked_response(fr.status_code, fr.payload, fr.error) else "FAILED"
+                return PollOutcome([], status, fr.error or f"HTTP {fr.status_code}", requests)
+            items, total = parser.parse_search_page(fr.payload.decode("utf-8", errors="ignore"))
+            if total is None or total < 0 or (expected_total is not None and total != expected_total):
+                return PollOutcome([], "FAILED", "missing or changing Citizen listing total", requests)
+            expected_total = total
+            if total > min(config.max_candidates, self.MAX_PAGES * SEARCH_PAGE_SIZE):
+                return PollOutcome([], "FAILED", "Citizen listing exceeds bounded discovery budget", requests)
+            for item in items:
+                data = item.metadata.get("product_dict") or {}
+                candidates[item.url] = Candidate(
+                    source=config.name, manufacturer=config.manufacturer, region=config.region,
+                    url=item.url, reference_raw=item.reference_hint, title=item.title,
+                    metadata={"website_first_received_date": data.get("c_modelWebsiteFirstReceivedDate")},
+                )
+            if offset + SEARCH_PAGE_SIZE >= total:
+                if len(candidates) != total:
+                    return PollOutcome([], "FAILED", "incomplete Citizen listing", requests)
+                return PollOutcome(list(candidates.values()), "SUCCESS" if candidates else "ZERO_ITEMS", request_count=requests)
+            if len(items) != SEARCH_PAGE_SIZE:
+                return PollOutcome([], "FAILED", "short Citizen listing page before reported end", requests)
+        return PollOutcome([], "FAILED", "Citizen pagination budget exhausted", self.MAX_PAGES)
+
+
+class GShockCollaborationsAdapter:
+    """One official archive request; linked campaign URLs, not inferred SKUs.
+
+    Deduplicate image/text links and reject foreign hosts, navigation and
+    non-watch content. A new campaign using a known base model is still
+    a distinct URL sighting. Existing archive entries silently baseline.
+    """
+
+    _CAMPAIGN_PATH = re.compile(r"/us/(?:products/collection/limited|40th/products)/[a-z0-9_-]+/?$", re.I)
+
+    def poll(self, config: SentinelSourceConfig, fetch_fn: FetchFn) -> PollOutcome:
+        assert config.listing_url_template
+        fr = fetch_fn(config.listing_url_template)
+        if not fr.success or not fr.payload:
+            status = "BLOCKED" if is_blocked_response(fr.status_code, fr.payload, fr.error) else "FAILED"
+            return PollOutcome([], status, fr.error or f"HTTP {fr.status_code}", 1)
+        tree = HTMLParser(fr.payload)
+        candidates: dict[str, Candidate] = {}
+        for anchor in tree.css("main a[href]"):
+            url = urlsplit(urljoin(config.listing_url_template, anchor.attributes["href"]))
+            if url.scheme != "https" or url.netloc != "gshock.casio.com" or not self._CAMPAIGN_PATH.fullmatch(url.path):
+                continue
+            clean_url = urlunsplit((url.scheme, url.netloc, url.path.rstrip("/") + "/", "", ""))
+            title_node = anchor.css_first(".cmp-content_panel__title")
+            title = anchor.attributes.get("aria-label") or (title_node.text() if title_node else None)
+            if clean_url in candidates and not title:
+                continue  # text/button duplicates must not erase a card's real title
+            candidates[clean_url] = Candidate(
+                source=config.name, manufacturer=config.manufacturer, region=config.region,
+                url=clean_url, title=_clean_title(title),
+            )
+        if not candidates:
+            return PollOutcome([], "FAILED", "no recognizable G-SHOCK collaboration cards", 1)
+        if len(candidates) > config.max_candidates:
+            return PollOutcome([], "FAILED", "G-SHOCK collaboration archive exceeds budget", 1)
+        return PollOutcome(list(candidates.values()), "SUCCESS", request_count=1)
+
+
 _ADAPTORS = {
     "shopify_products": ShopifyProductsAdapter(),
     "sitemap": SitemapAdapter(),
+    "citizen_search": CitizenSearchAdapter(),
+    "gshock_collaborations": GShockCollaborationsAdapter(),
 }
 
 
